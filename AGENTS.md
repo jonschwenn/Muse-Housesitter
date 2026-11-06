@@ -84,6 +84,21 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 6. **Commit identity.** Commits are authored and committed as
    `Jon Schwenn <jonschwenn@gmail.com>`. Check `git config user.email`
    before committing. Never commit as a machine default user.
+7. **Credit the agents that did the work.** Where practical, split a
+   change into one commit per contributor. Each commit ends with a
+   co-author trailer for only the agents that wrote that commit:
+   - Claude: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
+     (links to GitHub's `@claude`)
+   - Codex: `Co-authored-by: Codex <noreply@openai.com>` (links to
+     GitHub's `@codex`)
+   - Muse Spark: `Co-authored-by: Muse Spark 1.3 <muse-spark@agents.invalid>`
+     (no official GitHub account yet; `.invalid` can never belong to
+     anyone)
+
+   Never invent an email for an agent: an address someone else owns
+   credits them instead. Use only addresses confirmed to link to the
+   vendor's own account, or a `.invalid` one. Update the model name when
+   the model changes.
 
 ## Testing rules
 
