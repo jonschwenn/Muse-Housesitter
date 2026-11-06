@@ -115,10 +115,15 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: git -C head worktree add "$GITHUB_WORKSPACE/base" "$BASE_SHA"
+      # Screenshots use the Google Chrome that GitHub's runner image ships
+      # (updated weekly, like real users' Chrome), not a Playwright-bundled
+      # browser, so the job doesn't depend on Playwright supporting the
+      # runner's Ubuntu release. Base and head are captured in this one job
+      # with the same Chrome, so the before/after comparison stays fair.
       - name: Install the UI capture dependencies
         run: |
           python -m pip install -e "./head[ui]"
-          python -m playwright install --with-deps chromium
+          google-chrome --version
       - name: Capture the web UI
         env:
           REPO: ${{ github.repository }}
@@ -128,7 +133,8 @@ jobs:
           ui_exit=0
           python head/scripts/ui_evidence.py \
             --base-tree base --head-tree head --out-dir ui_out \
-            --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" || ui_exit=$?
+            --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --browser-channel chrome || ui_exit=$?
           echo "UI_EXIT=$ui_exit" >> "$GITHUB_ENV"
       # Text only: the privileged publisher (evidence-publish.yml, running
       # from main) rebuilds the Web UI section from the validated manifest

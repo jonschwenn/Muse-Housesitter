@@ -412,8 +412,16 @@ def check_page(page, view_id: str, shot: bytes) -> list:
     return problems
 
 
-def capture_side(tree: Path, out_dir: Path, side: str, check: bool) -> dict:
-    """Serve one tree and capture every fixture x view. Returns name -> record."""
+def capture_side(
+    tree: Path, out_dir: Path, side: str, check: bool, channel: str | None = None
+) -> dict:
+    """Serve one tree and capture every fixture x view. Returns name -> record.
+
+    ``channel`` picks an installed browser (e.g. "chrome") instead of
+    Playwright's bundled Chromium. Base and head are always captured with
+    the same browser in the same run, so the comparison stays fair whatever
+    its version.
+    """
     from playwright.sync_api import sync_playwright  # dev/CI-only extra
 
     records: dict = {}
@@ -431,7 +439,8 @@ def capture_side(tree: Path, out_dir: Path, side: str, check: bool) -> dict:
     try:
         wait_ready(port)
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
+            browser = playwright.chromium.launch(channel=channel)
+            print(f"ui_evidence: {side} captured with {channel or 'chromium'} {browser.version}")
             try:
                 for fixture in fixtures_in(tree):
                     for view_id, page_file, width, height, scheme, full, _ in VIEWS:
@@ -813,6 +822,11 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--repo", required=True, help="owner/name of the GitHub repo")
     parser.add_argument("--pr", type=int, required=True, help="pull request number")
     parser.add_argument("--head-sha", required=True, help="head commit SHA (40 hex)")
+    parser.add_argument(
+        "--browser-channel",
+        default=None,
+        help="use an installed browser (e.g. chrome) instead of Playwright's bundled Chromium",
+    )
     args = parser.parse_args(argv)
     try:
         refuse_if_real_setup()
@@ -829,9 +843,13 @@ def main(argv: list | None = None) -> int:
     head_web = has_web(args.head_tree)
     head_records: dict = {}
     if base_web:
-        capture_side(args.base_tree, args.out_dir, "base", check=False)
+        capture_side(
+            args.base_tree, args.out_dir, "base", check=False, channel=args.browser_channel
+        )
     if head_web:
-        head_records = capture_side(args.head_tree, args.out_dir, "head", check=True)
+        head_records = capture_side(
+            args.head_tree, args.out_dir, "head", check=True, channel=args.browser_channel
+        )
     manifest = build_manifest(args.base_tree, args.head_tree, args.out_dir, head_records)
     (args.out_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=1) + "\n")
     budget = 60_000  # pr_evidence.py re-trims against the shared budget on merge

@@ -633,6 +633,9 @@ def test_validator_rejects_an_oversized_manifest(tmp_path, monkeypatch):
 
 
 @needs_browser
+@pytest.mark.skipif(
+    not (ROOT / "web" / "index.html").is_file(), reason="needs the dashboard in web/"
+)
 def test_capture_head_without_base_web(tmp_path):
     base = tmp_path / "base"
     base.mkdir()
@@ -671,3 +674,12 @@ def test_gh_api_calls_with_fields_say_get_or_an_explicit_method():
         for line in joined.splitlines():
             if "gh api" in line and re.search(r"\s-[fF]\s", line):
                 assert re.search(r"(--method|-X)\s+[A-Z]+", line), (name, line.strip())
+
+
+def test_evidence_job_uses_the_runners_chrome():
+    # Playwright's bundled browsers only support some Ubuntu releases (1.60
+    # refuses ubuntu-26.04); the runner's own Chrome has no such tie.
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    job = text[text.index("\n  evidence:\n"):]
+    assert "playwright install" not in job
+    assert "--browser-channel chrome" in job
