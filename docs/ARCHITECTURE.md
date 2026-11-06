@@ -41,9 +41,9 @@ supplies them:
 | **`housesitter.describe`** | Returns the list of installed modules and each module's `SKILL.md`, so Muse gets its guidance from the device, versioned with the code. |
 | **Paging via `get`** | Full results are saved locally. When a result is truncated, `more` gives the exact `get` call for the next page. `get` applies the same identifier policy, so paging returns exactly what the first page would. |
 
-Housesitter does **not** use `musegadget send-user-msg` in v1. Pushing
-messages to Muse would mean background activity, which rule 3 rules out.
-**[OPEN, D7]**
+Housesitter does **not** use `musegadget send-user-msg` in v1. Muse
+decides when to collect and when to look (rule 3), so pushing messages to
+Muse would reverse that relationship. **[OPEN, D7]**
 
 ### 2.2 SDK constraints we design to
 
@@ -217,12 +217,19 @@ means that what goes into an envelope leaves the house.
 | Prompt injection via a device name like `"ignore previous instructions…"`. | Names are typed data fields, sanitised and capped. SKILL.md tells Muse they are untrusted. Names never appear in `description` strings. |
 | Self-signed controller certificate. | Pin the SHA-256 fingerprint (preferred) or a CA file. `insecure: true` works, but adds a warning to every envelope. |
 | Tampered drop-in files. | The SDK refuses non-root-owned or writable files. `install-commands` writes root-owned 644 files and `doctor` checks them. |
+| Anyone who can reach the dashboard port sees device names, MACs, and IPs (D14). | Accepted for a personal tool, and stated in README. It binds to `127.0.0.1` by default, and the owner chooses a LAN address on purpose. |
+| A malicious website reads the dashboard through the owner's browser by DNS rebinding. | The dashboard server checks the `Host` header against an allow-list (DASHBOARD.md §5). |
+| Hostile device names reach the dashboard as HTML. | The page inserts text only, and a CSP with Trusted Types blocks inline script and string-to-HTML assignment. A hostile fixture tests every text field. |
 | Saved data on a lost SD card. | Out of scope for v1 (no encryption at rest). The data dir is 700, and retention bounds the volume. |
 
 ## 9. What is deliberately not here
 
-The local web hub, the inventory editor, the what-if throughput model, the
-exception rules, and the change-log engine from the previous draft
+The inventory editor, the what-if throughput model, the exception rules,
+and the change-log engine from the previous draft
 (`.context/SPEC-v0-hub-draft.md`) are dropped. They are analysis, and
 analysis is Muse's job. Any of them can return later as a module or a
 SKILL.md recipe if real use calls for it.
+
+The web hub came back in a narrower form: a **read-only dashboard** that
+presents saved results without analysing them (D14). See
+[`DASHBOARD.md`](DASHBOARD.md).

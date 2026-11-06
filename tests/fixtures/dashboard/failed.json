@@ -1,0 +1,22 @@
+{
+  "schema": "housesitter.dashboard/1",
+  "generated_at": "2026-11-06T15:30:05Z",
+  "housesitter_version": "0.1.0.dev0",
+  "house_label": "Example house",
+  "modules": [
+    {
+      "id": "unifi_wifi",
+      "title": "UniFi WiFi radio metrics",
+      "version": "0.1.0.dev0",
+      "status": "error",
+      "last_success_at": null,
+      "last_attempt_at": "2026-11-06T15:30:00Z",
+      "last_error": {
+        "code": "upstream_auth",
+        "message": "The controller rejected the username or password."
+      }
+    }
+  ],
+  "muse_note": null,
+  "unifi_wifi": null
+}

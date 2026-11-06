@@ -118,7 +118,9 @@ Use this checklist. Every item gets *yes*, *no (finding)*, or *n/a (why)*.
 **Read-only**
 - [ ] Every entry in `http_allow` is a read, or a login/logout that the API needs.
 - [ ] No entry is broader than it needs to be (no `.*`, no wildcard methods).
-- [ ] Nothing shells out, writes outside the data dir, or opens sockets directly.
+- [ ] Nothing shells out, writes outside the data dir, or opens sockets
+      directly. The one exception is the dashboard server's listening
+      socket (below).
 
 **Secrets**
 - [ ] Secrets come only from `ctx.secret`.
@@ -146,6 +148,16 @@ Use this checklist. Every item gets *yes*, *no (finding)*, or *n/a (why)*.
       envelope.
 - [ ] The account the docs recommend has the least privilege the upstream
       offers (e.g. UniFi View Only).
+
+**Dashboard server** (when it changes)
+- [ ] GET and HEAD only. Every other method returns 405.
+- [ ] It never contacts upstream, never triggers collection, and opens
+      files read-only.
+- [ ] The default bind is `127.0.0.1`. Unexpected `Host` headers get 421.
+- [ ] No directory listings and no dotfiles.
+- [ ] The CSP and other headers match DASHBOARD.md §5 exactly.
+- [ ] The front end passes the `hostile` fixture: no script runs, and no
+      markup is rendered from data.
 
 **Install surface**
 - [ ] Drop-ins are root-owned 644, and `exec` is an absolute path to the

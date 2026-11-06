@@ -30,13 +30,24 @@ recommendations, and you decide what to change.
 
 New data sources are added as modules. See [`docs/MODULES.md`](docs/MODULES.md).
 
+## Dashboard
+
+**Planned.** A read-only dashboard in your browser, served by Housesitter on
+the Pi. It shows what Muse last collected, and may later drive an e-ink
+display. By default it listens on `127.0.0.1:8080`, so only the Pi itself can
+see it. To view it from other devices, set a LAN address in the config. It
+is read-only and has no login, so **anyone who can reach that address can
+see your device names, MACs, and IPs.** Choose an address only trusted
+devices can reach. See [`docs/DASHBOARD.md`](docs/DASHBOARD.md).
+
 ## Principles
 
 - **Read-only.** Housesitter never changes anything it observes.
 - **Gathers, doesn't judge.** It returns labelled measurements with units,
   and Muse interprets them.
-- **On demand.** Nothing runs in the background. Muse calls it when it wants
-  to look.
+- **Muse decides when to look.** Housesitter installs no schedules. Muse
+  runs a module whenever it wants fresh data, and analyses the changes
+  over time itself.
 - **Personal use.** It's built for your own network and your own Muse.
   Results include real device names, MACs, and IPs, so Muse can match them
   to what you see in UniFi.

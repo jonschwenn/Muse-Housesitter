@@ -33,9 +33,13 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
    context, and provenance. They don't score, rank, diagnose, or recommend.
    Muse does that. Light, lossless shaping is fine: unit conversion, grouping
    records by AP, counts. Judgement belongs to Muse.
-3. **On demand.** Nothing runs in the background in v1. No daemons, no
-   polling loops, no cron entries installed by the tool. Muse can schedule
-   calls itself.
+3. **Muse decides when to collect.** Nothing contacts an upstream system or
+   gathers data unless Muse (or the owner) runs a command. Housesitter
+   installs no schedules, cron entries, or polling loops: how often to
+   collect is Muse's decision, because Muse analyses the deltas and trends.
+   One long-running process is allowed: the **read-only dashboard server**
+   (`docs/DASHBOARD.md`). It only serves saved results. It never contacts
+   upstream, never triggers collection, and never writes (D14).
 4. **Stdlib-only runtime, Python ≥ 3.9.** This matches the SDK's floor
    (Raspberry Pi OS Bullseye). Runtime dependencies need a DECISIONS entry.
    Dev-only tools (pytest, ruff) are fine.
@@ -169,15 +173,17 @@ results. It follows the SDK's community-skill shape (YAML `name` and
 ```
 AGENTS.md  CLAUDE.md  README.md  pyproject.toml
 .github/   workflows/ci.yml  rulesets/protect-main.json  pull_request_template.md
-docs/      ARCHITECTURE.md  MODULES.md  REVIEW.md  DECISIONS.md  GITHUB.md  modules/<id>.md
-scripts/   pr_evidence.py
+docs/      ARCHITECTURE.md  MODULES.md  REVIEW.md  DECISIONS.md  GITHUB.md  DASHBOARD.md
+           modules/<id>.md
+scripts/   pr_evidence.py  make_dashboard_fixtures.py  dev_dashboard.py
+web/       dashboard front end: index.html, eink.html, static assets (Planned)
 src/housesitter/
   sdk.py              public module API: Module, Command, Param, Context, Result
   core/               CLI, registry, config, secrets, http, envelope, storage, dropins
   modules/<id>/       __init__.py (the Module), SKILL.md, normalise.py, ...
 tests/
-  conformance/  modules/<id>/  fixtures/<id>/  live/  evidence/scenarios.json
-  test_hygiene.py
+  conformance/  modules/<id>/  fixtures/<id>/  fixtures/dashboard/  live/
+  evidence/scenarios.json  test_hygiene.py  test_dashboard_contract.py
 ```
 
 Local setup: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`,
