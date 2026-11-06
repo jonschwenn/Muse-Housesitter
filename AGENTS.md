@@ -100,14 +100,32 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 - **Regression first.** A bug fix starts with a failing test that
   reproduces the bug.
 - **Repo hygiene scan** (`tests/test_hygiene.py`) fails if:
-  - a MAC-shaped string isn't in an invented range: `02:00:00:xx:xx:xx`
-    (locally administered, for private-MAC cases) or
-    `00:00:5e:00:53:xx` (RFC 7042 documentation range, for globally
-    unique cases)
+  - a MAC isn't in an invented range: `02:00:00:xx:xx:xx` (locally
+    administered, for private-MAC cases) or `00:00:5e:00:53:xx` (RFC 7042
+    documentation range, for globally unique cases). Formats checked:
+    `02:00:…`, `02-00-…`, `0200.0000.0001`. In `tests/fixtures/**/*.json`,
+    12 bare hex digits count too, unless they are all digits (a counter).
   - an IPv4 address is outside the documentation ranges (`192.0.2.0/24`,
-    `198.51.100.0/24`, `203.0.113.0/24`)
+    `198.51.100.0/24`, `203.0.113.0/24`), loopback, `0.0.0.0`, or `255.x`
+    (netmasks); or an IPv6 address is outside `2001:db8::/32`, `::1`, and
+    multicast
   - an SSID-looking fixture value doesn't end in `-example`
-  - a file contains a likely secret
+  - a file contains a likely secret:
+    - a token format (Muse SDK, GitHub, AWS, Slack, JSON web token), a
+      private key, credentials in a URL, a bearer token, a session cookie,
+      or a CSRF header with a value
+    - a setting whose name is a UniFi `x_…` field, or *ends in* password,
+      passwd, passphrase, secret, token, api key, auth key, or `_key`, with
+      a quoted literal value of 8+ characters. In every file except `.py`,
+      an unquoted value at the start of a line counts too (YAML, INI, env,
+      Markdown). In Python an unquoted value is code, so it doesn't count.
+    - Allowed: values that only *name* or *point to* a secret
+      (`unifi_password`, `X-CSRF-Token`, `~/.config/…`, `${{ … }}`, `$VAR`,
+      `<placeholder>`), common placeholders (`changeme`, `redacted`,
+      `xxxx`), and planted fixture values containing `PLANTED-SECRET`.
+  - A line containing `hygiene: ok` is skipped entirely, for every check,
+    including secrets. Use it only for a genuine false positive, such as a
+    four-part version number. Reviewers check every use.
 - **CI** runs ruff and the full suite on Python 3.9 and the newest Python,
   in one workflow (`.github/workflows/ci.yml`). `main` is protected by a
   ruleset that requires a PR and a green `ci-ok` check
@@ -150,14 +168,20 @@ results. It follows the SDK's community-skill shape (YAML `name` and
 
 ```
 AGENTS.md  CLAUDE.md  README.md  pyproject.toml
-docs/      ARCHITECTURE.md  MODULES.md  REVIEW.md  DECISIONS.md  modules/<id>.md
+.github/   workflows/ci.yml  rulesets/protect-main.json  pull_request_template.md
+docs/      ARCHITECTURE.md  MODULES.md  REVIEW.md  DECISIONS.md  GITHUB.md  modules/<id>.md
+scripts/   pr_evidence.py
 src/housesitter/
   sdk.py              public module API: Module, Command, Param, Context, Result
   core/               CLI, registry, config, secrets, http, envelope, storage, dropins
   modules/<id>/       __init__.py (the Module), SKILL.md, normalise.py, ...
 tests/
-  conformance/  modules/<id>/  fixtures/<id>/  live/  test_hygiene.py
+  conformance/  modules/<id>/  fixtures/<id>/  live/  evidence/scenarios.json
+  test_hygiene.py
 ```
+
+Local setup: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`,
+then `.venv/bin/ruff check .` and `.venv/bin/pytest`.
 
 ## Before you hand back work
 

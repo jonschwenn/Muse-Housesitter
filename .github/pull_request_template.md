@@ -4,8 +4,9 @@
 
 ## Before / after evidence
 
-<!-- CI posts a comment with before/after screenshots of every scenario on the
-fixture house (docs/REVIEW.md, "Evidence"). Explain every changed scenario here.
+<!-- CI posts one comment with before/after diffs of every scenario on the
+fixture house (docs/REVIEW.md, "Evidence"): text diffs for command output,
+screenshots for any web UI. Explain every changed scenario here.
 Never include output or screenshots from a real house. -->
 
 | Scenario | Changed? | Explanation |

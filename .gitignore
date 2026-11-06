@@ -18,6 +18,7 @@ dist/
 build/
 out/
 coverage/
+*.egg-info/
 
 # Logs
 *.log

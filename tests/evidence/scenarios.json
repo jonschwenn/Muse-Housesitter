@@ -1,0 +1,15 @@
+{
+  "volatile_keys": ["collected_at", "saved"],
+  "scenarios": [
+    {
+      "id": "version",
+      "title": "Installed version",
+      "argv": ["--version"]
+    },
+    {
+      "id": "help",
+      "title": "Top-level help",
+      "argv": ["--help"]
+    }
+  ]
+}
