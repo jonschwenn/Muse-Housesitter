@@ -27,8 +27,9 @@ after the PR. Merged branches clean themselves up.
    actions created by GitHub".
    - If your page offers "Require actions to be pinned to a full-length
      commit SHA", check it.
-   - **Why:** CI uses only GitHub's own `checkout` and `setup-python`
-     actions. Nothing from the marketplace can run.
+   - **Why:** CI uses only GitHub's own actions (`checkout`,
+     `setup-python`, `upload-artifact`, `download-artifact`). Nothing from
+     the marketplace can run.
 2. **Fork pull request workflows from outside collaborators:** "Require
    approval for all external contributors".
    - **Why:** a stranger's PR can't run code in your Actions until you
@@ -68,6 +69,10 @@ rules applied to matching branches. The rules for this repo are in
      - Require a pull request before merging, with 0 approvals,
        conversation resolution required, and Squash as the only merge
        method
+     - Require status checks to pass: `ci-ok` from GitHub Actions, branches
+       up to date. This was added to the file after the first import. If
+       the ruleset already exists, do step 2 by hand instead of importing
+       again.
 5. Click **Create**.
 
 What each rule does:
@@ -83,17 +88,20 @@ What each rule does:
 ### Step 2: require CI (after the first CI run)
 
 GitHub only offers a status check in this list after it has run at least
-once. Once the first PR with `.github/workflows/ci.yml` has run:
+once. Once the PR that adds `.github/workflows/ci.yml` (the `scaffold-ci`
+branch) has run CI:
 
 1. **Settings → Rules → Rulesets → protect-main**.
 2. Check **Require status checks to pass**.
 3. Check **Require branches to be up to date before merging**.
 4. Click **Add checks**, type `ci-ok`, and select it. Choose **GitHub
-   Actions** as the source, so no other app can report a fake `ci-ok`.
+   Actions** as the source, so no other app can report a fake `ci-ok`. In
+   the JSON this is `integration_id` 15368, GitHub Actions' app id.
 5. Click **Save changes**.
 
-The same PR that adds CI also adds this rule to `protect-main.json`, so the
-file stays the source of truth.
+`protect-main.json` already contains this rule, so the file stays the
+source of truth. Importing the file again would apply it too, but GitHub
+creates a second ruleset when you import, so edit the existing one instead.
 
 **Why only `ci-ok`:** it's a final job that passes only when every other CI
 job passed. If the Python versions in the test matrix change later, the

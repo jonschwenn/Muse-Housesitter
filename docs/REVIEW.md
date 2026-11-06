@@ -28,8 +28,10 @@ what changed:
 There is no web UI today, so only text diffs apply, and the `pr-evidence`
 branch does not exist yet.
 
-**Status: Planned.** The tooling is built in the first code PR. PRs merged
-before it state "Evidence: n/a, tooling not built yet."
+**Status:** text diffs are built (`scripts/pr_evidence.py`, tested in
+`tests/test_pr_evidence.py`). Rendered screenshots are **Planned** and will
+be built with the first web UI. PR #1 predates the tooling and has no
+evidence.
 
 **How it works**
 - `tests/evidence/scenarios.json` lists the scenarios: a fixed set of
@@ -43,8 +45,23 @@ before it state "Evidence: n/a, tooling not built yet."
   summary table (scenario, changed or unchanged, envelope size as the SDK
   measures it), then a diff for each changed scenario. Volatile fields
   (`collected_at`, saved ids) are normalised so they don't show up as noise.
-- The `evidence` job in `.github/workflows/ci.yml` runs the script on every
-  PR, and creates or updates **one** comment.
+- Each run gets a fresh, empty `HOME` and a minimal environment: the
+  variables the SDK gives drop-in commands, plus `PYTHONPATH` and
+  `PYTHONDONTWRITEBYTECODE`. A real config or secret therefore can't be
+  *found* through `HOME` or the environment. That guards against accidents,
+  not against code that reads absolute paths on purpose.
+- A scenario that is meant to fail (an error case) sets `"expect_exit"`. The
+  comment calls out any scenario whose exit code doesn't match, and
+  `tests/test_pr_evidence.py` fails on it.
+- In `.github/workflows/ci.yml`, the `evidence` job runs the script on every
+  PR with a read-only token. It also writes the result to the job summary.
+  A separate `evidence-comment` job, the only one allowed to write, creates
+  or updates **one** PR comment from that output. It never runs PR code,
+  but the text it posts was produced by the PR's code, so treat the comment
+  as the author's claim and the job summary as the same claim. It refuses
+  to post a body that lacks the marker or is too large, and it edits only
+  its own bot comment. PRs from forks can't get a write token, so they skip
+  the comment, and their evidence is in the `evidence` job's summary.
 - A PR that changes no output (docs, CI) still gets the comment, reading
   "no output change." That is evidence too.
 
@@ -52,9 +69,12 @@ before it state "Evidence: n/a, tooling not built yet."
 - **Fixture data only.** Never capture a real house: no live controller
   output, and no screenshot of a real Muse chat, unless it was driven by the
   fixture house (Muse can run `--fixture` too). The script refuses to run if
-  a real config is present.
+  `HOUSESITTER_LIVE` or `HOUSESITTER_CONFIG` is set, or if
+  `~/.config/housesitter/config.json` exists.
 - A new module or command adds its scenarios **in the same PR**.
-  Conformance fails if a registered command has no scenario.
+  `tests/test_pr_evidence.py` checks that every scenario runs. **Planned**:
+  once the command registry exists, conformance will fail if a registered
+  command has no scenario.
 - An unexpected change in the evidence counts as a finding in gate 2.
 - Optional extra: when a change affects how Muse uses a command, add a
   screenshot of a Muse chat driven by the fixture house, under "Muse

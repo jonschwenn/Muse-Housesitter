@@ -95,13 +95,16 @@ handoff's "license not chosen; don't publish."
   (AGENTS rule 7).
 
 ### D12. Minimal GitHub-only CI, with `main` locked by a ruleset (2026-11-04, Jon)
-- **CI:** one workflow, `.github/workflows/ci.yml`, with three jobs:
+- **CI:** one workflow, `.github/workflows/ci.yml`, with three jobs
+  *(superseded by the amendment below: now four jobs, with posting moved to
+  `evidence-comment`)*:
   - `test`: Python 3.9 and newest; ruff, pytest
   - `evidence`: PRs only
   - `ci-ok`: an aggregate of the other two
   It uses only `actions/checkout` and `actions/setup-python`, pinned to
-  commit SHAs. Permissions are read-only, except that `evidence` may write
-  PR comments. No external services.
+  commit SHAs *(superseded: also the artifact actions)*. Permissions are
+  read-only, except that `evidence` may write PR comments *(superseded: only
+  `evidence-comment` may)*. No external services.
 - **Evidence hosting:** text diffs live in the PR comment itself.
   Screenshots, needed only once a web UI exists, go on an orphan
   `pr-evidence` branch, pushed by CI and never by an agent.
@@ -119,3 +122,8 @@ handoff's "license not chosen; don't publish."
   - Required approvals.
   - A standing admin bypass (an admin can disable the ruleset in an
     emergency).
+- **Amended (2026-11-06, `scaffold-ci`):** posting the comment moved into its
+  own job, `evidence-comment`. It is the only job with write permission, and
+  it never runs PR code. `ci-ok` now aggregates `test`, `evidence`, and
+  `evidence-comment`. Two more GitHub-owned actions are used,
+  `upload-artifact` and `download-artifact`, also pinned to SHAs.
