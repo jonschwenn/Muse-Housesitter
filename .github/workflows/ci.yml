@@ -24,12 +24,19 @@ concurrency:
 jobs:
   test:
     name: test (${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.x"]   # the SDK's floor, and the newest release
+        include:
+          # The SDK's floor. actions/setup-python has no 3.9 build for Ubuntu
+          # 26.04 (ubuntu-latest since 2026-10), so this one stays on 24.04.
+          - python: "3.9"
+            os: ubuntu-24.04
+          # The newest release.
+          - python: "3.x"
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

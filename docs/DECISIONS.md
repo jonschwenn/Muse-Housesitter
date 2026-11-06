@@ -127,3 +127,9 @@ handoff's "license not chosen; don't publish."
   it never runs PR code. `ci-ok` now aggregates `test`, `evidence`, and
   `evidence-comment`. Two more GitHub-owned actions are used,
   `upload-artifact` and `download-artifact`, also pinned to SHAs.
+- **Amended (2026-11-06):** the Python 3.9 test job runs on `ubuntu-24.04`,
+  because `ubuntu-latest` is now Ubuntu 26.04 and has no Python 3.9 build.
+  When 24.04 runners are retired, the 3.9 job needs another home (e.g. a
+  `python:3.9` container) or the Python floor needs revisiting. Python 3.9
+  itself reached end of life upstream in October 2025, and the floor
+  exists only to match Raspberry Pi OS Bullseye (D3).
