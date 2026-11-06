@@ -1,0 +1,46 @@
+# Testing-mechanism guard (docs/DECISIONS.md D16). `ci-guard` is one of the
+# two checks the `main` ruleset requires.
+#
+# Runs on `pull_request_target`, which always uses this file from the target
+# branch — never PR code. It checks out the *base* commit only (never the PR
+# ref), runs the base's `scripts/ci_guard.py` (stdlib only) against the PR's
+# file list from the API, and passes only when the PR touches no protected
+# path, or its author has admin, maintain, or write permission on the repo.
+# The token is used for read-only API calls. No PR content ever reaches a
+# shell, a checkout, or an interpreter here: file names travel through the
+# API into Python, which escapes them before printing.
+#
+# Every third-party step is GitHub's own, pinned to a full commit SHA.
+name: ci-guard
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  ci-guard:
+    name: ci-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The base commit, not the PR: PR code must never execute here.
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+      - name: Check for protected-path changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: python scripts/ci_guard.py --repo "$REPO" --pr "$PR"

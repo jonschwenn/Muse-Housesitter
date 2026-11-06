@@ -37,9 +37,12 @@ after the PR. Merged branches clean themselves up.
 3. **Workflow permissions:** "Read repository contents and packages
    permissions". **Uncheck** "Allow GitHub Actions to create and approve pull
    requests".
-   - **Why:** workflows get a read-only token by default. The one job that
-     needs more (posting the evidence comment) asks for exactly that in
-     the workflow file.
+   - **Why:** workflows get a read-only token by default. The jobs that
+     need more ask for exactly that in the workflow file
+     (`evidence-publish.yml`: `actions: read` wherever it fetches
+     artifacts, `contents: write` only on the push job,
+     `pull-requests: write` only on the comment job; `ci-guard.yml`:
+     `contents: read` and `pull-requests: read`).
 
 Click **Save** in each section.
 
@@ -69,10 +72,11 @@ rules applied to matching branches. The rules for this repo are in
      - Require a pull request before merging, with 0 approvals,
        conversation resolution required, and Squash as the only merge
        method
-     - Require status checks to pass: `ci-ok` from GitHub Actions, branches
-       up to date. This was added to the file after the first import. If
-       the ruleset already exists, do step 2 by hand instead of importing
-       again.
+     - Require status checks to pass: `ci-ok` **and** `ci-guard` from
+       GitHub Actions, branches up to date. The JSON file already lists
+       both; each check only becomes selectable in steps 2 and 3 after it
+       has run at least once. If the ruleset already exists, do steps 2
+       and 3 by hand instead of importing again.
 5. Click **Create**.
 
 What each rule does:
@@ -103,9 +107,42 @@ branch) has run CI:
 source of truth. Importing the file again would apply it too, but GitHub
 creates a second ruleset when you import, so edit the existing one instead.
 
-**Why only `ci-ok`:** it's a final job that passes only when every other CI
-job passed. If the Python versions in the test matrix change later, the
-ruleset doesn't need editing.
+**Why only `ci-ok` (plus `ci-guard`):** `ci-ok` is a final job that
+passes only when every other CI job passed. If the Python versions in the
+test matrix change later, the ruleset doesn't need editing. `ci-guard` is
+the guard workflow's single job: it passes only when the PR touches no
+protected path, or its author has write access. `evidence-publish.yml` is
+deliberately **not** required: it only posts the evidence comment and never
+blocks a merge.
+
+### Step 3: require ci-guard — only AFTER the bootstrap PR merges
+
+`ci-guard` exists only once the bootstrap PR (`ci-guard` branch, D16) is
+on `main`: the workflow runs from the target branch, and a required check
+that has never run blocks every PR. So merge the bootstrap first with only
+`ci-ok` required, then add `ci-guard`:
+
+1. **Settings → Rules → Rulesets → protect-main**.
+2. Click **Add checks**, type `ci-guard`, and select it. Choose **GitHub
+   Actions** as the source, so no other app can report a fake `ci-guard`.
+   In the JSON this is `integration_id` 15368, GitHub Actions' app id.
+3. Click **Save changes**.
+
+Or with the GitHub CLI (the ruleset id is looked up, not hard-coded;
+`protect-main.json` is the source of truth, so the file and the ruleset
+must match afterwards):
+
+```sh
+ID=$(gh api repos/jonschwenn/Muse-Housesitter/rulesets \
+  --jq '.[] | select(.name=="protect-main") | .id')
+gh api -X PUT repos/jonschwenn/Muse-Housesitter/rulesets/$ID \
+  --input .github/rulesets/protect-main.json
+```
+
+Until this step is done, `protect-main.json` in the repo describes a state
+that GitHub does not enforce yet: `ci-guard` is documented here as
+**Planned** for the ruleset, while `ci-ok` is already required. After
+applying, verify on the ruleset page that both checks are listed.
 
 ### Optional: require signed commits
 

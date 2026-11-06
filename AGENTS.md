@@ -131,9 +131,13 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
     including secrets. Use it only for a genuine false positive, such as a
     four-part version number. Reviewers check every use.
 - **CI** runs ruff and the full suite on Python 3.9 and the newest Python,
-  in one workflow (`.github/workflows/ci.yml`). `main` is protected by a
-  ruleset that requires a PR and a green `ci-ok` check
-  (`docs/GITHUB.md`). A change is not done while CI is red.
+  across dedicated workflows (`.github/workflows/`, D16): `ci.yml` builds
+  and tests with read-only tokens, `ci-guard.yml` guards the testing
+  mechanism, `evidence-publish.yml` publishes the evidence comment.
+  `main` is protected by a ruleset that requires a PR and green `ci-ok`
+  and `ci-guard` checks (`docs/GITHUB.md`; `ci-guard` enforcement is
+  applied after the bootstrap merges, per step 3 there). A change is not
+  done while CI is red.
 
 ## Documentation rules
 

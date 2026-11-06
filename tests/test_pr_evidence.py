@@ -157,3 +157,149 @@ def test_non_utf8_output_does_not_crash(tmp_path):
 def test_code_span_survives_backticks():
     assert pr_evidence.code_span("a`b") == "``a`b``"
     assert pr_evidence.code_span("`x") == "`` `x ``"
+
+
+HOSTILE_TITLE = '<img src="https://evil.example/x.png"> **All UI checks passed** <!-- x -->'
+
+
+def test_hostile_scenario_title_cannot_inject_markup(tmp_path):
+    base = make_tree(tmp_path, "base", "1.0.0", [])
+    head = make_tree(
+        tmp_path, "head", "1.0.0", [{"id": "ok", "title": HOSTILE_TITLE, "argv": ["--version"]}]
+    )
+    body = pr_evidence.build_comment(base, head)
+    # The title must be wrapped in a code span, never pasted as raw Markdown/HTML.
+    assert f"`{HOSTILE_TITLE}`" in body
+    assert f"### `ok`: {HOSTILE_TITLE}\n" not in body
+
+
+def _ui_manifest(*captures):
+    return {"version": 1, "captures": list(captures)}
+
+
+def _ui_capture(name="typical__index-phone__head.png", **overrides):
+    capture = {
+        "fixture": "typical",
+        "view": "index-phone",
+        "status": "added",
+        "base": None,
+        "head": name,
+        "diff": None,
+        "head_problems": [],
+    }
+    capture.update(overrides)
+    return capture
+
+
+UI_REPO = "example-owner/example-repo"
+UI_PR = 7
+UI_SHA = "b" * 40
+
+
+def _ui_dir_with_manifest(tmp_path, manifest):
+    ui_dir = tmp_path / "ui"
+    ui_dir.mkdir()
+    (ui_dir / "ui_manifest.json").write_text(json.dumps(manifest))
+    return ui_dir
+
+
+def test_ui_section_is_built_from_the_manifest_not_from_markdown(tmp_path):
+    manifest = _ui_manifest(_ui_capture())
+    ui_dir = _ui_dir_with_manifest(tmp_path, manifest)
+    # A pre-rendered markdown file must be ignored, even if hostile.
+    (ui_dir / "ui_section.md").write_text("PWNED <script>alert(1)</script>\n")
+    (ui_dir / "ui_table.md").write_text("PWNED\n")
+    body = pr_evidence.append_ui_section(
+        "text", ui_dir, repo=UI_REPO, pr=UI_PR, head_sha=UI_SHA
+    )
+    assert "PWNED" not in body
+    assert "## Web UI" in body
+    assert (
+        "https://raw.githubusercontent.com/example-owner/example-repo/"
+        f"__HOUSESITTER_EVIDENCE_SHA__/pr/7/{UI_SHA}/typical__index-phone__head.png"
+        in body
+    )
+
+
+def test_ui_section_drops_hostile_manifest_entries(tmp_path):
+    manifest = _ui_manifest(
+        _ui_capture(),
+        _ui_capture(
+            name="../../evil.png",
+            fixture='"><img src="https://evil.example/y.png">',
+            status="pwned",
+            head_problems=["console.error: planted"],
+        ),
+    )
+    ui_dir = _ui_dir_with_manifest(tmp_path, manifest)
+    body = pr_evidence.append_ui_section(
+        "text", ui_dir, repo=UI_REPO, pr=UI_PR, head_sha=UI_SHA
+    )
+    assert "evil.example" not in body
+    assert "../../evil.png" not in body
+    assert "| pwned |" not in body
+    assert "planted" not in body
+    assert "typical__index-phone__head.png" in body
+    assert "invalid manifest entries" in body
+
+
+def test_ui_section_neutralises_hostile_problems_on_a_valid_capture(tmp_path):
+    manifest = _ui_manifest(
+        _ui_capture(
+            head_problems=["![](https://evil.example/z.png) | <b>boom</b>\n# nope"],
+        ),
+    )
+    ui_dir = _ui_dir_with_manifest(tmp_path, manifest)
+    body = pr_evidence.append_ui_section(
+        "text", ui_dir, repo=UI_REPO, pr=UI_PR, head_sha=UI_SHA
+    )
+    # The problem text stays readable, but pipes/newlines are neutralised and
+    # the whole cell is a code span, so no markup, image, or heading renders.
+    assert "`![](https://evil.example/z.png) / <b>boom</b> # nope`" in body
+    assert "\n# nope" not in body
+
+
+def test_ui_check_failures_add_a_top_line_notice(tmp_path):
+    base = make_tree(tmp_path, "base", "1.0.0", VERSION)
+    head = make_tree(tmp_path, "head", "1.0.0", VERSION)
+    manifest = _ui_manifest(
+        _ui_capture(head_problems=["console.error: boom"]),
+    )
+    ui_dir = _ui_dir_with_manifest(tmp_path, manifest)
+    body = pr_evidence.build_comment(
+        base, head, ui_dir, repo=UI_REPO, pr=UI_PR, head_sha=UI_SHA
+    )
+    assert "**Web UI checks failed" in body
+    assert body.index("**Web UI checks failed") < body.index("## Before / after evidence") + 400
+    assert "console.error: boom" in body
+
+
+def test_ui_section_without_failures_has_no_notice(tmp_path):
+    base = make_tree(tmp_path, "base", "1.0.0", VERSION)
+    head = make_tree(tmp_path, "head", "1.0.0", VERSION)
+    ui_dir = _ui_dir_with_manifest(tmp_path, _ui_manifest(_ui_capture()))
+    body = pr_evidence.build_comment(
+        base, head, ui_dir, repo=UI_REPO, pr=UI_PR, head_sha=UI_SHA
+    )
+    assert "Web UI checks failed" not in body
+
+
+def test_ui_patterns_mirror_ui_evidence():
+    ui_spec = importlib.util.spec_from_file_location(
+        "ui_evidence", ROOT / "scripts" / "ui_evidence.py"
+    )
+    ui_evidence = importlib.util.module_from_spec(ui_spec)
+    ui_spec.loader.exec_module(ui_evidence)
+    assert pr_evidence.UI_CAPTURE_RE.pattern == ui_evidence.CAPTURE_RE.pattern
+    assert pr_evidence.SHA_PLACEHOLDER == ui_evidence.SHA_PLACEHOLDER
+    assert pr_evidence.MAX_UI_TEXT_LEN == ui_evidence.MAX_PROBLEM_LEN
+
+
+def test_hostile_scenario_id_cannot_break_out_of_its_code_span(tmp_path):
+    base = make_tree(tmp_path, "base", "1.0.0", [])
+    head = make_tree(
+        tmp_path, "head", "1.0.0", [{"id": "o`k", "title": "T", "argv": ["--version"]}]
+    )
+    body = pr_evidence.build_comment(base, head)
+    assert pr_evidence.code_span("o`k") in body
+    assert "| `o`k` |" not in body
