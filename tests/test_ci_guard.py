@@ -52,6 +52,8 @@ SPEC.loader.exec_module(ci_guard)
         "tests/evil.pth",
         "tests/__init__.py",
         "tests/modules/__init__.py",
+        ".gitattributes",
+        "src/.gitattributes",
     ],
 )
 def test_protected_paths_are_caught(path):

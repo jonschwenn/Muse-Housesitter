@@ -75,6 +75,8 @@ NAME_PROTECTED = {
     ".ruff.toml": "overrides the ruff config in pyproject.toml",
     "sitecustomize.py": "runs at every interpreter start-up",
     "usercustomize.py": "runs at every interpreter start-up",
+    # linguist-generated / -diff collapse or hide a file's diff in PR review.
+    ".gitattributes": "can hide file diffs from reviewers",
 }
 
 # An __init__.py under tests/ flips pytest's collection from rootless to

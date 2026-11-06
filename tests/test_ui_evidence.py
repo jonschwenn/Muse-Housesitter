@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -660,3 +661,13 @@ def test_capture_head_without_base_web(tmp_path):
             pushable.joinpath(path.name).write_bytes(path.read_bytes())
     assert ui_evidence.validate_artifact(pushable) == []
 
+
+def test_gh_api_calls_with_fields_say_get_or_an_explicit_method():
+    # gh api switches to POST whenever -f/-F fields are passed; a lookup that
+    # forgets --method GET silently becomes a create request (and 403s).
+    for name in ("ci.yml", "ci-guard.yml", "evidence-publish.yml"):
+        text = (ROOT / ".github" / "workflows" / name).read_text()
+        joined = re.sub(r"\\\n\s*", " ", text)
+        for line in joined.splitlines():
+            if "gh api" in line and re.search(r"\s-[fF]\s", line):
+                assert re.search(r"(--method|-X)\s+[A-Z]+", line), (name, line.strip())

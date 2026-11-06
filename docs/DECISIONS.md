@@ -244,8 +244,9 @@ handoff's "license not chosen; don't publish."
   anywhere in the tree, `conftest.py`, `pytest.ini`, `setup.cfg`,
   `tox.ini`, `ruff.toml`, `.ruff.toml`, `sitecustomize.py`,
   `usercustomize.py`, `*.pth` (tooling config and interpreter start-up
-  hooks), plus `tests/**/__init__.py` (flips pytest's import mode for the
-  whole suite).
+  hooks), `.gitattributes` (`linguist-generated` or `-diff` can collapse
+  or hide a file's diff in review), plus `tests/**/__init__.py` (flips
+  pytest's import mode for the whole suite).
 - **What is not protected, and why that is accepted:**
   - *Screenshots stay author-attested.* Validation proves the files are
     sane PNGs, never that the pixels are truthful. Faked pixels are the
@@ -260,17 +261,24 @@ handoff's "license not chosen; don't publish."
     guard cannot forbid new files outright. Residual vectors through new
     files were probed, not assumed (see below); they are caught by human
     review (gates 2 and 5), not by the guard: a new `conftest.py` is
-    blocked, but a new test module could still `import test_hygiene` and
-    neuter it at import time (verified: the patch lands in the same module
-    object pytest collected), or set module-level `pytest_plugins` to load
-    a helper that drops tests from collection (verified: honored in test
-    modules). `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` in CI kills the
-    entry-point variant, and `pyproject.toml` (protected) pins the
-    installed distributions, so no new entry-point plugin can arrive that
-    way. The remaining variants are loud — a test file importing another
-    test module, or declaring `pytest_plugins`, is an obvious red flag for
-    the gate 2 reviewer and for Jon at sign-off — and they cannot touch the
-    protected files that would hide them more quietly.
+    blocked, but in the full test run a new test module could still
+    `import test_hygiene` and neuter it at import time (verified: the patch
+    lands in the same module object pytest collected), or set module-level
+    `pytest_plugins` to load a helper that drops tests from collection
+    (verified: honored in test modules). Two things close this for the
+    protected suites:
+    - CI re-runs the protected suites (hygiene, conformance, evidence,
+      publisher, guard tests) in a separate pytest process that collects
+      only those files ("Protected suites, in isolation" in `ci.yml`), so
+      no unprotected test module is ever imported alongside them.
+    - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` in CI kills the entry-point
+      variant, and `pyproject.toml` (protected) pins the installed
+      distributions, so no new entry-point plugin can arrive that way.
+
+    What is left is weakening *ordinary* tests (a module's own tests)
+    through such tricks, which human review catches: a test file importing
+    another test module, or declaring `pytest_plugins`, is an obvious red
+    flag at gates 2 and 5.
 - **TOCTOU:** the guard re-runs on every push (`synchronize`), and the
   ruleset requires branches to be up to date, so a merge needs a green
   `ci-guard` on the exact head being merged. A stale result cannot merge.

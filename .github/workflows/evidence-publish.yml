@@ -73,7 +73,9 @@ jobs:
             echo "bad head SHA in the event; ignoring"
           else
             echo "looking up open PRs for $HEAD_OWNER:$HEAD_BRANCH"
-            matches=$(gh api "repos/$REPO/pulls" \
+            # --method GET: with -f fields, gh api would otherwise send a POST
+            # (create a PR), which this read-only token refuses.
+            matches=$(gh api --method GET "repos/$REPO/pulls" \
               -f "head=$HEAD_OWNER:$HEAD_BRANCH" -f state=open \
               --jq "[.[] | select(.head.sha == \"$HEAD_SHA\") | .number]")
             count=$(echo "$matches" | jq 'length')
