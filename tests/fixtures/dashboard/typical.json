@@ -1,0 +1,2274 @@
+{
+  "schema": "housesitter.dashboard/1",
+  "generated_at": "2026-11-06T15:00:05Z",
+  "housesitter_version": "0.1.0.dev0",
+  "house_label": "Example house",
+  "modules": [
+    {
+      "id": "unifi_wifi",
+      "title": "UniFi WiFi radio metrics",
+      "version": "0.1.0.dev0",
+      "status": "ok",
+      "last_success_at": "2026-11-06T15:00:00Z",
+      "last_attempt_at": "2026-11-06T15:00:00Z",
+      "last_error": null
+    }
+  ],
+  "muse_note": {
+    "written_at": "2026-11-06T15:02:00Z",
+    "text": "Planned field. Example: Moving the speakers to the IoT network helped. All five moved, and three are now on 5 GHz with much higher rates. Two did not improve: Patio Speaker is still very weak (-79 dBm), and Den Speaker is still on 2.4 GHz."
+  },
+  "unifi_wifi": {
+    "snapshots": {
+      "total": 60,
+      "recent": [
+        {
+          "id": "snapshot_20261106T150000Z_3fa1",
+          "collected_at": "2026-11-06T15:00:00Z",
+          "label": "after: speakers moved to IoT SSID",
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 5
+            },
+            {
+              "band": "5GHz",
+              "count": 6
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261105T180000Z_7c2e",
+          "collected_at": "2026-11-05T18:00:00Z",
+          "label": "before: speakers on family SSID",
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261104T200000Z_0000",
+          "collected_at": "2026-11-04T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261104T080000Z_0001",
+          "collected_at": "2026-11-04T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261103T200000Z_0002",
+          "collected_at": "2026-11-03T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261103T080000Z_0003",
+          "collected_at": "2026-11-03T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261102T200000Z_0004",
+          "collected_at": "2026-11-02T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261102T080000Z_0005",
+          "collected_at": "2026-11-02T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261101T200000Z_0006",
+          "collected_at": "2026-11-01T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261101T080000Z_0007",
+          "collected_at": "2026-11-01T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261031T200000Z_0008",
+          "collected_at": "2026-10-31T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261031T080000Z_0009",
+          "collected_at": "2026-10-31T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261030T200000Z_000a",
+          "collected_at": "2026-10-30T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261030T080000Z_000b",
+          "collected_at": "2026-10-30T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261029T200000Z_000c",
+          "collected_at": "2026-10-29T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261029T080000Z_000d",
+          "collected_at": "2026-10-29T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261028T200000Z_000e",
+          "collected_at": "2026-10-28T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261028T080000Z_000f",
+          "collected_at": "2026-10-28T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261027T200000Z_0010",
+          "collected_at": "2026-10-27T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261027T080000Z_0011",
+          "collected_at": "2026-10-27T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261026T200000Z_0012",
+          "collected_at": "2026-10-26T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261026T080000Z_0013",
+          "collected_at": "2026-10-26T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261025T200000Z_0014",
+          "collected_at": "2026-10-25T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261025T080000Z_0015",
+          "collected_at": "2026-10-25T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261024T200000Z_0016",
+          "collected_at": "2026-10-24T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261024T080000Z_0017",
+          "collected_at": "2026-10-24T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261023T200000Z_0018",
+          "collected_at": "2026-10-23T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261023T080000Z_0019",
+          "collected_at": "2026-10-23T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261022T200000Z_001a",
+          "collected_at": "2026-10-22T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261022T080000Z_001b",
+          "collected_at": "2026-10-22T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261021T200000Z_001c",
+          "collected_at": "2026-10-21T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261021T080000Z_001d",
+          "collected_at": "2026-10-21T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261020T200000Z_001e",
+          "collected_at": "2026-10-20T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261020T080000Z_001f",
+          "collected_at": "2026-10-20T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261019T200000Z_0020",
+          "collected_at": "2026-10-19T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261019T080000Z_0021",
+          "collected_at": "2026-10-19T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261018T200000Z_0022",
+          "collected_at": "2026-10-18T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261018T080000Z_0023",
+          "collected_at": "2026-10-18T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261017T200000Z_0024",
+          "collected_at": "2026-10-17T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261017T080000Z_0025",
+          "collected_at": "2026-10-17T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261016T200000Z_0026",
+          "collected_at": "2026-10-16T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261016T080000Z_0027",
+          "collected_at": "2026-10-16T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261015T200000Z_0028",
+          "collected_at": "2026-10-15T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261015T080000Z_0029",
+          "collected_at": "2026-10-15T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261014T200000Z_002a",
+          "collected_at": "2026-10-14T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261014T080000Z_002b",
+          "collected_at": "2026-10-14T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261013T200000Z_002c",
+          "collected_at": "2026-10-13T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 11,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 2
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261013T080000Z_002d",
+          "collected_at": "2026-10-13T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 10,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261012T200000Z_002e",
+          "collected_at": "2026-10-12T20:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 9,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 7
+            },
+            {
+              "band": "5GHz",
+              "count": 1
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "snapshot_20261012T080000Z_002f",
+          "collected_at": "2026-10-12T08:00:00Z",
+          "label": null,
+          "ap_count": 3,
+          "client_count": 12,
+          "clients_by_band": [
+            {
+              "band": "2.4GHz",
+              "count": 8
+            },
+            {
+              "band": "5GHz",
+              "count": 3
+            },
+            {
+              "band": "6GHz",
+              "count": 1
+            },
+            {
+              "band": "unknown",
+              "count": 0
+            }
+          ]
+        }
+      ]
+    },
+    "latest": {
+      "id": "snapshot_20261106T150000Z_3fa1",
+      "collected_at": "2026-11-06T15:00:00Z",
+      "label": "after: speakers moved to IoT SSID",
+      "source": {
+        "kind": "unifi",
+        "flavor": "unifi_os",
+        "controller_version": "9.0.114",
+        "site": "default"
+      },
+      "warnings": [],
+      "summary": {
+        "ap_count": 3,
+        "ap_online_count": 3,
+        "client_count": 12,
+        "clients_by_band": [
+          {
+            "band": "2.4GHz",
+            "count": 5
+          },
+          {
+            "band": "5GHz",
+            "count": 6
+          },
+          {
+            "band": "6GHz",
+            "count": 1
+          },
+          {
+            "band": "unknown",
+            "count": 0
+          }
+        ],
+        "clients_by_ap": [
+          {
+            "ap_id": "00:00:5e:00:53:01",
+            "ap_name": "Living Room",
+            "count": 6
+          },
+          {
+            "ap_id": "00:00:5e:00:53:02",
+            "ap_name": "Office",
+            "count": 4
+          },
+          {
+            "ap_id": "00:00:5e:00:53:03",
+            "ap_name": "Garage",
+            "count": 2
+          }
+        ],
+        "clients_by_ssid": [
+          {
+            "ssid": "guest-example",
+            "count": 1
+          },
+          {
+            "ssid": "iot-example",
+            "count": 8
+          },
+          {
+            "ssid": "main-example",
+            "count": 3
+          }
+        ]
+      },
+      "aps": [
+        {
+          "id": "00:00:5e:00:53:03",
+          "name": "Garage",
+          "model": "U6M",
+          "firmware": "6.6.77",
+          "online": true,
+          "uptime_s": 1220400,
+          "client_count": 2,
+          "satisfaction_pct": 95,
+          "uplink_type": "wire",
+          "uplink_speed_mbps": 100,
+          "radios": [
+            {
+              "band": "2.4GHz",
+              "channel": 11,
+              "channel_setting": "auto",
+              "width_mhz": 20,
+              "tx_power_dbm": 20,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 27,
+              "self_rx_pct": 3,
+              "self_tx_pct": 2,
+              "client_count": 2,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 12.6
+            },
+            {
+              "band": "5GHz",
+              "channel": 44,
+              "channel_setting": "auto",
+              "width_mhz": 40,
+              "tx_power_dbm": 20,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 9,
+              "self_rx_pct": 2,
+              "self_tx_pct": 2,
+              "client_count": 0,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 2.0
+            }
+          ]
+        },
+        {
+          "id": "00:00:5e:00:53:01",
+          "name": "Living Room",
+          "model": "U7PRO",
+          "firmware": "6.6.77",
+          "online": true,
+          "uptime_s": 1213200,
+          "client_count": 6,
+          "satisfaction_pct": 95,
+          "uplink_type": "wire",
+          "uplink_speed_mbps": 1000,
+          "radios": [
+            {
+              "band": "2.4GHz",
+              "channel": 6,
+              "channel_setting": "auto",
+              "width_mhz": 20,
+              "tx_power_dbm": 17,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 41,
+              "self_rx_pct": 8,
+              "self_tx_pct": 6,
+              "client_count": 1,
+              "satisfaction_pct": 88,
+              "tx_retry_pct_cumulative": 9.8
+            },
+            {
+              "band": "5GHz",
+              "channel": 36,
+              "channel_setting": "auto",
+              "width_mhz": 80,
+              "tx_power_dbm": 23,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 18,
+              "self_rx_pct": 6,
+              "self_tx_pct": 9,
+              "client_count": 4,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 4.1
+            },
+            {
+              "band": "6GHz",
+              "channel": 37,
+              "channel_setting": "auto",
+              "width_mhz": 160,
+              "tx_power_dbm": 23,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 4,
+              "self_rx_pct": 2,
+              "self_tx_pct": 3,
+              "client_count": 1,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 1.2
+            }
+          ]
+        },
+        {
+          "id": "00:00:5e:00:53:02",
+          "name": "Office",
+          "model": "U6LR",
+          "firmware": "6.6.77",
+          "online": true,
+          "uptime_s": 1216800,
+          "client_count": 4,
+          "satisfaction_pct": 95,
+          "uplink_type": "wire",
+          "uplink_speed_mbps": 1000,
+          "radios": [
+            {
+              "band": "2.4GHz",
+              "channel": 1,
+              "channel_setting": "auto",
+              "width_mhz": 20,
+              "tx_power_dbm": 17,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 33,
+              "self_rx_pct": 5,
+              "self_tx_pct": 5,
+              "client_count": 2,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 7.4
+            },
+            {
+              "band": "5GHz",
+              "channel": 149,
+              "channel_setting": "auto",
+              "width_mhz": 80,
+              "tx_power_dbm": 23,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 22,
+              "self_rx_pct": 7,
+              "self_tx_pct": 11,
+              "client_count": 2,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 3.6
+            }
+          ]
+        }
+      ],
+      "clients": [
+        {
+          "id": "00:00:5e:00:53:89",
+          "ip": "192.0.2.11",
+          "name": "Garage Door",
+          "vendor": "Example Openers",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:03",
+          "ap_name": "Garage",
+          "band": "2.4GHz",
+          "channel": 11,
+          "wifi_standard": "g",
+          "wifi_standard_raw": "g",
+          "signal_dbm": -71,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 24.0,
+          "rx_rate_mbps": 12.0,
+          "satisfaction_pct": 74,
+          "tx_retry_pct_cumulative": 18.9,
+          "tx_retry_pct_recent": 15.1,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:84",
+          "ip": "192.0.2.6",
+          "name": "Patio Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:03",
+          "ap_name": "Garage",
+          "band": "2.4GHz",
+          "channel": 11,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -79,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 13.0,
+          "rx_rate_mbps": 6.5,
+          "satisfaction_pct": 52,
+          "tx_retry_pct_cumulative": 24.8,
+          "tx_retry_pct_recent": 19.8,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "02:00:00:00:00:0c",
+          "ip": "192.0.2.14",
+          "name": null,
+          "vendor": null,
+          "private_mac": true,
+          "ssid": "guest-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "5GHz",
+          "channel": 36,
+          "wifi_standard": "ax",
+          "wifi_standard_raw": "ax",
+          "signal_dbm": -64,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 576.5,
+          "rx_rate_mbps": 432.4,
+          "satisfaction_pct": 92,
+          "tx_retry_pct_cumulative": 4.4,
+          "tx_retry_pct_recent": 3.5,
+          "connected_s": 1800,
+          "idle_s": 4,
+          "guest": true
+        },
+        {
+          "id": "00:00:5e:00:53:8a",
+          "ip": "192.0.2.12",
+          "name": "Doorbell",
+          "vendor": "Example Security",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "2.4GHz",
+          "channel": 6,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -68,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 57.8,
+          "rx_rate_mbps": 28.9,
+          "satisfaction_pct": 81,
+          "tx_retry_pct_cumulative": 14.3,
+          "tx_retry_pct_recent": 11.4,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "02:00:00:00:00:06",
+          "ip": "192.0.2.8",
+          "name": "Family Laptop",
+          "vendor": "Example Computers",
+          "private_mac": true,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "6GHz",
+          "channel": 37,
+          "wifi_standard": "be",
+          "wifi_standard_raw": "be",
+          "signal_dbm": -51,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 2161.0,
+          "rx_rate_mbps": 1729.0,
+          "satisfaction_pct": 99,
+          "tx_retry_pct_cumulative": 0.9,
+          "tx_retry_pct_recent": 0.7,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "02:00:00:00:00:07",
+          "ip": "192.0.2.9",
+          "name": "Family Phone",
+          "vendor": "Example Phones",
+          "private_mac": true,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "5GHz",
+          "channel": 36,
+          "wifi_standard": "ax",
+          "wifi_standard_raw": "ax",
+          "signal_dbm": -57,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 1200.9,
+          "rx_rate_mbps": 864.7,
+          "satisfaction_pct": 97,
+          "tx_retry_pct_cumulative": 2.6,
+          "tx_retry_pct_recent": 2.1,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:81",
+          "ip": "192.0.2.3",
+          "name": "Kitchen Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "5GHz",
+          "channel": 36,
+          "wifi_standard": "ac",
+          "wifi_standard_raw": "ac",
+          "signal_dbm": -54,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 433.3,
+          "rx_rate_mbps": 390.0,
+          "satisfaction_pct": 98,
+          "tx_retry_pct_cumulative": 2.1,
+          "tx_retry_pct_recent": 1.7,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:82",
+          "ip": "192.0.2.4",
+          "name": "Living Room Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "5GHz",
+          "channel": 36,
+          "wifi_standard": "ac",
+          "wifi_standard_raw": "ac",
+          "signal_dbm": -49,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 433.3,
+          "rx_rate_mbps": 433.3,
+          "satisfaction_pct": 99,
+          "tx_retry_pct_cumulative": 1.4,
+          "tx_retry_pct_recent": 1.1,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:83",
+          "ip": "192.0.2.5",
+          "name": "Bedroom Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:02",
+          "ap_name": "Office",
+          "band": "5GHz",
+          "channel": 149,
+          "wifi_standard": "ac",
+          "wifi_standard_raw": "ac",
+          "signal_dbm": -61,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 200.0,
+          "rx_rate_mbps": 180.0,
+          "satisfaction_pct": 94,
+          "tx_retry_pct_cumulative": 3.9,
+          "tx_retry_pct_recent": 3.1,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:85",
+          "ip": "192.0.2.7",
+          "name": "Den Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:02",
+          "ap_name": "Office",
+          "band": "2.4GHz",
+          "channel": 1,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -60,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 65.0,
+          "rx_rate_mbps": 58.5,
+          "satisfaction_pct": 90,
+          "tx_retry_pct_cumulative": 7.7,
+          "tx_retry_pct_recent": 6.2,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:8b",
+          "ip": "192.0.2.13",
+          "name": "Office Printer",
+          "vendor": "Example Printing",
+          "private_mac": false,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:02",
+          "ap_name": "Office",
+          "band": "5GHz",
+          "channel": 149,
+          "wifi_standard": "ac",
+          "wifi_standard_raw": "ac",
+          "signal_dbm": -55,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 351.0,
+          "rx_rate_mbps": 292.5,
+          "satisfaction_pct": 96,
+          "tx_retry_pct_cumulative": 3.1,
+          "tx_retry_pct_recent": 2.5,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:88",
+          "ip": "192.0.2.10",
+          "name": "Thermostat",
+          "vendor": "Example Climate",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:02",
+          "ap_name": "Office",
+          "band": "2.4GHz",
+          "channel": 1,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -66,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 52.0,
+          "rx_rate_mbps": 26.0,
+          "satisfaction_pct": 89,
+          "tx_retry_pct_cumulative": 11.0,
+          "tx_retry_pct_recent": 8.8,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        }
+      ]
+    },
+    "previous": {
+      "id": "snapshot_20261105T180000Z_7c2e",
+      "collected_at": "2026-11-05T18:00:00Z",
+      "label": "before: speakers on family SSID",
+      "source": {
+        "kind": "unifi",
+        "flavor": "unifi_os",
+        "controller_version": "9.0.114",
+        "site": "default"
+      },
+      "warnings": [],
+      "summary": {
+        "ap_count": 3,
+        "ap_online_count": 3,
+        "client_count": 12,
+        "clients_by_band": [
+          {
+            "band": "2.4GHz",
+            "count": 8
+          },
+          {
+            "band": "5GHz",
+            "count": 3
+          },
+          {
+            "band": "6GHz",
+            "count": 1
+          },
+          {
+            "band": "unknown",
+            "count": 0
+          }
+        ],
+        "clients_by_ap": [
+          {
+            "ap_id": "00:00:5e:00:53:01",
+            "ap_name": "Living Room",
+            "count": 6
+          },
+          {
+            "ap_id": "00:00:5e:00:53:02",
+            "ap_name": "Office",
+            "count": 4
+          },
+          {
+            "ap_id": "00:00:5e:00:53:03",
+            "ap_name": "Garage",
+            "count": 2
+          }
+        ],
+        "clients_by_ssid": [
+          {
+            "ssid": "guest-example",
+            "count": 1
+          },
+          {
+            "ssid": "iot-example",
+            "count": 3
+          },
+          {
+            "ssid": "main-example",
+            "count": 8
+          }
+        ]
+      },
+      "aps": [
+        {
+          "id": "00:00:5e:00:53:03",
+          "name": "Garage",
+          "model": "U6M",
+          "firmware": "6.6.77",
+          "online": true,
+          "uptime_s": 1220400,
+          "client_count": 2,
+          "satisfaction_pct": 95,
+          "uplink_type": "wire",
+          "uplink_speed_mbps": 100,
+          "radios": [
+            {
+              "band": "2.4GHz",
+              "channel": 11,
+              "channel_setting": "auto",
+              "width_mhz": 20,
+              "tx_power_dbm": 20,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 27,
+              "self_rx_pct": 3,
+              "self_tx_pct": 2,
+              "client_count": 2,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 12.6
+            },
+            {
+              "band": "5GHz",
+              "channel": 44,
+              "channel_setting": "auto",
+              "width_mhz": 40,
+              "tx_power_dbm": 20,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 9,
+              "self_rx_pct": 2,
+              "self_tx_pct": 2,
+              "client_count": 0,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 2.0
+            }
+          ]
+        },
+        {
+          "id": "00:00:5e:00:53:01",
+          "name": "Living Room",
+          "model": "U7PRO",
+          "firmware": "6.6.77",
+          "online": true,
+          "uptime_s": 1213200,
+          "client_count": 6,
+          "satisfaction_pct": 95,
+          "uplink_type": "wire",
+          "uplink_speed_mbps": 1000,
+          "radios": [
+            {
+              "band": "2.4GHz",
+              "channel": 6,
+              "channel_setting": "auto",
+              "width_mhz": 20,
+              "tx_power_dbm": 17,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 41,
+              "self_rx_pct": 8,
+              "self_tx_pct": 6,
+              "client_count": 3,
+              "satisfaction_pct": 88,
+              "tx_retry_pct_cumulative": 9.8
+            },
+            {
+              "band": "5GHz",
+              "channel": 36,
+              "channel_setting": "auto",
+              "width_mhz": 80,
+              "tx_power_dbm": 23,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 18,
+              "self_rx_pct": 6,
+              "self_tx_pct": 9,
+              "client_count": 2,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 4.1
+            },
+            {
+              "band": "6GHz",
+              "channel": 37,
+              "channel_setting": "auto",
+              "width_mhz": 160,
+              "tx_power_dbm": 23,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 4,
+              "self_rx_pct": 2,
+              "self_tx_pct": 3,
+              "client_count": 1,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 1.2
+            }
+          ]
+        },
+        {
+          "id": "00:00:5e:00:53:02",
+          "name": "Office",
+          "model": "U6LR",
+          "firmware": "6.6.77",
+          "online": true,
+          "uptime_s": 1216800,
+          "client_count": 4,
+          "satisfaction_pct": 95,
+          "uplink_type": "wire",
+          "uplink_speed_mbps": 1000,
+          "radios": [
+            {
+              "band": "2.4GHz",
+              "channel": 1,
+              "channel_setting": "auto",
+              "width_mhz": 20,
+              "tx_power_dbm": 17,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 33,
+              "self_rx_pct": 5,
+              "self_tx_pct": 5,
+              "client_count": 3,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 7.4
+            },
+            {
+              "band": "5GHz",
+              "channel": 149,
+              "channel_setting": "auto",
+              "width_mhz": 80,
+              "tx_power_dbm": 23,
+              "tx_power_mode": "auto",
+              "channel_utilization_pct": 22,
+              "self_rx_pct": 7,
+              "self_tx_pct": 11,
+              "client_count": 1,
+              "satisfaction_pct": 96,
+              "tx_retry_pct_cumulative": 3.6
+            }
+          ]
+        }
+      ],
+      "clients": [
+        {
+          "id": "00:00:5e:00:53:89",
+          "ip": "192.0.2.11",
+          "name": "Garage Door",
+          "vendor": "Example Openers",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:03",
+          "ap_name": "Garage",
+          "band": "2.4GHz",
+          "channel": 11,
+          "wifi_standard": "g",
+          "wifi_standard_raw": "g",
+          "signal_dbm": -71,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 24.0,
+          "rx_rate_mbps": 12.0,
+          "satisfaction_pct": 74,
+          "tx_retry_pct_cumulative": 18.9,
+          "tx_retry_pct_recent": 15.1,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:84",
+          "ip": "192.0.2.6",
+          "name": "Patio Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:03",
+          "ap_name": "Garage",
+          "band": "2.4GHz",
+          "channel": 11,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -78,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 13.0,
+          "rx_rate_mbps": 6.5,
+          "satisfaction_pct": 55,
+          "tx_retry_pct_cumulative": 23.1,
+          "tx_retry_pct_recent": 18.5,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "02:00:00:00:00:0c",
+          "ip": "192.0.2.14",
+          "name": null,
+          "vendor": null,
+          "private_mac": true,
+          "ssid": "guest-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "5GHz",
+          "channel": 36,
+          "wifi_standard": "ax",
+          "wifi_standard_raw": "ax",
+          "signal_dbm": -64,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 576.5,
+          "rx_rate_mbps": 432.4,
+          "satisfaction_pct": 92,
+          "tx_retry_pct_cumulative": 4.4,
+          "tx_retry_pct_recent": 3.5,
+          "connected_s": 1800,
+          "idle_s": 4,
+          "guest": true
+        },
+        {
+          "id": "00:00:5e:00:53:8a",
+          "ip": "192.0.2.12",
+          "name": "Doorbell",
+          "vendor": "Example Security",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "2.4GHz",
+          "channel": 6,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -68,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 57.8,
+          "rx_rate_mbps": 28.9,
+          "satisfaction_pct": 81,
+          "tx_retry_pct_cumulative": 14.3,
+          "tx_retry_pct_recent": 11.4,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "02:00:00:00:00:06",
+          "ip": "192.0.2.8",
+          "name": "Family Laptop",
+          "vendor": "Example Computers",
+          "private_mac": true,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "6GHz",
+          "channel": 37,
+          "wifi_standard": "be",
+          "wifi_standard_raw": "be",
+          "signal_dbm": -51,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 2161.0,
+          "rx_rate_mbps": 1729.0,
+          "satisfaction_pct": 99,
+          "tx_retry_pct_cumulative": 0.9,
+          "tx_retry_pct_recent": 0.7,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "02:00:00:00:00:07",
+          "ip": "192.0.2.9",
+          "name": "Family Phone",
+          "vendor": "Example Phones",
+          "private_mac": true,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "5GHz",
+          "channel": 36,
+          "wifi_standard": "ax",
+          "wifi_standard_raw": "ax",
+          "signal_dbm": -57,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 1200.9,
+          "rx_rate_mbps": 864.7,
+          "satisfaction_pct": 97,
+          "tx_retry_pct_cumulative": 2.6,
+          "tx_retry_pct_recent": 2.1,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:81",
+          "ip": "192.0.2.3",
+          "name": "Kitchen Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "2.4GHz",
+          "channel": 6,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -58,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 72.2,
+          "rx_rate_mbps": 65.0,
+          "satisfaction_pct": 91,
+          "tx_retry_pct_cumulative": 8.4,
+          "tx_retry_pct_recent": 6.7,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:82",
+          "ip": "192.0.2.4",
+          "name": "Living Room Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:01",
+          "ap_name": "Living Room",
+          "band": "2.4GHz",
+          "channel": 6,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -52,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 72.2,
+          "rx_rate_mbps": 72.2,
+          "satisfaction_pct": 93,
+          "tx_retry_pct_cumulative": 6.9,
+          "tx_retry_pct_recent": 5.5,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:83",
+          "ip": "192.0.2.5",
+          "name": "Bedroom Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:02",
+          "ap_name": "Office",
+          "band": "2.4GHz",
+          "channel": 1,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -63,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 57.8,
+          "rx_rate_mbps": 52.0,
+          "satisfaction_pct": 88,
+          "tx_retry_pct_cumulative": 10.2,
+          "tx_retry_pct_recent": 8.2,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:85",
+          "ip": "192.0.2.7",
+          "name": "Den Speaker",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:02",
+          "ap_name": "Office",
+          "band": "2.4GHz",
+          "channel": 1,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -60,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 65.0,
+          "rx_rate_mbps": 58.5,
+          "satisfaction_pct": 90,
+          "tx_retry_pct_cumulative": 7.7,
+          "tx_retry_pct_recent": 6.2,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:8b",
+          "ip": "192.0.2.13",
+          "name": "Office Printer",
+          "vendor": "Example Printing",
+          "private_mac": false,
+          "ssid": "main-example",
+          "ap_id": "00:00:5e:00:53:02",
+          "ap_name": "Office",
+          "band": "5GHz",
+          "channel": 149,
+          "wifi_standard": "ac",
+          "wifi_standard_raw": "ac",
+          "signal_dbm": -55,
+          "noise_dbm": -101,
+          "tx_rate_mbps": 351.0,
+          "rx_rate_mbps": 292.5,
+          "satisfaction_pct": 96,
+          "tx_retry_pct_cumulative": 3.1,
+          "tx_retry_pct_recent": 2.5,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        },
+        {
+          "id": "00:00:5e:00:53:88",
+          "ip": "192.0.2.10",
+          "name": "Thermostat",
+          "vendor": "Example Climate",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "ap_id": "00:00:5e:00:53:02",
+          "ap_name": "Office",
+          "band": "2.4GHz",
+          "channel": 1,
+          "wifi_standard": "n",
+          "wifi_standard_raw": "ng",
+          "signal_dbm": -66,
+          "noise_dbm": -95,
+          "tx_rate_mbps": 52.0,
+          "rx_rate_mbps": 26.0,
+          "satisfaction_pct": 89,
+          "tx_retry_pct_cumulative": 11.0,
+          "tx_retry_pct_recent": 8.8,
+          "connected_s": 86400,
+          "idle_s": 4,
+          "guest": false
+        }
+      ]
+    }
+  }
+}

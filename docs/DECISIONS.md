@@ -8,7 +8,7 @@ and a new entry that supersedes it. Entries are never edited away.
 
 | # | Question | Proposal |
 |---|----------|----------|
-| D7 | **Proactive messages** (`musegadget send-user-msg`). | Not in v1, because it needs background activity. Revisit with a concrete need. |
+| D7 | **Proactive messages** (`musegadget send-user-msg`). | Not in v1: Muse decides when to collect and when to look (rule 3, D14), and pushing messages would reverse that. Revisit with a concrete need. |
 | D10 | **UniFi API-key auth** instead of a View Only password account (module item U4). | Password first, because its endpoint support is known. Add the key option once U4 is verified on a real console. |
 | D11 | **SDK run-as account with or without sudo.** Sudo is required to install. Whether Muse's run-as account keeps sudo afterwards is separate. With sudo, Muse can e.g. restart `musegadget` and install drop-ins itself. Without it, those steps stay with the owner. | Owner's choice, documented in README. Housesitter needs no sudo at run time. `doctor` reports which mode is in effect. |
 
@@ -133,3 +133,35 @@ handoff's "license not chosen; don't publish."
   `python:3.9` container) or the Python floor needs revisiting. Python 3.9
   itself reached end of life upstream in October 2025, and the floor
   exists only to match Raspberry Pi OS Bullseye (D3).
+
+### D14. A read-only dashboard; Muse decides when to collect (2026-11-06, Jon)
+- **Decision:** Housesitter serves a read-only web dashboard on the Pi
+  (`docs/DASHBOARD.md`). It shows what Muse last collected, and may later
+  drive an e-ink display. Hard rule 3 changes from "nothing runs in the
+  background" to: collection happens only when Muse (or the owner) runs a
+  command. Housesitter installs no schedules, and how often to collect is up
+  to Muse. The dashboard server is the one allowed long-running process. It
+  only serves saved results: it never contacts upstream, never triggers
+  collection, and never writes.
+- **Why:**
+  - Muse analyses deltas and trends, so it should own the cadence.
+  - Muse's ad-hoc demo on the Pi already serves a page on port 8080 that
+    updates when the scripts run, and a dashboard is useful for people.
+  - It partly reverses D0, which dropped the old web hub. The analysis
+    parts of that hub stay dropped.
+- **How:**
+  - The backend and front end are split by a versioned JSON contract
+    (`housesitter.dashboard/1`) with invented fixtures.
+  - Claude builds the backend and tests. GPT (Codex, `gpt-6.1-sol`) builds
+    front-end options for a bakeoff, and Jon picks the winner.
+- **Security:**
+  - The server answers GET only and sends a strict Content-Security-Policy
+    (no inline scripts).
+  - It binds to `127.0.0.1` by default. The owner sets a LAN address to
+    reach it from other devices.
+  - No login in v1, because it is read-only. Anyone who can reach the port
+    sees the dashboard, identifiers included.
+- **Rejected:**
+  - Static HTML files with no server (Jon chose a local server).
+  - Scheduled collection on the Pi.
+  - Server-side analysis on the dashboard.
