@@ -195,7 +195,7 @@ AGENTS.md  CLAUDE.md  README.md  pyproject.toml
 docs/      ARCHITECTURE.md  MODULES.md  REVIEW.md  DECISIONS.md  GITHUB.md  DASHBOARD.md
            modules/<id>.md
 scripts/   pr_evidence.py  make_dashboard_fixtures.py  dev_dashboard.py
-web/       dashboard front end: index.html, eink.html, static assets (Planned)
+web/       dashboard front end: index.html, eink.html, static assets, DESIGN.md
 src/housesitter/
   sdk.py              public module API: Module, Command, Param, Context, Result
   core/               CLI, registry, config, secrets, http, envelope, storage, dropins
