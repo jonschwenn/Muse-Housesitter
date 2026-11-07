@@ -193,8 +193,7 @@ PR #1 predates the tooling and has no evidence.
   `ci-ok`, which passes only if `test` and `evidence` both passed or were
   skipped on purpose. `.github/workflows/ci-guard.yml` reports `ci-guard`
   (D16). The `main` ruleset requires both `ci-ok` and `ci-guard`, so neither
-  CI nor the guard can be skipped (see `docs/GITHUB.md`; `ci-guard`
-  enforcement is applied after the bootstrap merges, per step 3 there).
+  CI nor the guard can be skipped (see `docs/GITHUB.md`).
   `.github/workflows/evidence-publish.yml` publishes the evidence comment;
   it is not a required check and never blocks a merge.
 - If CI is red, stop. Don't argue with red CI in a PR description.

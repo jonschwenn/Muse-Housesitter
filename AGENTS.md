@@ -150,9 +150,8 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
   and tests with read-only tokens, `ci-guard.yml` guards the testing
   mechanism, `evidence-publish.yml` publishes the evidence comment.
   `main` is protected by a ruleset that requires a PR and green `ci-ok`
-  and `ci-guard` checks (`docs/GITHUB.md`; `ci-guard` enforcement is
-  applied after the bootstrap merges, per step 3 there). A change is not
-  done while CI is red.
+  and `ci-guard` checks (`docs/GITHUB.md`). A change is not done while CI
+  is red.
 
 ## Documentation rules
 
