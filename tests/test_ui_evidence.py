@@ -413,6 +413,27 @@ def test_validator_rejects_missing_or_non_list_captures(tmp_path, captures):
     assert any("captures list" in e for e in ui_evidence.validate_artifact(directory))
 
 
+@pytest.mark.parametrize("entry", [42, "x", None])
+def test_validator_names_invalid_capture_entries_plainly(tmp_path, entry):
+    # Valid JSON with a junk entry: fail closed, with a message that says so
+    # (not "not valid JSON", and no Python internals).
+    directory = write_valid_artifact(tmp_path / "badentry")
+    manifest = json.loads((directory / ui_evidence.MANIFEST_NAME).read_text())
+    manifest["captures"].append(entry)
+    (directory / ui_evidence.MANIFEST_NAME).write_text(json.dumps(manifest))
+    errors = ui_evidence.validate_artifact(directory)
+    assert "manifest has an invalid capture entry" in errors
+
+
+def test_validator_caps_echoed_manifest_names(tmp_path):
+    directory = write_valid_artifact(tmp_path / "longname")
+    manifest = json.loads((directory / ui_evidence.MANIFEST_NAME).read_text())
+    manifest["captures"][0]["head"] = "A" * 10_000
+    (directory / ui_evidence.MANIFEST_NAME).write_text(json.dumps(manifest))
+    errors = ui_evidence.validate_artifact(directory)
+    assert errors and all(len(e) < 300 for e in errors)
+
+
 # Manifest building with undecodable PNGs ----------------------------------------
 
 

@@ -254,7 +254,7 @@ def load_ui_manifest(ui_dir: Path | None) -> dict | None:
     path = Path(ui_dir) / "ui_manifest.json"
     if not path.is_file():
         return None
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not isinstance(data.get("captures"), list):
         raise ValueError("UI manifest must be an object with a captures list")
     return data

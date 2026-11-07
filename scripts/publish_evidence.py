@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -93,6 +94,12 @@ def render_comment(artifact: Path, repo: str, pr: int, head_sha: str) -> str:
     text = read_text_capped(artifact / "evidence.md", EVIDENCE_MAX_BYTES, "evidence.md")
     check_evidence_text(text)
     ui_dir = artifact / "ui_out"
+    manifest_path = ui_dir / ui_evidence.MANIFEST_NAME
+    if os.path.lexists(manifest_path) and not has_manifest(ui_dir):
+        # A symlink or directory in the manifest's place is a broken or
+        # hostile artifact, not "no UI evidence": refuse, don't drop the
+        # Web UI section quietly.
+        raise PublishError(f"{ui_evidence.MANIFEST_NAME} is not a regular file")
     if not ui_dir.exists() or not has_manifest(ui_dir):
         # No manifest (the capture died before writing one): the text
         # comment still publishes. No web/ on either side is not this case:
@@ -103,7 +110,7 @@ def render_comment(artifact: Path, repo: str, pr: int, head_sha: str) -> str:
         raise PublishError("artifact validation failed: " + "; ".join(errors[:10]))
     try:
         manifest = pr_evidence.load_ui_manifest(ui_dir)
-    except ValueError as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         # The validator and the loader must agree, but if they ever drift
         # (or the file changes between the two reads), an artifact problem
         # is still an invalid artifact (exit 1), never a bad argument.
@@ -141,7 +148,10 @@ def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
             copied.append(name)
     manifest_names: set[str] = set()
     data = json.loads((dest / ui_evidence.MANIFEST_NAME).read_text(encoding="utf-8"))
-    for capture in data.get("captures", []):
+    captures = data.get("captures") if isinstance(data, dict) else None
+    if not isinstance(captures, list) or not all(isinstance(c, dict) for c in captures):
+        raise PublishError("manifest must be an object with a list of capture objects")
+    for capture in captures:
         for key in ("base", "head", "diff"):
             value = capture.get(key)
             if isinstance(value, str):

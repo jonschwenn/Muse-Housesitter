@@ -891,9 +891,10 @@ def validate_artifact(directory: Path) -> list:
         errors.append(f"manifest is over the {MANIFEST_MAX_BYTES} cap")
     else:
         try:
-            manifest = json.loads(manifest_path.read_text())
-        except ValueError as exc:
-            errors.append(f"manifest is not valid JSON: {exc}")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError) as exc:
+            # RecursionError: deeply nested JSON well under the size cap.
+            errors.append(f"manifest is unreadable or not valid JSON: {type(exc).__name__}")
         else:
             if not isinstance(manifest, dict) or not isinstance(
                 manifest.get("captures"), list
@@ -906,12 +907,13 @@ def validate_artifact(directory: Path) -> list:
                         for c in manifest.get("captures", [])
                         for n in ("base", "head", "diff")
                     }
-                except (AttributeError, TypeError) as exc:
-                    errors.append(f"manifest is not valid JSON: {exc}")
+                except (AttributeError, TypeError):
+                    errors.append("manifest has an invalid capture entry")
                 else:
                     names.discard(None)
                     for name in sorted(names, key=str):
-                        text = str(name)
+                        # Manifest values are hostile: cap what the log echoes.
+                        text = str(name)[:120]
                         if ".." in text.split("/"):
                             errors.append(f"manifest path escapes the directory: {text}")
                         elif not CAPTURE_RE.fullmatch(text):

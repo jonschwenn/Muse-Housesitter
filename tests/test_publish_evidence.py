@@ -228,13 +228,82 @@ def test_render_rejects_bad_caller_arguments(tmp_path):
 # exit 2.
 
 
-@pytest.mark.parametrize("manifest", [{"version": 1}, {"version": 1, "captures": {}}])
+@pytest.mark.parametrize(
+    "manifest",
+    [{"version": 1}, {"version": 1, "captures": {}}, {"version": 1, "captures": None}],
+)
 def test_render_manifest_without_captures_list_is_invalid_artifact(tmp_path, manifest):
     artifact = _artifact(tmp_path, pngs=(), manifest=manifest)
     rc, out = _render(tmp_path, artifact)
     assert rc == 1
     assert not (out / "comment.md").exists()
     assert not (out / "files").exists()
+
+
+def test_render_deeply_nested_manifest_is_invalid_artifact(tmp_path, capsys):
+    # Well under the size cap, but deep enough to exhaust json's recursion.
+    artifact = _artifact(tmp_path, pngs=())
+    (artifact / "ui_out" / "ui_manifest.json").write_text("[" * 50_000 + "]" * 50_000)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert "Traceback" not in capsys.readouterr().err
+    assert not (out / "comment.md").exists()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "broken-symlink", "directory"])
+def test_render_manifest_not_a_regular_file_is_invalid_artifact(tmp_path, kind):
+    # Not "no UI evidence": a symlink or directory in the manifest's place
+    # must refuse the publish, not quietly drop the Web UI section.
+    artifact = _artifact(tmp_path)
+    manifest = artifact / "ui_out" / "ui_manifest.json"
+    manifest.unlink()
+    if kind == "symlink":
+        manifest.symlink_to("typical__index-phone__head.png")
+    elif kind == "broken-symlink":
+        manifest.symlink_to("does-not-exist.json")
+    else:
+        manifest.mkdir()
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
+    assert not (out / "files").exists()
+
+
+def test_render_non_utf8_manifest_is_invalid_artifact(tmp_path, capsys):
+    artifact = _artifact(tmp_path, pngs=())
+    (artifact / "ui_out" / "ui_manifest.json").write_bytes(b'{"captures": ["\xff"]}')
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert "Traceback" not in capsys.readouterr().err
+    assert not (out / "comment.md").exists()
+
+
+def test_render_unreadable_manifest_is_invalid_artifact(tmp_path, monkeypatch, capsys):
+    # chmod 000 doesn't stop root, so simulate the read failing.
+    artifact = _artifact(tmp_path)
+    real_read_text = Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if self.name == "ui_manifest.json":
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert "Traceback" not in capsys.readouterr().err
+    assert not (out / "comment.md").exists()
+
+
+@pytest.mark.parametrize("captures", [[42], {"head": "x"}, None])
+def test_copy_pushable_files_refuses_bad_capture_shapes(tmp_path, captures):
+    # Defence in depth: the copy step re-reads the manifest and must refuse,
+    # not crash, even though validation normally stops these first.
+    ui_dir = tmp_path / "ui_out"
+    ui_dir.mkdir()
+    (ui_dir / "ui_manifest.json").write_text(json.dumps({"version": 1, "captures": captures}))
+    with pytest.raises(publish_evidence.PublishError):
+        publish_evidence.copy_pushable_files(ui_dir, tmp_path / "dest")
 
 
 # Substitute --------------------------------------------------------------------
