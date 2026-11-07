@@ -200,6 +200,34 @@ handoff's "license not chosen; don't publish."
   - Scheduled collection on the Pi.
   - Server-side analysis on the dashboard.
 
+### D15. Always-on allow-list refusals; 3xx as `upstream_unexpected` (2026-11-06, Jon)
+- **Decision:** two points where the as-built core is stricter than the
+  first design drafts, kept as the design:
+  - Percent-escapes (`%`) and `..` segments are refused for every request
+    target, no matter what an allow-list entry's pattern would match. Only
+    a query string (`?...`) can be opted into, per entry, via
+    `allow_query`.
+  - A 3xx response is never followed and never returned as a normal
+    response: it is raised as `upstream_unexpected`, with the numeric
+    status kept on the error's `status` attribute, so callers such as
+    flavour detection can tell a redirect apart without reading headers.
+- **Why:**
+  - Encoded traversal must not depend on how carefully an entry's pattern
+    is written. A permissive pattern such as `/api/.*` is legitimate for
+    some controllers, but it must still be safe against `%2e%2e`.
+  - Following a redirect would leave the allow-list: the `Location` can
+    point at any path. Raising keeps every upstream contact inside
+    `fullmatch`. Keeping the numeric status still lets callers
+    distinguish "the controller redirected me" from other unexpected
+    states, which flavour detection needs.
+- **Rejected:**
+  - Leaving `%`/`..` to each pattern (one careless pattern reopens
+    traversal).
+  - Returning the 3xx as a normal `Response` (tempts the caller to follow
+    `Location`, re-entering the client outside the allow-list).
+  - Dropping the status and reporting a bare `upstream_unexpected`
+    (flavour detection could no longer tell a redirect apart).
+
 ### D16. Bootstrap: an outsider cannot weaken validation and stay green (2026-11-06, Jon)
 - **Threat model:** screenshots are a review convenience, not trusted
   fact; a faked screenshot is acceptable risk. What must be impossible: an
