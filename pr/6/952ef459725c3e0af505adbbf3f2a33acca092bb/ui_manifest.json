@@ -1,0 +1,285 @@
+{
+ "version": 1,
+ "captures": [
+  {
+   "fixture": "edge",
+   "view": "index-phone",
+   "status": "added",
+   "base": null,
+   "head": "edge__index-phone__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "edge",
+   "view": "index-desktop",
+   "status": "added",
+   "base": null,
+   "head": "edge__index-desktop__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "edge",
+   "view": "index-desktop-dark",
+   "status": "added",
+   "base": null,
+   "head": "edge__index-desktop-dark__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "edge",
+   "view": "eink",
+   "status": "added",
+   "base": null,
+   "head": "edge__eink__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "empty",
+   "view": "index-phone",
+   "status": "added",
+   "base": null,
+   "head": "empty__index-phone__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "empty",
+   "view": "index-desktop",
+   "status": "added",
+   "base": null,
+   "head": "empty__index-desktop__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "empty",
+   "view": "index-desktop-dark",
+   "status": "added",
+   "base": null,
+   "head": "empty__index-desktop-dark__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "empty",
+   "view": "eink",
+   "status": "added",
+   "base": null,
+   "head": "empty__eink__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "error",
+   "view": "index-phone",
+   "status": "added",
+   "base": null,
+   "head": "error__index-phone__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "error",
+   "view": "index-desktop",
+   "status": "added",
+   "base": null,
+   "head": "error__index-desktop__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "error",
+   "view": "index-desktop-dark",
+   "status": "added",
+   "base": null,
+   "head": "error__index-desktop-dark__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "error",
+   "view": "eink",
+   "status": "added",
+   "base": null,
+   "head": "error__eink__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "failed",
+   "view": "index-phone",
+   "status": "added",
+   "base": null,
+   "head": "failed__index-phone__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "failed",
+   "view": "index-desktop",
+   "status": "added",
+   "base": null,
+   "head": "failed__index-desktop__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "failed",
+   "view": "index-desktop-dark",
+   "status": "added",
+   "base": null,
+   "head": "failed__index-desktop-dark__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "failed",
+   "view": "eink",
+   "status": "added",
+   "base": null,
+   "head": "failed__eink__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "hostile",
+   "view": "index-phone",
+   "status": "added",
+   "base": null,
+   "head": "hostile__index-phone__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "hostile",
+   "view": "index-desktop",
+   "status": "added",
+   "base": null,
+   "head": "hostile__index-desktop__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "hostile",
+   "view": "index-desktop-dark",
+   "status": "added",
+   "base": null,
+   "head": "hostile__index-desktop-dark__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "hostile",
+   "view": "eink",
+   "status": "added",
+   "base": null,
+   "head": "hostile__eink__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "large",
+   "view": "index-phone",
+   "status": "added",
+   "base": null,
+   "head": "large__index-phone__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "large",
+   "view": "index-desktop",
+   "status": "added",
+   "base": null,
+   "head": "large__index-desktop__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "large",
+   "view": "index-desktop-dark",
+   "status": "added",
+   "base": null,
+   "head": "large__index-desktop-dark__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "large",
+   "view": "eink",
+   "status": "added",
+   "base": null,
+   "head": "large__eink__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "typical",
+   "view": "index-phone",
+   "status": "added",
+   "base": null,
+   "head": "typical__index-phone__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "typical",
+   "view": "index-desktop",
+   "status": "added",
+   "base": null,
+   "head": "typical__index-desktop__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "typical",
+   "view": "index-desktop-dark",
+   "status": "added",
+   "base": null,
+   "head": "typical__index-desktop-dark__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "typical",
+   "view": "eink",
+   "status": "added",
+   "base": null,
+   "head": "typical__eink__head.png",
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  }
+ ]
+}
