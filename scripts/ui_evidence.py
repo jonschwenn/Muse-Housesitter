@@ -423,8 +423,11 @@ def check_page(page, view_id: str, shot: bytes) -> list:
 
 def capture_side(
     tree: Path, out_dir: Path, side: str, check: bool, channel: str | None = None
-) -> dict:
-    """Serve one tree and capture every fixture x view. Returns name -> record.
+) -> tuple:
+    """Serve one tree and capture every fixture x view.
+
+    Returns (records, browser): name -> record, plus the browser that
+    launched (the channel, None for bundled Chromium, and its version).
 
     ``channel`` picks an installed browser (e.g. "chrome") instead of
     Playwright's bundled Chromium. Base and head are always captured with
@@ -450,6 +453,7 @@ def capture_side(
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(channel=channel)
             print(f"ui_evidence: {side} captured with {channel or 'chromium'} {browser.version}")
+            info = browser_info(channel, browser.version)
             try:
                 for fixture in fixtures_in(tree):
                     for view_id, page_file, width, height, scheme, full, _ in VIEWS:
@@ -520,7 +524,7 @@ def capture_side(
     finally:
         server.terminate()
         server.wait(timeout=15)
-    return records
+    return records, info
 
 
 class _Page:
@@ -538,8 +542,70 @@ class _Page:
 # Manifest, comment section, and validation
 # ---------------------------------------------------------------------------
 
+# The comment intro names the browser that captured the screenshots: CI runs
+# with the runner's Google Chrome (--browser-channel chrome), local runs with
+# Playwright's bundled Chromium (no channel). scripts/pr_evidence.py keeps its
+# own copy of every UI_* value below (it never imports this module), and a
+# test pins the copies identical.
+UI_INTRO = (
+    "Fixture house only. `scripts/ui_evidence.py` captures every fixture in "
+    "`tests/fixtures/dashboard/` at phone (360x780), desktop (1280x900, light "
+    "and dark), and e-ink (800x480) sizes."
+)
+UI_IMAGES_NOTE = (
+    "Images live on the `pr-evidence` branch, pinned to the evidence push, "
+    "so they never change afterwards."
+)
+UI_BROWSER_UNKNOWN = "The manifest does not record a recognised browser."
+UI_BROWSER_NAMES = {
+    "chromium": "Playwright's bundled Chromium",
+    "chrome": "Google Chrome",
+    "chrome-beta": "Google Chrome Beta",
+    "msedge": "Microsoft Edge",
+}
+UI_BROWSER_VERSION_RE = re.compile(r"[0-9]+(\.[0-9]+){0,3}")
+UI_BROWSER_VERSION_MAX_LEN = 32
+
+
+def browser_info(channel: str | None, version: str) -> dict:
+    """The manifest's browser record for a side that captured.
+
+    A None channel means Playwright's bundled Chromium (the default launch).
+    """
+    return {"channel": channel or "chromium", "version": version}
+
+
+def browser_display(manifest: dict) -> str | None:
+    """E.g. "Google Chrome 131.0.6778" for a recognised browser, else None.
+
+    The manifest is untrusted data in the publisher (a PR-authored artifact),
+    so the channel goes through an allow-list and the version through a strict
+    numeric shape; anything else renders the neutral sentence, never the bad
+    value.
+    """
+    browser = manifest.get("browser")
+    if not isinstance(browser, dict):
+        return None
+    channel = browser.get("channel")
+    version = browser.get("version")
+    if not isinstance(channel, str) or not isinstance(version, str):
+        return None
+    name = UI_BROWSER_NAMES.get(channel)
+    if name is None:
+        return None
+    if len(version) > UI_BROWSER_VERSION_MAX_LEN:
+        return None
+    if not UI_BROWSER_VERSION_RE.fullmatch(version):
+        return None
+    return f"{name} {version}"
+
+
 def build_manifest(
-    base_tree: Path, head_tree: Path, out_dir: Path, head_records: dict
+    base_tree: Path,
+    head_tree: Path,
+    out_dir: Path,
+    head_records: dict,
+    browser: dict | None = None,
 ) -> dict:
     """Classify every fixture x view pair, writing diff images for changes."""
     base_fixtures = set(fixtures_in(base_tree)) if has_web(base_tree) else set()
@@ -591,7 +657,7 @@ def build_manifest(
                     "head_problems": problems,
                 }
             )
-    return {"version": 1, "captures": captures}
+    return {"version": 1, "browser": browser, "captures": captures}
 
 
 def img_tag(src: str, width: int, alt: str) -> str:
@@ -651,13 +717,15 @@ def build_ui_section(
     lines = [
         "## Web UI",
         "",
-        "Fixture house only. Captured with headless Chromium via "
-        "`scripts/ui_evidence.py`: every fixture in `tests/fixtures/dashboard/` "
-        "at phone (360x780), desktop (1280x900, light and dark), and e-ink "
-        "(800x480) sizes. Images live on the `pr-evidence` branch, pinned to "
-        "the evidence push, so they never change afterwards.",
+        UI_INTRO,
         "",
     ]
+    if manifest["captures"]:
+        display = browser_display(manifest)
+        if display is None:
+            lines += [UI_BROWSER_UNKNOWN + " " + UI_IMAGES_NOTE, ""]
+        else:
+            lines += ["Captured headless with " + display + ". " + UI_IMAGES_NOTE, ""]
     if not base_has_web:
         lines += [
             "The base has no `web/` directory, so every capture is new "
@@ -670,19 +738,20 @@ def build_ui_section(
             "nothing to capture.",
             "",
         ]
-    lines += [
-        "| Capture | Status | Checks |",
-        "|---------|--------|--------|",
-    ]
-    for cap in manifest["captures"]:
-        shown = list(cap.get("head_problems") or [])
-        if cap.get("diff_error"):
-            shown.append(str(cap["diff_error"])[:MAX_PROBLEM_LEN])
-        checks = "pass" if not shown else "; ".join(shown)
+    else:
         lines += [
-            f"| `{cap['fixture']} / {cap['view']}` | {cap['status']} "
-            f"| {checks} |"
+            "| Capture | Status | Checks |",
+            "|---------|--------|--------|",
         ]
+        for cap in manifest["captures"]:
+            shown = list(cap.get("head_problems") or [])
+            if cap.get("diff_error"):
+                shown.append(str(cap["diff_error"])[:MAX_PROBLEM_LEN])
+            checks = "pass" if not shown else "; ".join(shown)
+            lines += [
+                f"| `{cap['fixture']} / {cap['view']}` | {cap['status']} "
+                f"| {checks} |"
+            ]
     lines += [""]
     table_section = "\n".join(lines)
 
@@ -865,15 +934,21 @@ def main(argv: list | None = None) -> int:
     base_web = has_web(args.base_tree)
     head_web = has_web(args.head_tree)
     head_records: dict = {}
+    base_browser = head_browser = None
     if base_web:
-        capture_side(
+        _, base_browser = capture_side(
             args.base_tree, args.out_dir, "base", check=False, channel=args.browser_channel
         )
     if head_web:
-        head_records = capture_side(
+        head_records, head_browser = capture_side(
             args.head_tree, args.out_dir, "head", check=True, channel=args.browser_channel
         )
-    manifest = build_manifest(args.base_tree, args.head_tree, args.out_dir, head_records)
+    # Both sides capture with the same browser in one run; the head side's
+    # record wins when it exists, else the base's, else null.
+    browser = head_browser if head_browser is not None else base_browser
+    manifest = build_manifest(
+        args.base_tree, args.head_tree, args.out_dir, head_records, browser=browser
+    )
     (args.out_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=1) + "\n")
     budget = 60_000  # pr_evidence.py re-trims against the shared budget on merge
     full, table = build_ui_section(manifest, args.repo, args.pr, args.head_sha, budget, base_web)
