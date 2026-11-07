@@ -517,17 +517,31 @@ def test_capture_name_rule():
 # Height cap ------------------------------------------------------------------------
 
 
-def test_tall_page_is_clipped_at_the_cap(monkeypatch):
+def test_page_height_check_cap_covers_the_stress_fixture():
     # 120,000 covers the committed fixtures with headroom: the 600-client
     # stress fixture renders ~104,200 CSS px tall on the phone view, so the
     # suggested 16,000 would fail every run on legitimate evidence.
     assert ui_evidence.MAX_PAGE_HEIGHT_PX == 120_000
-    monkeypatch.setattr(ui_evidence, "MAX_PAGE_HEIGHT_PX", 10)
+
+
+def test_saved_shots_are_cropped_well_under_the_file_cap():
+    # Full-height shots of the 600-client fixture were ~9 MB in Google Chrome,
+    # over MAX_FILE_BYTES, so main's publisher refused the whole artifact.
+    # Cropping is independent of the page-height check.
+    assert ui_evidence.MAX_SHOT_HEIGHT_PX == 8_000
+    assert ui_evidence.MAX_SHOT_HEIGHT_PX < ui_evidence.MAX_PAGE_HEIGHT_PX
+    # Widest view x crop height x 4 bytes, raw: compressed PNGs of real pages
+    # are far smaller, and the e2e test checks actual sizes.
+    assert 1280 * ui_evidence.MAX_SHOT_HEIGHT_PX * 4 < 6 * ui_evidence.MAX_FILE_BYTES
+
+
+def test_tall_shot_is_cropped(monkeypatch):
+    monkeypatch.setattr(ui_evidence, "MAX_SHOT_HEIGHT_PX", 10)
     wide = 2
     tall_shot = ui_evidence.encode_png(wide, 12, 2, b"\x01\x02\x03" * wide * 12)
-    clipped, was_clipped = ui_evidence.clip_to_max_height(tall_shot)
-    assert was_clipped is True
-    width, height, _ = ui_evidence.decode_png(clipped)
+    cropped, was_cropped = ui_evidence.clip_to_max_height(tall_shot)
+    assert was_cropped is True
+    width, height, _ = ui_evidence.decode_png(cropped)
     assert (width, height) == (wide, 10)
     small = rgb_png(3, 3)
     assert ui_evidence.clip_to_max_height(small) == (small, False)

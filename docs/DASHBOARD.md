@@ -1,6 +1,6 @@
 # Dashboard
 
-Status: **contract defined; front end and server Planned.** This document is
+Status: **contract defined; front end built; server Planned.** This document is
 the handoff between the backend (the server and the data it serves) and the
 front end (the pages in `web/`). Each side builds against it without waiting
 for the other.
@@ -36,7 +36,11 @@ browser ── GET / , /eink.html, /*.js, /*.css ──▶ housesitter serve (Pl
   page can choose the fixture with `?fixture=<name>`. This is what the front
   end is built and tested against. Regenerate the fixtures with
   `scripts/make_dashboard_fixtures.py`, never by hand.
-- **Front end (Planned):** static files in `web/`.
+- **Front end (exists):** `web/index.html`, `web/eink.html`,
+  `web/dashboard.js`, `web/dashboard.css`, and `web/eink.css`, with design
+  notes in `web/DESIGN.md`. No build step or external assets. Until
+  `housesitter serve` exists, view it with `scripts/dev_dashboard.py`
+  against the fixtures.
 
 ## 3. Page contract (front end)
 
@@ -272,16 +276,22 @@ fields, units, and meanings. Identifiers are returned as they are (D2).
 Front-end PRs carry rendered before/after screenshots (REVIEW.md,
 "Evidence"). Each page is captured for each fixture, with `index.html` at
 phone and desktop widths and `eink.html` at 800 × 480. The screenshot tooling
-is **Planned**.
+exists (`scripts/ui_evidence.py`, tested in `tests/test_ui_evidence.py`)
+and runs in CI. The evidence-publish workflow publishes the screenshots
+(D16).
 
-## 7. Design bakeoff (in progress)
+## 7. Design bakeoff (complete)
 
-The first front end is chosen by a bakeoff:
-- Several design options are each built in their own branch against this
-  contract and the fixtures.
-- Each option includes both `index.html` and `eink.html`, and handles every
-  state in §3.
-- Jon compares rendered screenshots of every option on every fixture and
-  picks one (or a combination).
-- The winner is merged through a normal PR with the review gates. The
-  losing branches are closed and recorded in DECISIONS.
+Three options were built against this contract and the fixtures:
+- A, "control room": a detailed view.
+- B, "house at a glance": an e-ink-first view.
+- C, "change-first": leads with what changed since the last snapshot.
+
+Jon chose C's overall design, A's per-radio and per-client detail, and B's
+e-ink composition, with the Slate / Blue palette in light and dark modes
+(D17). The A/B/C branches were not merged. The front end in `web/` brings
+these choices together.
+
+Jon expects to tweak specific aspects over time for actionability and
+quality, each through a normal PR with screenshot evidence. See
+[DECISIONS D17](DECISIONS.md#d17-dashboard-design-bakeoff-outcome-2026-11-07-jon).

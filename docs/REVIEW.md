@@ -102,22 +102,32 @@ PR #1 predates the tooling and has no evidence.
   captures every fixture in `tests/fixtures/dashboard/` at phone (360x780,
   full page), desktop (1280x900, full page, light and dark), and e-ink
   (800x480, never full page). A tree without `web/` contributes "no page"
-  for its side. Playwright is a dev/CI-only extra (`ui` in
+  for its side. CI captures with Google Chrome on GitHub's runner
+  (`--browser-channel chrome`); local runs use Playwright's bundled
+  Chromium. Playwright is a dev/CI-only extra (`ui` in
   `pyproject.toml`), never a runtime dependency.
 - Capture file names are `<fixture>__<view>__<side>.png`, parsed from the
   right (the view and side are fixed words). Fixture stems are lowercase
   alphanumerics plus `-` and single `_`, at most 48 chars, with no `__`
-  inside; anything else fails validation. Full-page shots are clipped at
-  120,000 CSS px tall (the 600-client fixture reaches ~104,200 px on phone,
-  measured), and a clipped page records a "page taller than 120000 px"
-  check failure.
+  inside; anything else fails validation. The page-height check measures
+  the whole page: above 120,000 CSS px (`MAX_PAGE_HEIGHT_PX`), it records a
+  "page taller than 120000 px" check failure. This limit covers the
+  600-client stress fixture (~104,200 px on phone) with headroom and bounds
+  runaway pages. Saved full-page screenshots are separately cropped to the
+  top 8,000 CSS px (`MAX_SHOT_HEIGHT_PX`); this crop is not a check failure.
+  It keeps each image well under the 8 MB per-image cap and readable in a PR
+  comment. In Google Chrome on the CI runner, the stress fixture's
+  full-height shots were ~9 MB each, so main's publisher refused the whole
+  evidence upload. A visual change only below the first 8,000 px of a page
+  will not appear in the screenshots or the pixel diff.
 - The same script runs the UI checks, and any failure fails the `evidence`
   job: a console error or warning, a page error, a CSP or Trusted Types
   violation, a dialog, horizontal page overflow, internal clipping (an
   element with `overflow` hidden/clip whose scroll size exceeds its client
   size by more than 1 px; intentionally scrollable regions are allowed), an
-  e-ink shot that is not exactly 800x480, and a page taller than the height
-  cap. A failed `evidence` run still gets its comment: the publisher accepts
+  e-ink shot that is not exactly 800x480, and a page taller than the
+  120,000 CSS px page-height limit. A failed `evidence` run still gets its
+  comment: the publisher accepts
   `success` and `failure` conclusions, the Checks column shows the failures,
   and a top-line notice says the checks failed. `ci-ok` still fails, because
   `evidence` did.
@@ -193,8 +203,7 @@ PR #1 predates the tooling and has no evidence.
   `ci-ok`, which passes only if `test` and `evidence` both passed or were
   skipped on purpose. `.github/workflows/ci-guard.yml` reports `ci-guard`
   (D16). The `main` ruleset requires both `ci-ok` and `ci-guard`, so neither
-  CI nor the guard can be skipped (see `docs/GITHUB.md`; `ci-guard`
-  enforcement is applied after the bootstrap merges, per step 3 there).
+  CI nor the guard can be skipped (see `docs/GITHUB.md`).
   `.github/workflows/evidence-publish.yml` publishes the evidence comment;
   it is not a required check and never blocks a merge.
 - If CI is red, stop. Don't argue with red CI in a PR description.

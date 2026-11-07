@@ -92,9 +92,18 @@ MANIFEST_MAX_BYTES = 1_000_000  # the manifest itself is a few kilobytes
 # still bounds runaway pages (a hostile fixture with millions of rows).
 MAX_PROBLEM_LEN = 200  # cap per recorded check failure
 MAX_PAGE_HEIGHT_PX = 120_000
+# Saved full-page images are cropped to this many CSS px from the top. This is
+# not a check failure: it keeps every image under MAX_FILE_BYTES and readable
+# in a PR comment. The 600-client fixture's full-height shots were ~9 MB each
+# in Google Chrome (over the 8 MB cap, so main's publisher refused the whole
+# artifact). The page-height check above still measures the whole page.
+MAX_SHOT_HEIGHT_PX = 8_000
 READY_TIMEOUT_S = 30.0
 SETTLE_MS = 400  # wait after network idle so the page finishes rendering
 
+PAGE_HEIGHT_JS = (
+    "Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)"
+)
 OVERFLOW_JS = "document.documentElement.scrollWidth > window.innerWidth + 1"
 CLIPPING_JS = """() => [...document.querySelectorAll('body *')].filter(e => {
   const s = getComputedStyle(e);
@@ -323,16 +332,16 @@ def diff_rgba(before: tuple, after: tuple) -> tuple:
 
 
 def clip_to_max_height(shot: bytes) -> tuple:
-    """Clip a full-page PNG to MAX_PAGE_HEIGHT_PX rows. Returns (shot, clipped).
+    """Crop a full-page PNG to MAX_SHOT_HEIGHT_PX rows. Returns (shot, cropped).
 
     Raises ValueError for undecodable input; callers that already report such
     shots (check_page, F7 in build_manifest) leave the bytes alone instead.
     """
     width, height, rgba = decode_png(shot)
-    if height <= MAX_PAGE_HEIGHT_PX:
+    if height <= MAX_SHOT_HEIGHT_PX:
         return shot, False
     return (
-        encode_png(width, MAX_PAGE_HEIGHT_PX, 6, rgba[:width * MAX_PAGE_HEIGHT_PX * 4]),
+        encode_png(width, MAX_SHOT_HEIGHT_PX, 6, rgba[:width * MAX_SHOT_HEIGHT_PX * 4]),
         True,
     )
 
@@ -471,18 +480,32 @@ def capture_side(
                         )
                         page.wait_for_timeout(SETTLE_MS)
                         name = capture_name(fixture, view_id, side)
-                        shot = page.screenshot(full_page=full)
-                        clipped = False
+                        too_tall = False
                         if full:
+                            page_height = page.evaluate(PAGE_HEIGHT_JS)
+                            too_tall = page_height > MAX_PAGE_HEIGHT_PX
+                            # Render only the top of a tall page: a full
+                            # 100,000 px render is slow and huge, then cropped.
+                            shot = page.screenshot(
+                                full_page=True,
+                                clip={
+                                    "x": 0,
+                                    "y": 0,
+                                    "width": width,
+                                    "height": min(page_height, MAX_SHOT_HEIGHT_PX),
+                                },
+                            )
                             try:
-                                shot, clipped = clip_to_max_height(shot)
+                                shot, _ = clip_to_max_height(shot)
                             except ValueError:
                                 pass
+                        else:
+                            shot = page.screenshot()
                         (out_dir / name).write_bytes(shot)
                         problems = (
                             check_page(_Page(page, seen), view_id, shot) if check else []
                         )
-                        if clipped:
+                        if too_tall:
                             problems.append(
                                 f"page taller than {MAX_PAGE_HEIGHT_PX} px"
                             )

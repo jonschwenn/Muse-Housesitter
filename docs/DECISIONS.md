@@ -319,3 +319,22 @@ handoff's "license not chosen; don't publish."
   - *A ruleset bypass list.* The ruleset keeps no bypass actors, as
     before: an admin can still disable the ruleset in an emergency, which
     is an explicit, visible act.
+
+### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
+- **Decision:** use C's overall design, A's per-radio and per-client detail,
+  and B's e-ink composition. Use the Slate / Blue palette in light and dark
+  modes. The front end in `web/` brings these choices together; the A/B/C
+  branches were not merged.
+- **Why:** three options were built against the dashboard contract and
+  fixtures: A, "control room" (detailed); B, "house at a glance"
+  (e-ink-first); and C, "change-first" (leads with what changed since the
+  last snapshot). Jon chose C's emphasis on changes, with A's detail and
+  B's e-ink composition.
+- **Rejected:**
+  - Taking A, B, or C unchanged.
+  - The first palette's muted tan/olive, which Jon rejected. The other
+    palette options offered were Ink / Violet, Night / Cyan, and
+    Porcelain / Coral; Jon chose Slate / Blue.
+- **Expected to change:** Jon expects to tweak specific aspects over time
+  for actionability and quality. Each change goes through a normal PR with
+  screenshot evidence.
