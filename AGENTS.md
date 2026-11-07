@@ -143,7 +143,6 @@ gh api graphql -f query='query{repository(owner:"jonschwenn",name:"Muse-Housesit
   accounts, decisions).
 - **Resolving issues.** A PR that resolves an issue says "Fixes #N" in its
   description.
-- **Board.** [Project board](https://github.com/users/jonschwenn/projects/1).
 
 ## Testing rules
 
