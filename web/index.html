@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Muse Housesitter · Changes</title>
+    <!-- An empty inline icon: without one, browsers request /favicon.ico,
+         which the server does not serve, and log a 404 on every visit. -->
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="dashboard.css" />
+    <script defer src="dashboard.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#content">Skip to dashboard</a>
+    <header>
+      <a class="brand" href="index.html">⌂ <span>Muse Housesitter</span></a
+      ><span class="readonly">SAVED DATA · READ ONLY</span
+      ><button id="reload" type="button">Reload saved data ↻</button>
+    </header>
+    <main id="content" tabindex="-1">
+      <div id="load-error" role="alert"></div>
+      <div id="dashboard" aria-live="polite"><p>Loading saved snapshots…</p></div>
+    </main>
+    <footer>
+      Collected by Housesitter. Interpreted by Muse.
+      <span>No collection or network changes from this page.</span>
+    </footer>
+  </body>
+</html>

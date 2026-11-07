@@ -96,8 +96,9 @@ handoff's "license not chosen; don't publish."
 
 ### D12. Minimal GitHub-only CI, with `main` locked by a ruleset (2026-11-04, Jon)
 - **CI:** one workflow, `.github/workflows/ci.yml`, with three jobs
-  *(superseded by the amendment below: now four jobs, with posting moved to
-  `evidence-comment`)*:
+  *(superseded first by the `scaffold-ci` amendment below: four jobs, then
+  by the `ci-guard` bootstrap: two jobs plus `ci-ok`, with posting moved to
+  `evidence-publish.yml`)*:
   - `test`: Python 3.9 and newest; ruff, pytest
   - `evidence`: PRs only
   - `ci-ok`: an aggregate of the other two
@@ -133,6 +134,39 @@ handoff's "license not chosen; don't publish."
   `python:3.9` container) or the Python floor needs revisiting. Python 3.9
   itself reached end of life upstream in October 2025, and the floor
   exists only to match Raspberry Pi OS Bullseye (D3).
+- **Amended (2026-11-06, `ci-guard` bootstrap, D16):** three workflows,
+  not one. `ci.yml` keeps `test` and `evidence` (plus the `ci-ok`
+  aggregate) with read-only tokens everywhere: it builds the text evidence
+  and uploads the artifact, but never pushes or comments. Publishing moves
+  to `evidence-publish.yml` on `workflow_run`, which always runs the file
+  from the default branch: it resolves the PR through the API, validates
+  the artifact with main's `ui_evidence.validate_artifact` (via main's
+  `scripts/publish_evidence.py`, which also rebuilds the Web UI section
+  with main's `pr_evidence` renderer), pushes only validated PNGs to the
+  orphan `pr-evidence` branch, and posts or edits the single bot comment —
+  for fork PRs too. `ci-guard.yml` on `pull_request_target` (from the base
+  commit, never PR code) fails the PR when it touches a protected path
+  unless its author has admin, maintain, or write permission. The ruleset
+  requires `ci-ok` **and** `ci-guard`. The old `evidence-comment` job in
+  `ci.yml` is gone (its text-only posting moves into the publisher), and
+  the screenshot writer was never merged, so there is no inline validator
+  copy and nothing that can drift. This partly reverses the earlier
+  "separate workflows per concern" rejection above: the unprivileged build
+  (`ci.yml`) and the privileged publish (`evidence-publish.yml`) must be
+  separate workflows because only `workflow_run` runs the publisher from
+  the default branch, and the guard (`ci-guard.yml`) must be separate
+  because only `pull_request_target` runs it from the base.
+- **Retention:** the `pr-evidence` branch only grows: one directory per head
+  SHA, plus a commit each time evidence is pushed. Only added, removed, or
+  changed captures are pushed; unchanged ones appear in the table only. A
+  run that brings no PNGs pushes nothing at all: no commit, no push, just
+  the comment. A full clone fetches this branch too, so contributors who
+  don't need it can clone with `--single-branch`. Image URLs are pinned to
+  commit SHAs, so deleting old directories in a new commit frees nothing
+  and breaks nothing. Actually reclaiming space means replacing the
+  branch's history (e.g. a fresh orphan commit with only recent PRs,
+  force-pushed by hand), which breaks the images in older PR comments. That
+  is the trade-off pruning accepts.
 
 ### D14. A read-only dashboard; Muse decides when to collect (2026-11-06, Jon)
 - **Decision:** Housesitter serves a read-only web dashboard on the Pi
@@ -166,7 +200,146 @@ handoff's "license not chosen; don't publish."
   - Scheduled collection on the Pi.
   - Server-side analysis on the dashboard.
 
-### D15. Agents take work only from Jon's issues (2026-11-07, Jon)
+### D15. Always-on allow-list refusals; 3xx as `upstream_unexpected` (2026-11-06, Jon)
+- **Decision:** two points where the as-built core is stricter than the
+  first design drafts, kept as the design:
+  - Percent-escapes (`%`) and `..` segments are refused for every request
+    target, no matter what an allow-list entry's pattern would match. Only
+    a query string (`?...`) can be opted into, per entry, via
+    `allow_query`.
+  - A 3xx response is never followed and never returned as a normal
+    response: it is raised as `upstream_unexpected`, with the numeric
+    status kept on the error's `status` attribute, so callers such as
+    flavour detection can tell a redirect apart without reading headers.
+- **Why:**
+  - Encoded traversal must not depend on how carefully an entry's pattern
+    is written. A permissive pattern such as `/api/.*` is legitimate for
+    some controllers, but it must still be safe against `%2e%2e`.
+  - Following a redirect would leave the allow-list: the `Location` can
+    point at any path. Raising keeps every upstream contact inside
+    `fullmatch`. Keeping the numeric status still lets callers
+    distinguish "the controller redirected me" from other unexpected
+    states, which flavour detection needs.
+- **Rejected:**
+  - Leaving `%`/`..` to each pattern (one careless pattern reopens
+    traversal).
+  - Returning the 3xx as a normal `Response` (tempts the caller to follow
+    `Location`, re-entering the client outside the allow-list).
+  - Dropping the status and reporting a bare `upstream_unexpected`
+    (flavour detection could no longer tell a redirect apart).
+
+### D16. Bootstrap: an outsider cannot weaken validation and stay green (2026-11-06, Jon)
+- **Threat model:** screenshots are a review convenience, not trusted
+  fact; a faked screenshot is acceptable risk. What must be impossible: an
+  outside bad actor (e.g. a fork PR) altering the testing/validation
+  mechanism (workflows, the hygiene scan, the conformance suite, the
+  evidence scripts, pytest/ruff config) and getting a mergeable green
+  result. The owner (Jon) and his agents are trusted; outsiders are not.
+- **What this changes (see also the `ci-guard` bootstrap amendment to
+  D12):**
+  - `ci.yml` is unprivileged: every job has `contents: read` only. It
+    builds the text evidence, uploads the artifact, and aggregates `ci-ok`.
+    UI check failures still fail CI.
+  - `evidence-publish.yml` on `workflow_run` always runs the file from the
+    default branch. It resolves the PR number through the API from trusted
+    event data (never from the artifact), verifies the head SHA still
+    matches, validates the artifact with main's `validate_artifact` (via
+    main's `scripts/publish_evidence.py`, which also rebuilds the Web UI
+    section with main's renderer), pushes only validated PNGs to the orphan
+    `pr-evidence` branch, and posts or edits the single bot comment. Fork
+    PRs get comments too. An invalid, stale, or ambiguous run publishes
+    nothing.
+  - `ci-guard.yml` on `pull_request_target` runs from the base commit and
+    never touches PR code. `scripts/ci_guard.py` (stdlib only, unit-tested)
+    lists the PR's changed files through the API — paginated, failing
+    closed on error or when the PR may exceed GitHub's 3000-file listing
+    cap — and fails the `ci-guard` check when a protected path is touched
+    unless the PR author has admin, maintain, or write permission
+    (collaborator permission from the API, not `author_association`).
+  - The `main` ruleset requires `ci-ok` **and** `ci-guard`.
+- **What is protected:** `.github/**` (workflows, ruleset, templates);
+  `tests/test_hygiene.py` (the repo-hygiene scan);
+  `tests/conformance/**` (the module conformance suite);
+  `tests/test_pr_evidence.py`, `tests/test_ui_evidence.py`,
+  `tests/test_publish_evidence.py`, `tests/test_ci_guard.py` (the tests
+  that pin the builders, validators, publisher, and guard);
+  `tests/evidence/**` (the scenario list — removing a scenario hides a
+  regression the same way editing the builder does);
+  `scripts/pr_evidence.py`, `scripts/ui_evidence.py`,
+  `scripts/publish_evidence.py`, `scripts/ci_guard.py` (evidence builders,
+  validators, privileged publisher, guard);
+  `pyproject.toml` (pytest/ruff config, dependency pins, entry points); and
+  anywhere in the tree, `conftest.py`, `pytest.ini`, `setup.cfg`,
+  `tox.ini`, `ruff.toml`, `.ruff.toml`, `sitecustomize.py`,
+  `usercustomize.py`, `*.pth` (tooling config and interpreter start-up
+  hooks), `.gitattributes` (`linguist-generated` or `-diff` can collapse
+  or hide a file's diff in review), plus `tests/**/__init__.py` (flips
+  pytest's import mode for the whole suite).
+- **What is not protected, and why that is accepted:**
+  - *Screenshots stay author-attested.* Validation proves the files are
+    sane PNGs, never that the pixels are truthful. Faked pixels are the
+    accepted risk in the threat model above.
+  - *Trusted collaborators pass the guard by permission.* A PR from an
+    author with write access may touch protected paths; the guard logs them
+    as a notice. This is not an escalation: such an author can already push
+    to `main`-adjacent branches and edit these files.
+  - *Fork PRs simply cannot touch protected paths.* A fork that needs such
+    a change must ask Jon (or his agents) to make it instead.
+  - *New files are not blocked.* A new module needs new tests, so the
+    guard cannot forbid new files outright. Residual vectors through new
+    files were probed, not assumed (see below); they are caught by human
+    review (gates 2 and 5), not by the guard: a new `conftest.py` is
+    blocked, but in the full test run a new test module could still
+    `import test_hygiene` and neuter it at import time (verified: the patch
+    lands in the same module object pytest collected), or set module-level
+    `pytest_plugins` to load a helper that drops tests from collection
+    (verified: honored in test modules). Two things close this for the
+    protected suites:
+    - CI re-runs the protected suites (hygiene, conformance, evidence,
+      publisher, guard tests) in a separate pytest process that collects
+      only those files ("Protected suites, in isolation" in `ci.yml`), so
+      no unprotected test module is ever imported alongside them.
+    - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` in CI kills the entry-point
+      variant, and `pyproject.toml` (protected) pins the installed
+      distributions, so no new entry-point plugin can arrive that way.
+
+    What is left is weakening *ordinary* tests (a module's own tests)
+    through such tricks, which human review catches: a test file importing
+    another test module, or declaring `pytest_plugins`, is an obvious red
+    flag at gates 2 and 5.
+- **TOCTOU:** the guard re-runs on every push (`synchronize`), and the
+  ruleset requires branches to be up to date, so a merge needs a green
+  `ci-guard` on the exact head being merged. A stale result cannot merge.
+- **Rejected:**
+  - *Status quo, documented honestly.* The old `evidence-comment` model
+    ran the writer from the PR's own `ci.yml` for same-repo PRs, so a PR
+    editing `ci.yml` controlled the writer; and fork PRs got no comment or
+    screenshots at all. Keeping it would leave the exact hole this
+    bootstrap closes.
+  - *A ruleset bypass list.* The ruleset keeps no bypass actors, as
+    before: an admin can still disable the ruleset in an emergency, which
+    is an explicit, visible act.
+
+### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
+- **Decision:** use C's overall design, A's per-radio and per-client detail,
+  and B's e-ink composition. Use the Slate / Blue palette in light and dark
+  modes. The front end in `web/` brings these choices together; the A/B/C
+  branches were not merged.
+- **Why:** three options were built against the dashboard contract and
+  fixtures: A, "control room" (detailed); B, "house at a glance"
+  (e-ink-first); and C, "change-first" (leads with what changed since the
+  last snapshot). Jon chose C's emphasis on changes, with A's detail and
+  B's e-ink composition.
+- **Rejected:**
+  - Taking A, B, or C unchanged.
+  - The first palette's muted tan/olive, which Jon rejected. The other
+    palette options offered were Ink / Violet, Night / Cyan, and
+    Porcelain / Coral; Jon chose Slate / Blue.
+- **Expected to change:** Jon expects to tweak specific aspects over time
+  for actionability and quality. Each change goes through a normal PR with
+  screenshot evidence.
+
+### D18. Agents take work only from Jon's issues (2026-11-07, Jon)
 - **Decision:** agents act only on issues Jon opened or currently marked
   `ready`, checked by author, last `ready` event, and body edits after
   approval. Only Jon's issue text and comments are instructions; others'

@@ -1,11 +1,28 @@
-# The only CI workflow (docs/DECISIONS.md D12). The `main` ruleset requires `ci-ok`.
+# CI: lint, test, and evidence (docs/DECISIONS.md D12, D16). The `main`
+# ruleset requires `ci-ok` and `ci-guard` (`ci-guard` enforcement lands
+# after the bootstrap merges; docs/GITHUB.md step 3).
 #
-# Security notes:
+# Trust model (read this before changing this file):
 # - Actions are GitHub's own, pinned to full commit SHAs (tag in the comment).
-# - The default token is read-only. Only `evidence-comment` can write, and it
-#   never checks out or runs PR code. It does post text that the PR's own code
-#   produced (in `evidence`), so a PR author controls that comment's content.
-#   It checks the marker and size, and edits only its own bot comment.
+# - This workflow runs on `pull_request`, so for same-repo PRs the workflow
+#   file itself comes from the PR. A PR that edits `ci.yml` controls this
+#   file's jobs too. The guarantees below hold only for the workflow as it
+#   exists on `main`, so review any `ci.yml` change line by line — and the
+#   `ci-guard` check blocks untrusted edits to it from merging (D16).
+# - This workflow never pushes, never comments, and never runs with a write
+#   token: every job has `permissions: contents: read` only. Posting the
+#   evidence comment and pushing screenshots is the job of
+#   `.github/workflows/evidence-publish.yml`, which runs on `workflow_run`
+#   from `main`'s code, not the PR's. A malicious `ci.yml` can therefore
+#   break or fake the evidence in its own run, but it cannot get a green
+#   `ci-ok`/`ci-guard` pair onto `main` through the guard, and it cannot
+#   publish a fake comment: the publisher validates the artifact with
+#   `main`'s validator before it pushes or posts anything.
+# - The evidence job runs PR code (the capture and the comment builders)
+#   with a read-only token. UI check failures fail this workflow: a console
+#   error or warning, a page error, a CSP or Trusted Types violation, a
+#   dialog, overflow, clipping, a wrong-size e-ink shot, or a page taller
+#   than the height cap. See docs/REVIEW.md, "Evidence".
 # - Checkouts don't persist credentials.
 name: CI
 
@@ -26,6 +43,8 @@ jobs:
     name: test (${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -49,12 +68,40 @@ jobs:
       - name: Lint
         run: ruff check .
       - name: Test
+        env:
+          # No third-party pytest plugin is installed or needed; disabling
+          # entry-point autoload closes the plugin-weakening vector (D16).
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: pytest
+      - name: Protected suites, in isolation
+        # The full run above imports every test module in one process, so a
+        # new (unprotected) test file could patch a protected suite at import
+        # time. Re-run the protected suites alone: no other test module is
+        # ever imported here (conftest.py and pytest config are protected
+        # paths), so what they check cannot be switched off from outside
+        # them (D16).
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          set -euo pipefail
+          suites=()
+          for path in tests/test_hygiene.py tests/conformance \
+                      tests/test_pr_evidence.py tests/test_ui_evidence.py \
+                      tests/test_publish_evidence.py tests/test_ci_guard.py; do
+            if [ -e "$path" ]; then suites+=("$path"); fi
+          done
+          test -e tests/test_hygiene.py
+          pytest -p no:cacheprovider "${suites[@]}"
 
   evidence:
+    # Runs PR code (the capture and the comment builders) with a read-only
+    # token. It never pushes or comments; evidence-publish.yml does that
+    # from main's code after this workflow completes.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,6 +115,30 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: git -C head worktree add "$GITHUB_WORKSPACE/base" "$BASE_SHA"
+      # Screenshots use the Google Chrome that GitHub's runner image ships
+      # (updated weekly, like real users' Chrome), not a Playwright-bundled
+      # browser, so the job doesn't depend on Playwright supporting the
+      # runner's Ubuntu release. Base and head are captured in this one job
+      # with the same Chrome, so the before/after comparison stays fair.
+      - name: Install the UI capture dependencies
+        run: |
+          python -m pip install -e "./head[ui]"
+          google-chrome --version
+      - name: Capture the web UI
+        env:
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          ui_exit=0
+          python head/scripts/ui_evidence.py \
+            --base-tree base --head-tree head --out-dir ui_out \
+            --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --browser-channel chrome || ui_exit=$?
+          echo "UI_EXIT=$ui_exit" >> "$GITHUB_ENV"
+      # Text only: the privileged publisher (evidence-publish.yml, running
+      # from main) rebuilds the Web UI section from the validated manifest
+      # with main's renderer, so PR-built markup never reaches the comment.
       - name: Build the evidence comment
         run: >
           python head/scripts/pr_evidence.py
@@ -77,52 +148,26 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evidence
-          path: evidence.md
+          path: |
+            evidence.md
+            ui_out/*.png
+            ui_out/ui_manifest.json
           retention-days: 30
+          if-no-files-found: warn
+      - name: Fail on UI check failures
+        if: env.UI_EXIT != '0'
+        run: |
+          echo "UI checks failed; see the ui_evidence output above"; exit 1
 
-  evidence-comment:
-    needs: evidence
-    # A fork's token can't comment; its evidence is still in the job summary.
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+  ci-ok:
+    # One of the two checks the ruleset requires. Passes only if every job
+    # above succeeded or was skipped on purpose (evidence is skipped on push).
+    if: always()
+    needs: [test, evidence]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      pull-requests: write
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: evidence
-      - name: Post or update the evidence comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          marker='<!-- housesitter-evidence -->'
-          if [ "$(head -c ${#marker} evidence.md)" != "$marker" ]; then
-            echo "evidence.md does not start with the marker; not posting"; exit 1
-          fi
-          if [ "$(wc -c < evidence.md)" -gt 65000 ]; then
-            echo "evidence.md is too large for a comment; not posting"; exit 1
-          fi
-          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" \
-            | head -n 1)
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@evidence.md > /dev/null
-            echo "Updated comment $id"
-          else
-            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@evidence.md > /dev/null
-            echo "Posted a new comment"
-          fi
-
-  ci-ok:
-    # The one check the ruleset requires. Passes only if every job above
-    # succeeded or was skipped on purpose (evidence jobs are skipped on push).
-    if: always()
-    needs: [test, evidence, evidence-comment]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+      contents: read
     steps:
       - name: Check results
         env:

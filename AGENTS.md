@@ -84,6 +84,21 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 6. **Commit identity.** Commits are authored and committed as
    `Jon Schwenn <jonschwenn@gmail.com>`. Check `git config user.email`
    before committing. Never commit as a machine default user.
+7. **Credit the agents that did the work.** Where practical, split a
+   change into one commit per contributor. Each commit ends with a
+   co-author trailer for only the agents that wrote that commit:
+   - Claude: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
+     (links to GitHub's `@claude`)
+   - Codex: `Co-authored-by: Codex <noreply@openai.com>` (links to
+     GitHub's `@codex`)
+   - Muse Spark: `Co-authored-by: Muse Spark 1.3 <muse-spark@agents.invalid>`
+     (no official GitHub account yet; `.invalid` can never belong to
+     anyone)
+
+   Never invent an email for an agent: an address someone else owns
+   credits them instead. Use only addresses confirmed to link to the
+   vendor's own account, or a `.invalid` one. Update the model name when
+   the model changes.
 
 ## Working from issues
 
@@ -176,9 +191,12 @@ gh api graphql -f query='query{repository(owner:"jonschwenn",name:"Muse-Housesit
     including secrets. Use it only for a genuine false positive, such as a
     four-part version number. Reviewers check every use.
 - **CI** runs ruff and the full suite on Python 3.9 and the newest Python,
-  in one workflow (`.github/workflows/ci.yml`). `main` is protected by a
-  ruleset that requires a PR and a green `ci-ok` check
-  (`docs/GITHUB.md`). A change is not done while CI is red.
+  across dedicated workflows (`.github/workflows/`, D16): `ci.yml` builds
+  and tests with read-only tokens, `ci-guard.yml` guards the testing
+  mechanism, `evidence-publish.yml` publishes the evidence comment.
+  `main` is protected by a ruleset that requires a PR and green `ci-ok`
+  and `ci-guard` checks (`docs/GITHUB.md`). A change is not done while CI
+  is red.
 
 ## Documentation rules
 
@@ -221,7 +239,7 @@ AGENTS.md  CLAUDE.md  README.md  pyproject.toml
 docs/      ARCHITECTURE.md  MODULES.md  REVIEW.md  DECISIONS.md  GITHUB.md  DASHBOARD.md
            modules/<id>.md
 scripts/   pr_evidence.py  make_dashboard_fixtures.py  dev_dashboard.py
-web/       dashboard front end: index.html, eink.html, static assets (Planned)
+web/       dashboard front end: index.html, eink.html, static assets, DESIGN.md
 src/housesitter/
   sdk.py              public module API: Module, Command, Param, Context, Result
   core/               CLI, registry, config, secrets, http, envelope, storage, dropins

@@ -1,0 +1,172 @@
+:root {
+  color-scheme: light;
+  --bg: #fff;
+  --paper: #fff;
+  --ink: #000;
+  --muted: #000;
+  --line: #000;
+  --accent: #000;
+  --tint: #fff;
+  --warn: #000;
+  --warning-bg: #fff;
+}
+html,
+body.eink {
+  width: 800px;
+  height: 480px;
+  margin: 0;
+  background: #fff;
+  color: #000;
+}
+body.eink {
+  padding: 12px 22px;
+  font:
+    14px/1.25 Arial,
+    sans-serif;
+}
+.eink * {
+  min-width: 0;
+  box-shadow: none;
+  text-shadow: none;
+  animation: none;
+  transition: none;
+}
+.eink header {
+  height: 24px;
+  padding: 0;
+  border-bottom: 2px solid #000;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.eink main {
+  margin: 0;
+  padding: 0;
+  max-width: none;
+}
+.eink p {
+  margin: 0;
+}
+.ink-top {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin: 8px 0 5px;
+}
+.ink-top h1 {
+  flex: 1;
+  font:
+    600 26px/30px Arial,
+    sans-serif;
+  letter-spacing: -0.5px;
+  margin: 0;
+}
+.ink-top span {
+  white-space: nowrap;
+  font-weight: 700;
+}
+.ink-counts {
+  font-size: 16px;
+  line-height: 22px;
+  border-bottom: 2px solid #000;
+  padding-bottom: 4px;
+}
+.ink-labels {
+  font-size: 12px;
+  line-height: 18px;
+  margin-top: 4px !important;
+}
+.ink-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  height: 182px;
+  margin-top: 8px;
+}
+.eink h2 {
+  font-size: 14px;
+  line-height: 18px;
+  margin: 0 0 7px;
+  letter-spacing: 0;
+}
+.ink-aps {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-content: start;
+  gap: 7px 12px;
+}
+.ink-aps h2 {
+  grid-column: 1/-1;
+}
+.ink-ap strong {
+  display: block;
+  font-size: 13px;
+  line-height: 17px;
+  font-weight: 700;
+}
+.ink-ap span {
+  display: block;
+  font-size: 12px;
+  line-height: 16px;
+}
+.ink-client {
+  margin-bottom: 8px;
+}
+.ink-client strong {
+  display: block;
+  font-size: 14px;
+  line-height: 18px;
+}
+.ink-client span {
+  display: block;
+  font-size: 12px;
+  line-height: 16px;
+}
+.ink-clients p {
+  font-size: 12px;
+  line-height: 16px;
+}
+.ink-history,
+.ink-warning {
+  font-size: 11px;
+  line-height: 16px;
+}
+.ink-note {
+  font-size: 13px;
+  line-height: 17px;
+  border-top: 1px solid #000;
+  border-bottom: 1px solid #000;
+  padding: 5px 0;
+  margin: 5px 0 !important;
+}
+.ink-foot {
+  font-size: 11px;
+  line-height: 14px;
+}
+.ink-error {
+  font-size: 12px;
+  line-height: 16px;
+  border-bottom: 1px solid #000;
+  margin-bottom: 3px !important;
+}
+.ink-empty {
+  font-size: 21px;
+  line-height: 28px;
+  height: 220px;
+  padding: 35px 15px;
+}
+.eink #load-error .notice {
+  font-size: 12px;
+  line-height: 16px;
+  padding: 3px;
+  margin: 2px 0;
+  border-radius: 0;
+}
+.ink-grid {
+  height: 210px;
+}
+.ink-client {
+  margin-bottom: 4px;
+}
+.eink:has(.ink-error) .ink-grid {
+  height: 202px;
+}

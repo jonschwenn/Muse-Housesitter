@@ -1,0 +1,285 @@
+# Privileged evidence publisher (docs/DECISIONS.md D16).
+#
+# Runs on `workflow_run`, which always uses this file from the default
+# branch — never PR code. The unprivileged `CI` workflow builds the evidence
+# with a read-only token and uploads it as an artifact; this workflow
+# validates that artifact with main's code, pushes the screenshots to the
+# orphan `pr-evidence` branch, and posts (or edits) the single bot comment.
+#
+# Trust model:
+# - The artifact is fully untrusted. A fork PR can rewrite `ci.yml`, and a
+#   same-repo PR controls its own `ci.yml` run, so the artifact may be
+#   anything. Nothing from it is executed or sourced: `render` reads
+#   evidence.md as text, validates every PNG and the manifest with main's
+#   `ui_evidence.validate_artifact` (names, PNG magic bytes, size and count
+#   caps, no symlinks or subdirectories), ignores any pre-rendered markdown,
+#   and rebuilds the Web UI section from the validated manifest with main's
+#   `pr_evidence` renderer (which escapes hostile values).
+# - The PR number never comes from the artifact. `resolve` looks it up
+#   through the API from trusted event data (`head_branch` and the head
+#   repository owner), keeps only runs of the real CI workflow file
+#   (`workflow_run.path` pins the file; the `on:` name filter alone would
+#   also match a same-named workflow a PR adds), and verifies the API's
+#   current head SHA still matches the run's head SHA (a stale run whose PR
+#   has moved on publishes nothing).
+# - Least privilege per job: `resolve` reads PRs, `build` reads code and
+#   artifacts, `push` is the only job that can write the repo, and `comment`
+#   is the only job that can write PR comments. No caches anywhere here.
+# - Every third-party step is GitHub's own, pinned to a full commit SHA.
+name: evidence-publish
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  resolve:
+    # PR runs only; push runs to main have no PR to comment on.
+    name: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pull-requests: read
+    outputs:
+      found: ${{ steps.lookup.outputs.found }}
+      pr: ${{ steps.lookup.outputs.pr }}
+      head_sha: ${{ steps.lookup.outputs.head_sha }}
+    steps:
+      - name: Find the PR for this run
+        id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+        run: |
+          set -euo pipefail
+          found=false
+          pr=""
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "workflow_run event is $EVENT, not pull_request; nothing to publish"
+          elif [ "$WORKFLOW_PATH" != ".github/workflows/ci.yml" ]; then
+            echo "workflow_run is for $WORKFLOW_PATH, not the CI workflow; ignoring"
+          elif [ "$CONCLUSION" != "success" ] && [ "$CONCLUSION" != "failure" ]; then
+            echo "CI conclusion is $CONCLUSION; no evidence to publish"
+          elif ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "bad head SHA in the event; ignoring"
+          else
+            echo "looking up open PRs for $HEAD_OWNER:$HEAD_BRANCH"
+            # --method GET: with -f fields, gh api would otherwise send a POST
+            # (create a PR), which this read-only token refuses.
+            matches=$(gh api --method GET "repos/$REPO/pulls" \
+              -f "head=$HEAD_OWNER:$HEAD_BRANCH" -f state=open \
+              --jq "[.[] | select(.head.sha == \"$HEAD_SHA\") | .number]")
+            count=$(echo "$matches" | jq 'length')
+            if [ "$count" = "1" ]; then
+              pr=$(echo "$matches" | jq -r '.[0]')
+              found=true
+              echo "publishing evidence for PR #$pr at $HEAD_SHA"
+            else
+              echo "found $count open PRs for that head; need exactly one (stale or ambiguous run)"
+            fi
+          fi
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+  build:
+    # Download the untrusted artifact, validate it with main's code, and
+    # render the final comment (still carrying the push-SHA placeholder).
+    needs: resolve
+    if: needs.resolve.outputs.found == 'true'
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: evidence
+          path: artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+      - name: Validate and render
+        env:
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.resolve.outputs.pr }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+        run: |
+          python scripts/publish_evidence.py render \
+            --artifact-dir artifact --out-dir rendered \
+            --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: validated-evidence
+          path: rendered
+          retention-days: 30
+          if-no-files-found: error
+
+  push:
+    # The only job with write access to the repo. Pushes only files main's
+    # validator already allow-listed; skips the commit and push entirely when
+    # the run brought no PNGs.
+    needs: [resolve, build]
+    name: push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      evidence_sha: ${{ steps.push.outputs.evidence_sha }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: validated-evidence
+          path: rendered
+      - name: Push validated PNGs to pr-evidence
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.resolve.outputs.pr }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
+          if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "bad head SHA: $HEAD_SHA"; exit 1
+          fi
+          # No checkout of any code happens here: a fresh git directory that
+          # only ever contains the validated files main's renderer selected.
+          rm -rf push && mkdir push && cd push
+          git init -q -b tmp
+          git remote add origin "https://github.com/${REPO}.git"
+          # Authenticate without putting the token in the remote URL: git
+          # sends this header on every request instead.
+          # GitHub's git server takes Basic auth with the x-access-token
+          # user (as actions/checkout sends it), not a Bearer header. The
+          # encoded value is a new string the runner doesn't know is secret,
+          # so mask it before anything could print it.
+          basic_auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$basic_auth"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.extraHeader"
+          export GIT_CONFIG_VALUE_0="Authorization: Basic ${basic_auth}"
+          # Shallow: only the branch tip is needed, not every earlier PR's PNGs.
+          # Tell "no pr-evidence branch yet" (ls-remote exit 2) apart from
+          # "can't reach or log in to GitHub" (anything else), so an auth
+          # failure stops here with a clear message instead of being hidden.
+          set +e
+          git ls-remote --exit-code --heads origin pr-evidence > /dev/null
+          remote_rc=$?
+          set -e
+          case "$remote_rc" in
+            0) git fetch --depth 1 origin pr-evidence
+               git checkout -q -b pr-evidence FETCH_HEAD ;;
+            2) echo "no pr-evidence branch yet; starting it"
+               git checkout -q --orphan pr-evidence ;;
+            *) echo "cannot reach the repository (git ls-remote exit $remote_rc)"
+               exit 1 ;;
+          esac
+          dest="pr/${PR}/${HEAD_SHA}"
+          shopt -s nullglob
+          pngs=(../rendered/files/*.png)
+          if (( ${#pngs[@]} == 0 )); then
+            # No PNGs to pin: every capture was unchanged, or neither side
+            # has a web UI. Commit and push nothing; the comment below has no
+            # images and needs no evidence SHA.
+            echo "no PNGs to push for this head SHA"
+            EVIDENCE_SHA="$HEAD_SHA"
+          else
+            mkdir -p "$dest"
+            for shot in "${pngs[@]}" ../rendered/files/ui_manifest.json; do
+              cp "$shot" "$dest/"
+            done
+            git add "$dest"
+            export GIT_AUTHOR_NAME='github-actions[bot]'
+            export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+            export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+            export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+            msg="Web UI evidence for PR #${PR} at ${HEAD_SHA}"
+            if git diff --cached --quiet; then
+              echo "already pushed for this head SHA"
+            else
+              git commit -q -m "$msg"
+            fi
+            if ! git push origin pr-evidence; then
+              # Someone else pushed first. Re-base by moving onto the new tip
+              # and re-adding only our directory (a rebase can't work across
+              # shallow fetches). Other PRs' files come from the new tip.
+              git fetch --depth 1 origin pr-evidence
+              git reset -q FETCH_HEAD
+              git add "$dest"
+              git diff --cached --quiet || git commit -q -m "$msg"
+              git push origin pr-evidence
+            fi
+            EVIDENCE_SHA="$(git rev-parse HEAD)"
+            echo "evidence push: $EVIDENCE_SHA"
+          fi
+          echo "evidence_sha=$EVIDENCE_SHA" >> "$GITHUB_OUTPUT"
+
+  comment:
+    # The only job that can comment. Pins the placeholder to the push SHA,
+    # re-checks the marker and size, and edits only the bot's own comment.
+    needs: [resolve, build, push]
+    name: comment
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: validated-evidence
+          path: rendered
+      - name: Post or update the evidence comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.resolve.outputs.pr }}
+          EVIDENCE_SHA: ${{ needs.push.outputs.evidence_sha }}
+        run: |
+          set -euo pipefail
+          case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
+          python3 scripts/publish_evidence.py substitute \
+            --comment rendered/comment.md --sha "$EVIDENCE_SHA"
+          marker='<!-- housesitter-evidence -->'
+          if [ "$(head -c ${#marker} rendered/comment.md)" != "$marker" ]; then
+            echo "comment does not start with the marker; not posting"; exit 1
+          fi
+          if [ "$(wc -c < rendered/comment.md)" -gt 65000 ]; then
+            echo "comment is too large; not posting"; exit 1
+          fi
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" \
+            | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@rendered/comment.md > /dev/null
+            echo "Updated comment $id"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@rendered/comment.md > /dev/null
+            echo "Posted a new comment"
+          fi

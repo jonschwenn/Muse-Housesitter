@@ -15,6 +15,9 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest==8.4.2", "ruff==0.17.4"]
+# Dev/CI-only screenshot tooling for scripts/ui_evidence.py. Never a runtime
+# dependency (AGENTS.md rule 4): nothing under src/ may import it.
+ui = ["playwright==1.60.0"]
 
 [project.scripts]
 housesitter = "housesitter.core.cli:main"
