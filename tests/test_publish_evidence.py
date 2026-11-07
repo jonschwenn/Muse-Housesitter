@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -216,6 +218,23 @@ def test_render_rejects_bad_caller_arguments(tmp_path):
     assert rc == 2
     rc, _ = _render(tmp_path, artifact, head_sha="xyz")
     assert rc == 2
+
+
+# Issue #22 --------------------------------------------------------------------
+#
+# A manifest without a captures list is an invalid artifact (exit 1), never a
+# bad caller argument (exit 2): validate_artifact used to default the missing
+# key to [], then load_ui_manifest raised ValueError, which main reported as
+# exit 2.
+
+
+@pytest.mark.parametrize("manifest", [{"version": 1}, {"version": 1, "captures": {}}])
+def test_render_manifest_without_captures_list_is_invalid_artifact(tmp_path, manifest):
+    artifact = _artifact(tmp_path, pngs=(), manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
+    assert not (out / "files").exists()
 
 
 # Substitute --------------------------------------------------------------------

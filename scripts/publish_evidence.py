@@ -101,7 +101,16 @@ def render_comment(artifact: Path, repo: str, pr: int, head_sha: str) -> str:
     errors = ui_evidence.validate_artifact(ui_dir)
     if errors:
         raise PublishError("artifact validation failed: " + "; ".join(errors[:10]))
-    manifest = pr_evidence.load_ui_manifest(ui_dir)
+    try:
+        manifest = pr_evidence.load_ui_manifest(ui_dir)
+    except ValueError as exc:
+        # The validator and the loader must agree, but if they ever drift
+        # (or the file changes between the two reads), an artifact problem
+        # is still an invalid artifact (exit 1), never a bad argument.
+        # json.JSONDecodeError subclasses ValueError, so this covers a
+        # corrupt manifest too. render_ui_section's ValueError (bad
+        # repo/pr/head-sha) is deliberately left to propagate as exit 2.
+        raise PublishError(f"artifact validation failed: {exc}") from exc
     if manifest is None:
         return text
     _, _, failures = pr_evidence.render_ui_section(manifest, repo, pr, head_sha)

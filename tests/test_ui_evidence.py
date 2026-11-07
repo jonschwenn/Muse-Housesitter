@@ -399,6 +399,20 @@ def test_validator_rejects_section_files(tmp_path):
     assert any("unexpected file name" in e for e in ui_evidence.validate_artifact(directory))
 
 
+@pytest.mark.parametrize("captures", [{}, "x", None])
+def test_validator_rejects_missing_or_non_list_captures(tmp_path, captures):
+    # Issue #22: the publisher's loader requires a captures list, so the
+    # validator must too; otherwise a bad artifact exits 2, not 1.
+    directory = write_valid_artifact(tmp_path / "nocaptures")
+    manifest = json.loads((directory / ui_evidence.MANIFEST_NAME).read_text())
+    if captures is None:
+        del manifest["captures"]
+    else:
+        manifest["captures"] = captures
+    (directory / ui_evidence.MANIFEST_NAME).write_text(json.dumps(manifest))
+    assert any("captures list" in e for e in ui_evidence.validate_artifact(directory))
+
+
 # Manifest building with undecodable PNGs ----------------------------------------
 
 

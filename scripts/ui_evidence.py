@@ -892,22 +892,32 @@ def validate_artifact(directory: Path) -> list:
     else:
         try:
             manifest = json.loads(manifest_path.read_text())
-            names = {
-                c.get(n)
-                for c in manifest.get("captures", [])
-                for n in ("base", "head", "diff")
-            }
-            names.discard(None)
-            for name in sorted(names, key=str):
-                text = str(name)
-                if ".." in text.split("/"):
-                    errors.append(f"manifest path escapes the directory: {text}")
-                elif not CAPTURE_RE.fullmatch(text):
-                    errors.append(f"manifest names an unexpected file: {text}")
-                elif not (directory / text).is_file():
-                    errors.append(f"manifest names a missing file: {text}")
-        except (ValueError, AttributeError, TypeError) as exc:
+        except ValueError as exc:
             errors.append(f"manifest is not valid JSON: {exc}")
+        else:
+            if not isinstance(manifest, dict) or not isinstance(
+                manifest.get("captures"), list
+            ):
+                errors.append("manifest must be an object with a captures list")
+            else:
+                try:
+                    names = {
+                        c.get(n)
+                        for c in manifest.get("captures", [])
+                        for n in ("base", "head", "diff")
+                    }
+                except (AttributeError, TypeError) as exc:
+                    errors.append(f"manifest is not valid JSON: {exc}")
+                else:
+                    names.discard(None)
+                    for name in sorted(names, key=str):
+                        text = str(name)
+                        if ".." in text.split("/"):
+                            errors.append(f"manifest path escapes the directory: {text}")
+                        elif not CAPTURE_RE.fullmatch(text):
+                            errors.append(f"manifest names an unexpected file: {text}")
+                        elif not (directory / text).is_file():
+                            errors.append(f"manifest names a missing file: {text}")
     if total > MAX_TOTAL_BYTES:
         errors.append(f"PNGs total {total} bytes, over the cap")
     return errors
