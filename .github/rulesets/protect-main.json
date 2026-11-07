@@ -43,6 +43,10 @@
           {
             "context": "ci-ok",
             "integration_id": 15368
+          },
+          {
+            "context": "ci-guard",
+            "integration_id": 15368
           }
         ]
       }

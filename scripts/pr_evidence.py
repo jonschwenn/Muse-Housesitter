@@ -12,14 +12,21 @@ is running on a machine with a real Housesitter setup.
 
 Usage:
     python scripts/pr_evidence.py --base-tree BASE --head-tree HEAD --out comment.md
+    python scripts/pr_evidence.py --base-tree BASE --head-tree HEAD --out comment.md \
+        --ui-artifacts UI --repo OWNER/NAME --pr 12 --head-sha <40 hex>
+
+The Web UI section is built here from the artifact's ui_manifest.json, with
+every value re-validated; pre-rendered markdown in the artifact is ignored.
 """
 
 from __future__ import annotations
 
 import argparse
 import difflib
+import html
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,6 +37,28 @@ SCENARIOS = Path("tests/evidence/scenarios.json")
 MAX_COMMENT_BYTES = 60_000  # GitHub's limit is 65,536 characters; CI refuses > 65,000 bytes
 RUN_TIMEOUT_S = 60
 VOLATILE = "<volatile>"
+
+# UI section (F4): built here from ui_manifest.json, never pasted from a
+# pre-rendered markdown file. The name pattern must stay identical to
+# scripts/ui_evidence.py CAPTURE_RE (pinned by test), so only allow-listed
+# capture files can become <img> tags.
+SHA_PLACEHOLDER = "__HOUSESITTER_EVIDENCE_SHA__"  # must equal ui_evidence's
+UI_STATUSES = ("added", "removed", "changed", "unchanged")
+UI_CAPTURE_RE = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]|_(?!_)){0,47}"
+    r"__(index-phone|index-desktop|index-desktop-dark|eink)"
+    r"__(base|head|diff)\.png"
+)
+UI_VIEW_WIDTHS = {
+    "index-phone": 240,
+    "index-desktop": 480,
+    "index-desktop-dark": 480,
+    "eink": 400,
+}
+UI_REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+UI_SHA_RE = re.compile(r"[0-9a-f]{40}")
+MAX_UI_TEXT_LEN = 200  # cap per displayed check failure (matches ui_evidence)
+MAX_UI_LABEL_LEN = 100  # cap per displayed fixture/view label
 
 
 class Refused(Exception):
@@ -146,13 +175,238 @@ def fence(text: str, lang: str = "") -> str:
     return f"{ticks}{lang}\n{text}{ticks}\n"
 
 
-def build_comment(base_tree: Path, head_tree: Path) -> str:
+def _ui_cell(text: object, limit: int) -> str:
+    """Make manifest text safe for a Markdown table cell.
+
+    Collapses whitespace (no newlines to break rows), swaps `|` for `/` (so a
+    hostile value cannot add columns), and caps the length. Callers wrap the
+    result in a code span, which neutralises every other Markdown/HTML-active
+    character: the text stays readable but nothing in it renders.
+    """
+    return " ".join(str(text).split()).replace("|", "/")[:limit]
+
+
+def _ui_img(src: str, width: int, alt: str) -> str:
+    """An <img> for an evidence-branch file. Only allow-listed names render."""
+    name = src.rsplit("/", 1)[-1]
+    if not UI_CAPTURE_RE.fullmatch(name):
+        raise ValueError(f"refusing <img> for unexpected file name: {name!r}")
+    return (
+        f'<img src="{html.escape(src, quote=True)}" '
+        f'width="{width:d}" loading="lazy" alt="{html.escape(alt, quote=True)}">'
+    )
+
+
+def load_ui_manifest(ui_dir: Path | None) -> dict | None:
+    """Read the UI manifest, or None when there is no UI evidence.
+
+    A corrupt (unparseable) manifest raises: the capture pipeline is broken
+    and failing closed beats posting a comment that silently omits the UI.
+    """
+    if ui_dir is None:
+        return None
+    path = Path(ui_dir) / "ui_manifest.json"
+    if not path.is_file():
+        return None
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict) or not isinstance(data.get("captures"), list):
+        raise ValueError("UI manifest must be an object with a captures list")
+    return data
+
+
+def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tuple:
+    """Build (full section, table-only section, check-failure count).
+
+    Every manifest value is re-validated: capture names against the capture
+    regex, status against the enum, the view against the known views, and
+    problems escaped (via code spans) and length-capped. Captures that fail
+    validation are dropped and counted, never rendered. Image URLs are built
+    from the validated repo/PR/head SHA plus the validated file name, so they
+    always match the pinned evidence-branch pattern exactly.
+    """
+    if not UI_REPO_RE.fullmatch(repo or ""):
+        raise ValueError(f"bad repo: {repo!r}")
+    if not isinstance(pr, int) or pr <= 0:
+        raise ValueError(f"bad PR number: {pr!r}")
+    if not UI_SHA_RE.fullmatch(head_sha or ""):
+        raise ValueError(f"bad head SHA: {head_sha!r}")
+    url = (
+        f"https://raw.githubusercontent.com/{repo}/{SHA_PLACEHOLDER}"
+        f"/pr/{pr}/{head_sha}"
+    )
+    kept, dropped = [], 0
+    for cap in manifest["captures"]:
+        if not isinstance(cap, dict):
+            dropped += 1
+            continue
+        status = cap.get("status")
+        names = {key: cap.get(key) for key in ("base", "head", "diff")}
+        problems = cap.get("head_problems", [])
+        view = cap.get("view")
+        if status not in UI_STATUSES or view not in UI_VIEW_WIDTHS:
+            dropped += 1
+            continue
+        if any(
+            value is not None
+            and (not isinstance(value, str) or not UI_CAPTURE_RE.fullmatch(value))
+            for value in names.values()
+        ):
+            dropped += 1
+            continue
+        if not isinstance(problems, list) or any(
+            not isinstance(item, str) for item in problems
+        ):
+            dropped += 1
+            continue
+        diff_error = cap.get("diff_error")
+        if diff_error is not None and not isinstance(diff_error, str):
+            dropped += 1
+            continue
+        need = {"added": ("head",), "removed": ("base",), "changed": ("base", "head")}.get(
+            status, ()
+        )
+        if any(not isinstance(names[key], str) for key in need):
+            dropped += 1
+            continue
+        kept.append(cap)
+    lines = [
+        "## Web UI",
+        "",
+        "Fixture house only. Captured with headless Chromium via "
+        "`scripts/ui_evidence.py`: every fixture in `tests/fixtures/dashboard/` "
+        "at phone (360x780), desktop (1280x900, light and dark), and e-ink "
+        "(800x480) sizes. Images live on the `pr-evidence` branch, pinned to "
+        "the evidence push, so they never change afterwards.",
+        "",
+    ]
+    if not manifest["captures"]:
+        lines += [
+            "Neither the base nor the head captured anything: no `web/` on "
+            "either side, so there is nothing to show.",
+            "",
+        ]
+    lines += [
+        "| Capture | Status | Checks |",
+        "|---------|--------|--------|",
+    ]
+    failures = 0
+    for cap in kept:
+        checks = [_ui_cell(item, MAX_UI_TEXT_LEN) for item in cap["head_problems"]]
+        if cap.get("diff_error"):
+            checks.append(_ui_cell(cap["diff_error"], MAX_UI_TEXT_LEN))
+        if checks:
+            failures += 1
+        label = _ui_cell(
+            f"{cap.get('fixture', '')} / {cap.get('view', '')}", MAX_UI_LABEL_LEN
+        )
+        checks_cell = code_span("; ".join(checks) if checks else "pass")
+        lines.append(f"| {code_span(label)} | {cap['status']} | {checks_cell} |")
+    lines += [""]
+    if dropped:
+        lines += [
+            f"**Omitted {dropped} UI capture(s) with invalid manifest entries.**",
+            "",
+        ]
+    table_section = "\n".join(lines)
+
+    details = []
+    by_fixture: dict = {}
+    for cap in kept:
+        by_fixture.setdefault(_ui_cell(cap.get("fixture", ""), MAX_UI_LABEL_LEN), []).append(cap)
+    for fixture in sorted(by_fixture):
+        shown = [c for c in by_fixture[fixture] if c["status"] in ("added", "changed")]
+        if not shown:
+            continue
+        block = [f"<details><summary>{html.escape(fixture)}</summary>", ""]
+        for cap in shown:
+            label = _ui_cell(f"{cap.get('fixture', '')} / {cap.get('view', '')}", MAX_UI_LABEL_LEN)
+            width = UI_VIEW_WIDTHS[cap["view"]]
+            block += [f"#### {code_span(label)}", ""]
+            if cap["status"] == "added":
+                block += [
+                    "New page: no before image (the base has no `web/`).",
+                    "",
+                    _ui_img(f"{url}/{cap['head']}", width, f"after: {label}"),
+                    "",
+                ]
+            else:
+                block += [
+                    _ui_img(f"{url}/{cap['base']}", width, f"before: {label}"),
+                    _ui_img(f"{url}/{cap['head']}", width, f"after: {label}"),
+                ]
+                if cap.get("diff") is not None:
+                    block.append(_ui_img(f"{url}/{cap['diff']}", width, f"diff: {label}"))
+                else:
+                    reason = _ui_cell(
+                        cap.get("diff_error") or "unknown reason", MAX_UI_TEXT_LEN
+                    )
+                    block.append("Diff unavailable: " + html.escape(reason) + ".")
+                block += [""]
+        block += ["</details>", ""]
+        details.append((fixture, "\n".join(block)))
+
+    # No budget trimming here: the caller picks whole tiers (full section,
+    # table alone, or a one-line pointer) against the shared comment budget,
+    # so a cut never leaves a tag or fence open.
+    full = table_section
+    for _, block in details:
+        full += ("\n" if not full.endswith("\n\n") else "") + block
+    return full, table_section, failures
+
+
+def append_ui_section(
+    body: str,
+    ui_dir: Path | None,
+    *,
+    repo: str | None = None,
+    pr: int | None = None,
+    head_sha: str | None = None,
+) -> str:
+    """Append the Web UI section, built from ui_manifest.json, if present.
+
+    Pre-rendered markdown files in the artifact are ignored: the comment
+    carries only known boilerplate plus a table and images built from the
+    re-validated manifest. Without repo/PR/head-SHA context the pinned image
+    URLs cannot be built, so the body is returned unchanged.
+    """
+    manifest = load_ui_manifest(ui_dir)
+    if manifest is None or repo is None or pr is None or head_sha is None:
+        return body
+    room = MAX_COMMENT_BYTES - len(body.encode()) - 400
+    full, table, _ = render_ui_section(manifest, repo, pr, head_sha)
+    if len(("\n" + full).encode()) <= room:
+        return body + "\n" + full
+    fallback = (
+        "\n" + table + "\n**Web UI details omitted to fit a GitHub comment:** "
+        "run `scripts/ui_evidence.py` locally to see them.\n"
+    )
+    if len(fallback.encode()) <= room:
+        return body + fallback
+    return (
+        body + "\n**Web UI evidence omitted to fit a GitHub comment:** "
+        "run `scripts/ui_evidence.py` locally to see it.\n"
+    )
+
+
+def build_comment(
+    base_tree: Path,
+    head_tree: Path,
+    ui_dir: Path | None = None,
+    *,
+    repo: str | None = None,
+    pr: int | None = None,
+    head_sha: str | None = None,
+) -> str:
     scenarios, volatile_keys = load_scenarios(head_tree)
     volatile = set(volatile_keys)
     base_scenarios = load_scenarios(base_tree)[0]
     base_ids = {s["id"] for s in base_scenarios}
     head_ids = {s["id"] for s in scenarios}
     base_ok = has_package(base_tree)
+    ui_manifest = load_ui_manifest(ui_dir)
+    ui_failures = 0
+    if ui_manifest is not None and repo is not None:
+        _, _, ui_failures = render_ui_section(ui_manifest, repo, pr, head_sha)
 
     def size(r: dict | None) -> str:
         return "—" if r is None or r["sdk_size"] is None else f"{r['sdk_size']:,} B"
@@ -173,9 +427,11 @@ def build_comment(base_tree: Path, head_tree: Path) -> str:
             status = "changed"
         expected = scenario.get("expect_exit", 0)
         if after["exit"] != expected:
-            unexpected.append(f"`{scenario['id']}` exited {after['exit']}, expected {expected}")
+            unexpected.append(
+                f"{code_span(scenario['id'])} exited {after['exit']}, expected {expected}"
+            )
         rows.append(
-            f"| `{scenario['id']}` | {status} | {exit_(before)} → {exit_(after)} "
+            f"| {code_span(scenario['id'])} | {status} | {exit_(before)} → {exit_(after)} "
             f"| {size(before)} → {size(after)} |"
         )
         if status == "unchanged":
@@ -188,8 +444,15 @@ def build_comment(base_tree: Path, head_tree: Path) -> str:
                 tofile="after",
             )
         )
+        # Scenario ids and titles come from the head tree's scenarios file, so
+        # they are PR-authored data: both go through code_span (which grows
+        # the backticks when the value contains any) so neither can inject
+        # Markdown or HTML into the heading.
+        heading = f"### {code_span(scenario['id'])}"
+        if scenario.get("title", ""):
+            heading += f": {code_span(scenario['title'])}"
         sections.append(
-            f"### `{scenario['id']}`: {scenario.get('title', '')}\n\n"
+            heading + "\n\n"
             + code_span("housesitter " + " ".join(scenario["argv"]))
             + "\n\n"
             + fence(diff, "diff")
@@ -201,7 +464,7 @@ def build_comment(base_tree: Path, head_tree: Path) -> str:
         )
     for scenario in base_scenarios:
         if scenario["id"] not in head_ids:
-            rows.append(f"| `{scenario['id']}` | removed | — | — |")
+            rows.append(f"| {code_span(scenario['id'])} | removed | — | — |")
 
     head = [
         MARKER,
@@ -212,6 +475,12 @@ def build_comment(base_tree: Path, head_tree: Path) -> str:
         "Size is the Muse SDK's measure of stdout (limit 96 KiB; budget 88 KiB).",
         "",
     ]
+    if ui_failures:
+        head += [
+            f"**Web UI checks failed:** {ui_failures} capture(s) report "
+            "problems; see the Web UI section below.",
+            "",
+        ]
     if not base_ok:
         head += ["The base has no `housesitter` package yet, so every scenario is new.", ""]
     if not scenarios:
@@ -245,7 +514,7 @@ def build_comment(base_tree: Path, head_tree: Path) -> str:
             + ", ".join(omitted)
             + ". Run `scripts/pr_evidence.py` locally to see them.\n"
         )
-    return body
+    return append_ui_section(body, ui_dir, repo=repo, pr=pr, head_sha=head_sha)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -253,13 +522,40 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-tree", type=Path, required=True)
     parser.add_argument("--head-tree", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--ui-artifacts",
+        type=Path,
+        default=None,
+        help="directory with ui_manifest.json from scripts/ui_evidence.py",
+    )
+    parser.add_argument(
+        "--repo", default=None, help="owner/name of the GitHub repo (with --ui-artifacts)"
+    )
+    parser.add_argument(
+        "--pr", type=int, default=None, help="pull request number (with --ui-artifacts)"
+    )
+    parser.add_argument(
+        "--head-sha", default=None, help="head commit SHA, 40 hex (with --ui-artifacts)"
+    )
     args = parser.parse_args(argv)
+    if args.ui_artifacts is not None and not (args.repo and args.pr and args.head_sha):
+        parser.error("--repo, --pr, and --head-sha are required with --ui-artifacts")
     try:
         refuse_if_real_setup()
     except Refused as exc:
         print(f"pr_evidence: refused: {exc}", file=sys.stderr)
         return 2
-    args.out.write_text(build_comment(args.base_tree, args.head_tree), encoding="utf-8")
+    args.out.write_text(
+        build_comment(
+            args.base_tree,
+            args.head_tree,
+            args.ui_artifacts,
+            repo=args.repo,
+            pr=args.pr,
+            head_sha=args.head_sha,
+        ),
+        encoding="utf-8",
+    )
     return 0
 
 
