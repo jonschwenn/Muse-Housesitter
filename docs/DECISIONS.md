@@ -44,11 +44,16 @@ handoff's "license not chosen; don't publish."
   - Python ≥ 3.11 with TOML, because it would exclude Bullseye Pis.
   - YAML, because it would add a dependency.
 
-### D5. Integrate through SDK drop-in commands, not by importing `musegadget` (2026-11-04, proposed by agent, pending Jon)
+### D5. Integrate through SDK drop-in commands, not by importing `musegadget` (2026-11-04, proposed by agent; approved 2026-11-07, Jon)
 - **Why:** Drop-ins are the SDK's documented extension point for owner
   commands. They keep Housesitter testable without the SDK and immune to
   changes in SDK internals. The SDK's `AGENTS.md` says most of the package
   is internal and can change.
+- **Framing:** Housesitter depends only on the SDK's documented drop-in JSON
+  format and stdin/stdout command protocol, including limits and naming rules,
+  checked by the conformance suite; SDK internals may change independently.
+  Each command runs in its own process, so a hanging or crashing module fails
+  only that command and leaves the SDK's connection to Muse intact.
 - **Rejected:**
   - Subclassing `musegadget.service.Service`, which couples us to the SDK's
     connection lifecycle and needs the SDK in tests.
