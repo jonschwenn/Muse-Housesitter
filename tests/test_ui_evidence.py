@@ -911,3 +911,35 @@ def test_section_without_captures_has_no_table_header():
     assert "Captured headless" not in full
     assert IMAGES_SENTENCE not in full
     assert BROWSER_UNKNOWN not in full
+
+
+@pytest.mark.parametrize(
+    "channel, version, shown",
+    [
+        ("chrome", "131.0.6778.85", "Google Chrome 131.0.6778.85"),
+        ("chrome-beta", "132.0.6834", "Google Chrome Beta 132.0.6834"),
+        ("msedge", "131.0.2903", "Microsoft Edge 131.0.2903"),
+        ("chrome", "131", "Google Chrome 131"),
+        ("chrome", "9" * 32, "Google Chrome " + "9" * 32),
+    ],
+)
+def test_section_names_every_allow_listed_browser(channel, version, shown):
+    manifest = make_manifest()
+    manifest["browser"] = {"channel": channel, "version": version}
+    full, _ = ui_evidence.build_ui_section(manifest, REPO, 7, HEAD_SHA, 60_000, True)
+    assert f"Captured headless with {shown}. " + IMAGES_SENTENCE in full
+
+
+@pytest.mark.parametrize(
+    "browser",
+    [None, {"channel": "chrome", "version": "9" * 33}, ["chrome", "131.0.6778"]],
+)
+def test_section_with_an_unusable_browser_keeps_its_rows(browser):
+    manifest = make_manifest()
+    manifest["browser"] = browser
+    full, table = ui_evidence.build_ui_section(manifest, REPO, 7, HEAD_SHA, 60_000, True)
+    assert BROWSER_UNKNOWN + " " + IMAGES_SENTENCE in full
+    assert BROWSER_UNKNOWN in table
+    assert "9" * 33 not in full and "131.0.6778" not in full
+    assert "| Capture | Status | Checks |" in table
+    assert "`typical / index-phone`" in table

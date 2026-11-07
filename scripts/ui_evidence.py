@@ -4,15 +4,21 @@
 For each fixture in ``tests/fixtures/dashboard/`` and each view (phone,
 desktop, desktop dark, e-ink), serves a source tree's own
 ``scripts/dev_dashboard.py`` with that tree's own ``web/`` and fixtures, and
-captures the page with headless Chromium (Playwright, a dev/CI-only extra).
+captures the page with a headless browser through Playwright (a dev/CI-only
+extra). CI uses the runner's Google Chrome (``--browser-channel chrome``);
+without a channel, Playwright's bundled Chromium. The manifest records which.
 
 For each capture pair the script classifies the pair as added, removed,
 changed, or unchanged (by decoded pixel equality, not file bytes), writes a
 highlighted diff image for changed pairs, runs the UI checks (any head
 failure exits nonzero), and writes a ``## Web UI`` comment section whose
 image URLs carry a placeholder token. CI's read-only ``evidence`` job runs
-this script, and the ``evidence-comment`` job substitutes the pinned commit
-SHA of the evidence push after it happens, so the writer never runs PR code.
+the PR's own copy of this script. The privileged ``evidence-publish``
+workflow runs main's code: it validates the artifact, rebuilds the comment
+section from the manifest, and substitutes the pinned commit SHA of the
+evidence push after it happens, so PR-built Web UI markup never reaches the
+comment. (The text section, ``evidence.md``, is PR-built; main only checks
+its marker and size before posting it.)
 
 Usage:
     python scripts/ui_evidence.py --base-tree base --head-tree head
@@ -427,7 +433,8 @@ def capture_side(
     """Serve one tree and capture every fixture x view.
 
     Returns (records, browser): name -> record, plus the browser that
-    launched (the channel, None for bundled Chromium, and its version).
+    launched: ``{"channel", "version"}``, with channel "chromium" for
+    Playwright's bundled Chromium (no ``channel`` given).
 
     ``channel`` picks an installed browser (e.g. "chrome") instead of
     Playwright's bundled Chromium. Base and head are always captured with

@@ -390,6 +390,9 @@ def test_ui_section_never_echoes_a_hostile_browser(browser):
                 assert value not in full and value not in table
     elif isinstance(browser, str):
         assert browser not in full
+    # A bad browser value never costs the valid capture its table row.
+    assert "typical__index-phone__head.png" in full
+    assert "| Capture | Status | Checks |" in table
 
 
 def test_ui_section_without_captures_has_no_table_header():
@@ -420,6 +423,10 @@ def test_ui_section_with_only_invalid_captures_omits_the_table():
     # Nothing validated, so there is no capture to describe.
     assert "Captured headless" not in full
     assert IMAGES_SENTENCE not in full
+    assert BROWSER_UNKNOWN not in full
+    # "Nothing to show" is for an empty captures list only, never together
+    # with the omission note.
+    assert "nothing to show" not in full
 
 
 def test_ui_intro_wording_matches_ui_evidence():
@@ -436,6 +443,10 @@ def test_ui_intro_wording_matches_ui_evidence():
         pr_evidence.UI_BROWSER_VERSION_RE.pattern
         == ui_evidence.UI_BROWSER_VERSION_RE.pattern
     )
+    assert (
+        pr_evidence.UI_BROWSER_VERSION_MAX_LEN
+        == ui_evidence.UI_BROWSER_VERSION_MAX_LEN
+    )
     # The rendered paragraphs are identical too, not just the constants.
     manifest = _ui_manifest_with_browser(
         {"channel": "chrome", "version": "131.0.6778"}, _ui_capture()
@@ -447,3 +458,115 @@ def test_ui_intro_wording_matches_ui_evidence():
     captured = "Captured headless with Google Chrome 131.0.6778. " + IMAGES_SENTENCE
     assert INTRO_SENTENCE in pr_full and INTRO_SENTENCE in ui_full
     assert captured in pr_full and captured in ui_full
+
+
+@pytest.mark.parametrize(
+    "channel, version, shown",
+    [
+        ("chrome", "131.0.6778.85", "Google Chrome 131.0.6778.85"),
+        ("chrome-beta", "132.0.6834", "Google Chrome Beta 132.0.6834"),
+        ("msedge", "131.0.2903", "Microsoft Edge 131.0.2903"),
+        ("chrome", "131", "Google Chrome 131"),
+    ],
+)
+def test_ui_section_names_every_allow_listed_browser(channel, version, shown):
+    manifest = _ui_manifest_with_browser(
+        {"channel": channel, "version": version}, _ui_capture()
+    )
+    full, _, _ = pr_evidence.render_ui_section(manifest, UI_REPO, UI_PR, UI_SHA)
+    assert f"Captured headless with {shown}. " + IMAGES_SENTENCE in full
+
+
+def test_ui_section_with_a_null_browser_and_captures_is_neutral():
+    manifest = _ui_manifest_with_browser(None, _ui_capture())
+    full, table, _ = pr_evidence.render_ui_section(manifest, UI_REPO, UI_PR, UI_SHA)
+    assert BROWSER_UNKNOWN + " " + IMAGES_SENTENCE in full
+    assert "typical__index-phone__head.png" in full
+
+
+def test_ui_section_tolerates_a_capture_without_head_problems():
+    # Validation treats a missing head_problems as no problems; rendering
+    # must agree instead of raising KeyError and killing the publisher.
+    capture = _ui_capture()
+    del capture["head_problems"]
+    full, table, failures = pr_evidence.render_ui_section(
+        _ui_manifest(capture), UI_REPO, UI_PR, UI_SHA
+    )
+    assert failures == 0
+    assert "| `typical / index-phone` | added | `pass` |" in table
+
+
+def test_ui_diff_unavailable_reason_cannot_render_markdown():
+    manifest = _ui_manifest(
+        _ui_capture(
+            status="changed",
+            base="typical__index-phone__base.png",
+            diff=None,
+            diff_error="[evil](https://evil.example/x) *pwn*",
+        )
+    )
+    full, _, failures = pr_evidence.render_ui_section(manifest, UI_REPO, UI_PR, UI_SHA)
+    assert failures == 1
+    assert "Diff unavailable: `[evil](https://evil.example/x) *pwn*`." in full
+    assert "Diff unavailable: [evil]" not in full
+
+
+@pytest.mark.parametrize(
+    "version, named", [("9" * 32, True), ("9" * 33, False)]
+)
+def test_ui_browser_version_length_boundary(version, named):
+    manifest = _ui_manifest_with_browser(
+        {"channel": "chrome", "version": version}, _ui_capture()
+    )
+    full, _, _ = pr_evidence.render_ui_section(manifest, UI_REPO, UI_PR, UI_SHA)
+    assert (f"Captured headless with Google Chrome {version}." in full) is named
+    assert (BROWSER_UNKNOWN in full) is not named
+    if not named:
+        assert version not in full
+
+
+def test_ui_section_with_a_list_browser_echoes_nothing():
+    manifest = _ui_manifest_with_browser(["chrome", "131.0.6778"], _ui_capture())
+    full, table, _ = pr_evidence.render_ui_section(manifest, UI_REPO, UI_PR, UI_SHA)
+    assert BROWSER_UNKNOWN in full and BROWSER_UNKNOWN in table
+    assert "131.0.6778" not in full
+
+
+@pytest.mark.parametrize("problems", [123, "x", [123], None])
+def test_ui_capture_with_bad_head_problems_is_dropped(problems):
+    full, table, failures = pr_evidence.render_ui_section(
+        _ui_manifest(_ui_capture(head_problems=problems)), UI_REPO, UI_PR, UI_SHA
+    )
+    assert failures == 0
+    assert "**Omitted 1 UI capture(s) with invalid manifest entries.**" in full
+    assert "| Capture | Status | Checks |" not in table
+
+
+def test_ui_section_mixing_valid_and_invalid_captures():
+    manifest = _ui_manifest_with_browser(
+        {"channel": "chrome", "version": "131.0.6778"},
+        _ui_capture(),
+        _ui_capture(status="pwned"),
+    )
+    full, table, _ = pr_evidence.render_ui_section(manifest, UI_REPO, UI_PR, UI_SHA)
+    assert "Captured headless with Google Chrome 131.0.6778." in full
+    assert "| `typical / index-phone` | added | `pass` |" in table
+    assert "**Omitted 1 UI capture(s) with invalid manifest entries.**" in full
+    assert "nothing to show" not in full
+
+
+def test_ui_section_with_valid_captures_has_neither_empty_note():
+    full, table, _ = pr_evidence.render_ui_section(
+        _ui_manifest_with_browser(None, _ui_capture()), UI_REPO, UI_PR, UI_SHA
+    )
+    assert BROWSER_UNKNOWN + " " + IMAGES_SENTENCE in table
+    assert "nothing to show" not in full
+    assert "Omitted" not in full
+
+
+def test_ui_section_without_captures_has_no_omission_note():
+    full, _, _ = pr_evidence.render_ui_section(
+        {"version": 1, "captures": []}, UI_REPO, UI_PR, UI_SHA
+    )
+    assert "nothing to show" in full
+    assert "Omitted" not in full

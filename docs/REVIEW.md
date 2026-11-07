@@ -108,7 +108,7 @@ PR #1 predates the tooling and has no evidence.
   Chromium. The top-level `browser` in `ui_manifest.json` records the
   `--browser-channel` value (or `chromium` when unset) and the launched
   browser's version, using the head's record, else the base's, else `null`
-  when neither side captured anything; the manifest stays at version 1,
+  when neither side has `web/`; the manifest stays at version 1,
   and older readers ignore the extra key. The comment names that browser
   and version only when it lists captures. Playwright is a dev/CI-only
   extra (`ui` in `pyproject.toml`), never a runtime dependency.

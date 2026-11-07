@@ -342,7 +342,10 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
             "|---------|--------|--------|",
         ]
         for cap in kept:
-            checks = [_ui_cell(item, MAX_UI_TEXT_LEN) for item in cap["head_problems"]]
+            # Validation treats a missing head_problems as none, so must this.
+            checks = [
+                _ui_cell(item, MAX_UI_TEXT_LEN) for item in cap.get("head_problems", [])
+            ]
             if cap.get("diff_error"):
                 checks.append(_ui_cell(cap["diff_error"], MAX_UI_TEXT_LEN))
             if checks:
@@ -391,7 +394,8 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
                     reason = _ui_cell(
                         cap.get("diff_error") or "unknown reason", MAX_UI_TEXT_LEN
                     )
-                    block.append("Diff unavailable: " + html.escape(reason) + ".")
+                    # A code span, like the table: no markdown or HTML renders.
+                    block.append("Diff unavailable: " + code_span(reason) + ".")
                 block += [""]
         block += ["</details>", ""]
         details.append((fixture, "\n".join(block)))

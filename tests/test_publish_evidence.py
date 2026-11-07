@@ -269,3 +269,14 @@ def test_render_artifact_with_hostile_browser_is_neutral(tmp_path):
     assert "Captured headless" not in body
     assert "chrome<script>" not in body
     assert "1.2.3.4.5" not in body
+
+
+def test_render_capture_without_head_problems_publishes(tmp_path):
+    # A hostile manifest that omits head_problems passes validation; the
+    # publisher must still render (fail closed or publish, never crash).
+    manifest = _manifest("typical__index-phone__head.png")
+    del manifest["captures"][0]["head_problems"]
+    artifact = _artifact(tmp_path, manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    assert "typical / index-phone" in (out / "comment.md").read_text()

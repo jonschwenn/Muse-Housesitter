@@ -94,8 +94,9 @@ def render_comment(artifact: Path, repo: str, pr: int, head_sha: str) -> str:
     check_evidence_text(text)
     ui_dir = artifact / "ui_out"
     if not ui_dir.exists() or not has_manifest(ui_dir):
-        # No UI evidence (no web/ on either side, or the capture produced
-        # nothing): the text comment still publishes.
+        # No manifest (the capture died before writing one): the text
+        # comment still publishes. No web/ on either side is not this case:
+        # that manifest has an empty captures list and gets a Web UI section.
         return text
     errors = ui_evidence.validate_artifact(ui_dir)
     if errors:
