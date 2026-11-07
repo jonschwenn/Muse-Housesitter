@@ -1,14 +1,13 @@
 # Writing a module
 
-Status: the public module API, registry, config loader, and concrete Context
-exist (12a). The pieces that run a command are **Planned** (12b); the
-conformance suite is **Planned** (12c).
+Status: the public module API, registry, config loader, Context, runner,
+store, drop-ins, and CLI are implemented. The conformance suite and
+`housesitter conformance` CLI command are **Planned (12c)**.
 
 A module is one source of data. It is a Python package that exposes one
 `Module` subclass. It declares its config, secrets, HTTP allow-list,
 commands, and output fields. The core is responsible for CLI, SDK
-drop-ins, envelopes, size budget, identifier policy, storage, and errors;
-command execution and storage are still **Planned**.
+drop-ins, envelopes, size budget, identifier policy, storage, and errors.
 
 ## 1. Lifecycle of a new module
 
@@ -23,7 +22,7 @@ command execution and storage are still **Planned**.
    be dropped), and a large fixture (to exercise truncation).
 3. **Code:** `src/housesitter/modules/<id>/`.
 4. **Tests:** `tests/modules/<id>/`. These pin the normalised output
-   field by field from the fixtures. **Planned:** the conformance suite will
+   field by field from the fixtures. **Planned (12c):** the conformance suite will
    pick the module up automatically.
 5. **SKILL.md:** Muse-facing guidance, next to the code (§5).
 6. **Review gates** ([REVIEW.md](REVIEW.md)), including the threat and
@@ -32,10 +31,9 @@ command execution and storage are still **Planned**.
 ## 2. The public module API (`housesitter.sdk`)
 
 The API is implemented in `sdk.py`. Declaration objects check their own
-shape at construction. **Planned (12b):** the runner that validates incoming
-parameter values, calls handlers, applies `Field` declarations, saves
-results, and builds the command envelope. Nothing applies `Field`
-declarations at runtime yet.
+shape at construction. The runner validates incoming parameter values,
+calls handlers, applies `Field` declarations, saves results when requested,
+and builds the command envelope (ARCHITECTURE §3.4).
 
 ### Module declarations
 
@@ -52,11 +50,14 @@ Subclass `Module` and set these class attributes:
 | `skill_file` | Runtime guide filename; defaults to `"SKILL.md"`. |
 
 Optionally override `check(self, ctx: Context) -> list[str]` for a read-only
-connectivity check. The default returns `[]`; calling it through `doctor`
-is **Planned**.
+connectivity check. The default returns `[]`. `housesitter doctor --check`
+(or the `check` parameter of `housesitter.doctor`) calls it for enabled modules.
+Its Context has a read-only store: `list` and `load` work without creating
+directories or changing modes; `save` fails with `config_invalid`,
+"doctor checks are read-only".
 
 This illustrative module reads an invented sensor API. It shows the handler
-contract, not a command that the CLI can run yet:
+contract; it is not an installed module:
 
 ```python
 from housesitter.sdk import (
@@ -121,14 +122,18 @@ maximum=None, max_len=None)` describes a command parameter. It accepts the
 same scalar types as `Setting`, plus `object` and `array`, and requires a
 non-blank description. Bounds and string limits follow the same rules as
 settings; non-`None` defaults must satisfy their declared constraints.
-Only the **definitions** are checked now; incoming parameter values are
-not validated yet.
+The runner rejects unknown keys, missing or null required params, wrong
+types, non-finite numbers, enum violations, numeric bounds, and string
+length violations as `bad_params`. Booleans do not count as numbers.
+Missing or null optionals use a non-null default when declared; otherwise
+they are omitted from the handler's params.
 
 The SDK drop-in format carries only `type` and `description`
 (ARCHITECTURE §2.2). `param.drop_in_description()` appends constraints in
 this order: enum (`"One of: ..."`), default, minimum, maximum, maximum
-length. **Planned:** the drop-in generator will use that text, and the
-runner will enforce the constraints on incoming values.
+length. The drop-in generator and `describe` use that text; the runner
+enforces the constraints on incoming values. Strings stay bare; other
+values use compact JSON, for example `Default false.`.
 
 ### Commands and output
 
@@ -142,6 +147,14 @@ objects and cannot overlap. `timeout_ms` is an integer from 5000 through
 `schema_version` is an integer of at least 1, intended for the envelope's
 schema suffix.
 
+`Command` rejects inconsistent field trees at construction. A segment
+cannot be both a list (`x[]`) and an object (`x.child`). A plain `x`
+declaration can accompany `x[]...` only when `x` is an `array` with no
+children of its own. A declaration with non-list child fields must be an
+`object`; this also applies to item declarations such as `x[]`. Every
+`object` field must have at least one declared descendant; opaque object
+leaves are rejected when the `Command` is defined.
+
 `Field(path, type, nullable=True, identifier=False, untrusted=False,
 max_len=64)` declares an output value. Paths start at `data.` or `source.`;
 each dot-separated segment matches `[a-z_][a-z0-9_]*` and may end in `[]`
@@ -152,8 +165,30 @@ is allowed only for strings. `nullable` declares whether null is allowed;
 `identifier` marks values such as device addresses, and `untrusted` marks
 text supplied by upstream users or devices. `max_len` must be a positive
 integer and declares the text length cap.
-**Planned:** the runner will use these declarations to sanitise untrusted
-text, apply the identifier policy, and drop undeclared keys.
+The runner sanitises declared untrusted strings, applies the identifier
+policy, drops undeclared keys, and checks present values against their
+declared types. Missing fields stay absent. Null is allowed only when the
+value's own declaration has `nullable=True`; this includes declared list
+and object containers with descendants. Undeclared (implied) containers
+may be null. A mismatch becomes `upstream_unexpected` with the field path.
+
+`x[]` means a list whose **items** are described by the rest of the path.
+For `Field("data.values[]", "integer")`, each item must be an integer;
+for `Field("data.aps[].name", "string")`, each AP must be an object and
+each present name a string. Lists or tuples are accepted as containers.
+`Field("data.values", "array")` instead declares the whole array. It may
+accompany `data.values[]...` to govern the list value itself, including
+`nullable` and `identifier`. Opaque leaves exist only as type `array`
+(without declared descendants). Their items may contain only finite
+numbers, booleans, null, and nested arrays of those. A string, object, or
+non-finite number anywhere inside one causes `upstream_unexpected`.
+Declare lists of strings item-wise, for example
+`Field("data.tags[]", "string", untrusted=True)`, so each item is sanitised.
+Every declared identifier value is omitted when `identifiers="none"`,
+including nulls, before type checks. A terminal `x[]` identifier declaration
+removes the whole list, including a null list value. Untrusted strings lose
+control, formatting, and surrogate characters, have whitespace collapsed,
+and are capped at the field's `max_len`.
 
 `Result(data, source={}, compact=None, paging=None, warnings=(),
 label=None, collected_at=None, save=None)` is what a handler returns.
@@ -162,20 +197,42 @@ mappings. `compact` is an optional smaller data mapping. `warnings` is a
 sequence of strings, `label` an optional string, and `collected_at` an
 optional timezone-aware datetime (not necessarily UTC). `save`, when set,
 is a kind matching `[a-z][a-z0-9_]{0,31}`, such as `"snapshot"`.
-**Planned:** saving when `save` is set, and using `compact` and `paging`
-to fit the size budget. `Result` currently checks only its own shape;
-fields belong to `Command`, not `Result`.
+`Result` checks its own shape; fields belong to `Command`. The runner
+saves sanitised full data and source when `save` is set, before removing
+identifiers or undeclared keys. It tries full output, then `compact`, then
+`paging` to fit the budget (ARCHITECTURE §5). A fitting compact result is
+not marked truncated. Warnings from the result and Context are sanitised,
+capped at 200 characters, de-duplicated, and limited to 20; the last entry
+reports any overflow count. Labels are sanitised and capped at 200.
 
 `Paging(command, lists=(), params={}, start={})` describes how to fetch
 remaining list items. `command` is a short command name such as `"get"`,
 not a full dotted name. `lists` must be non-empty, unique short names,
 in the intended truncation order. `params` carries paging parameters;
-`start` maps listed names to non-negative integer offsets. Applying this
-metadata is **Planned**.
+`section`, `offset`, and `remaining` are rejected keys at construction.
+`id` is allowed. `start` maps listed names to non-negative integer offsets.
+Lists are top-level data keys. The runner cuts them from the end in declared
+order, emptying one before shrinking the next if necessary. `more.command` becomes
+`housesitter.<module_id>.<command>` for module commands, or
+`housesitter.<command>` for core commands. `more.params` copies `Paging.params`,
+then sets `id` when saved, `section` to the first truncated list, and
+`offset` to that section's start plus items kept. `more.remaining` maps
+each cut list to the number of items cut; it is beside `params`, not inside
+it. Before returning truncated output, the runner requires the target
+command to exist in the module registry (or the core command table for
+core commands) and declare `section` (string), `offset` (integer), and
+`id` (string), in either `required` or `optional`. The replay must carry a
+non-empty string `id`: the saved id, or `Paging.params["id"]` when a paging
+command pages its own output without saving again. Otherwise it fails
+with `upstream_unexpected`, "the module's paging cannot fetch the rest of
+this result". Authors must ensure the handler can fetch the rest and
+accepts all replay params; the runner does not check other parameters or
+their constraints at this stage.
 
 A handler may raise `CommandError(code, reason)`. `code` must be in
 `ERROR_CODES`; `reason` is author-written plain language, never upstream
-text or secrets. Translating it into command output is **Planned**.
+text or secrets. The runner preserves its code and reason in the error
+envelope; the CLI also prints the stable stderr error line.
 The SDK also re-exports the core HTTP types `Allow`, `NotAllowed`,
 `UpstreamError`, and `Response`, and the stable `ERROR_CODES` set.
 `Allow(method, pattern, allow_query=False)` declares a permitted path;
@@ -195,7 +252,7 @@ concrete implementation. `Context` gives a module these members:
 | `ctx.config` | A deeply read-only copy of the supplied module config; validation belongs to the config loader. |
 | `ctx.secret(name)` | Reads a named file from the secrets directory through the core secret reader, checking mode and ownership; failures become `CommandError("secret_unreadable", ...)`. |
 | `ctx.http(base_url, *, tls=None, timeout_s=None)` | Returns an allow-listed `HttpSession`, bound to one scheme, host, and port; default request timeout is 15 seconds. |
-| `ctx.store` | **Planned (12b):** `save`, `list`, `load`. Without an injected store, all three raise `NotImplementedError`. |
+| `ctx.store` | The runner injects a per-module store with `save`, `list`, and `load` (ARCHITECTURE §3.3). Without an attached store, using these methods raises `NotImplementedError`. Doctor checks get a read-only store. |
 | `ctx.now()` | Timezone-aware current UTC time. Injectable in tests; an injected aware datetime is converted to UTC, and a naive one is rejected. |
 | `ctx.log` | A logger that redacts values read through this Context's `secret`, including formatted messages, traceback text, and stack text. It does not discover unknown secrets. |
 | `ctx.deadline` | Seconds left until the supplied monotonic deadline, floored at zero. |
@@ -211,8 +268,14 @@ the remaining deadline to the core HTTP client; an expired deadline raises
 The SDK also defines the `Store` interface and its return types:
 `StoredItem(id, kind, collected_at=None, label=None)` and
 `StorePage(total, items=())`. `StorePage` checks a non-negative integer
-count and a sequence of `StoredItem` objects. The concrete store is
-**Planned**.
+count and a sequence of `StoredItem` objects. `StoredItem` checks a
+store-shaped id, a valid matching kind prefix, optional collected-at text
+in the exact shape `YYYY-MM-DDTHH:MM:SSZ`, and optional label text up to
+200 characters. It checks the timestamp's shape, not calendar validity.
+The concrete store creates directories and tightens wide data-root and
+module-directory modes to 700 only on save, writes mode-600 JSON,
+lists newest first with limit 1..100, and loads only store-shaped ids
+(ARCHITECTURE §3.3).
 
 The base URL must use `http` or `https` and contain a host, with an optional
 port. A path other than an empty path or `/`, userinfo, a query, or a
@@ -220,7 +283,7 @@ fragment is refused. Timeout overrides must be positive finite numbers.
 TLS accepts only the four `TLS_SETTING` keys. Active TLS options on `http`
 are refused (null options and `insecure=False` are inert). Explicit
 `insecure=True` adds a deduplicated warning to the concrete Context's
-`warnings` list; including it in a command envelope is **Planned**.
+`warnings` list. The runner includes it in the command envelope.
 
 ### How the pieces fit
 
@@ -243,21 +306,21 @@ Command pipeline, adapted from the SDK diagram proposal:
 
 ```mermaid
 flowchart TD
-    M["Muse"] --> D["Drop-in exec: housesitter invoke (Planned)"]
-    D --> V["Validate params (Planned)"]
-    V --> C["Build Context in runner (Planned)"]
-    C --> H["Call module handler (Planned)"]
+    M["Muse"] --> D["Drop-in exec: housesitter invoke"]
+    D --> V["Validate params"]
+    V --> C["Build Context in runner"]
+    C --> H["Call module handler"]
     H --> HTTP["ctx.http: allow-list and deadline"]
     HTTP --> U["Upstream system"]
     U --> HTTP
     HTTP --> H
-    H --> S["Sanitise untrusted fields (Planned)"]
-    S --> W["Save full result if Result.save is set (Planned)"]
-    W --> I["Identifier policy and drop undeclared keys (Planned)"]
-    I --> B["Size budget: compact then Paging (Planned)"]
-    B --> E["Build command envelope (Planned)"]
+    H --> S["Sanitise untrusted fields"]
+    S --> W["Save full result if Result.save is set"]
+    W --> I["Identifier policy, drop undeclared keys, check types"]
+    I --> B["Size budget: full, compact, then Paging"]
+    B --> E["Build command envelope"]
     E --> M
-    D -.-> ERR["Any pipeline failure (Planned)"]
+    D -.-> ERR["Any pipeline failure"]
     V -.-> ERR
     C -.-> ERR
     H -.-> ERR
@@ -266,20 +329,21 @@ flowchart TD
     I -.-> ERR
     B -.-> ERR
     E -.-> ERR
-    ERR --> LINE["stderr: housesitter: module: code: reason (Planned)"]
+    ERR --> LINE["stderr: housesitter: module: code: reason"]
     LINE --> M
 ```
 
-**Planned** nodes are the 12b integration, even where they will call
-existing Context, HTTP, or envelope helpers. On failure the SDK discards
-stdout and gives Muse the last stderr line (ARCHITECTURE §2.2).
+The handler runs in a worker thread bounded by the self-deadline (timeout
+minus 3 seconds). Field projection also checks declared types. On failure
+the SDK discards stdout and gives Muse the last stderr line (ARCHITECTURE §2.2).
 
 ## 3. Rules a module must follow
 
 The registry checks these rules when loading a module:
 
 - The id matches `[a-z][a-z0-9_]*` and equals the built-in package name or
-  third-party entry-point name. Ids and full command names must be unique.
+  third-party entry-point name. The id `housesitter` is reserved for core
+  commands. Ids and full command names must be unique.
 - The title is non-blank. The version matches
   `\d+\.\d+\.\d+([.-]?[0-9A-Za-z.]+)?`, for example `0.1.0`.
 - `config` is a mapping of `Setting` objects, without reserved `enabled`
@@ -307,12 +371,20 @@ Module authors must also follow these rules:
 - Put units in field names. Use `null` for unknown, never `0` or `""` as a
   stand-in.
 - Mark identifier fields (`Field(identifier=True)`) and untrusted text
-  fields (`Field(untrusted=True)`). **Planned:** the runner will handle both.
+  fields (`Field(untrusted=True)`). The runner applies both declarations.
 - No scores, rankings, verdicts, or advice in `data` (AGENTS rule 2).
   Upstream-provided scores, such as UniFi's `satisfaction`, may be passed
   through, labelled as the vendor's metric.
 - Command descriptions are static strings, written for Muse: what the
   command reads, what it saves, and roughly how long it takes.
+- Warnings are author-written plain-language facts. They must never
+  contain identifiers (MACs or IPs), upstream text, or secrets: the runner
+  sanitises and caps warnings but cannot apply the identifier policy
+  inside free text. **Planned (12c):** conformance will check this rule.
+- Never put identifiers, upstream text, or secrets in `Paging.params`: they
+  are returned in `more.params` verbatim, outside the identifier policy.
+  Page through the saved id instead. **Planned (12c):** conformance will
+  check this rule.
 
 ## 4. Conformance suite
 
@@ -342,8 +414,8 @@ against every registered module with its fixtures. A module is not mergeable unt
 
 ## 5. SKILL.md for a module
 
-This is the runtime guide for Muse. Returning it through
-`housesitter.describe` is **Planned**. It uses the SDK community-skill shape:
+This is the runtime guide for Muse, returned as `skill` for each module by
+`housesitter.describe`. It uses the SDK community-skill shape:
 
 ```markdown
 ---
@@ -375,6 +447,6 @@ The registry loads the entry point as a `Module` subclass whose id must
 equal the entry-point name, and records it as third-party. A load failure
 stops discovery rather than silently skipping the module.
 
-**Planned:** third-party handlers will get the same `Context` and conformance
-suite (`housesitter conformance my_sensor`) as built-ins, and `describe`
-will label them as third-party.
+Third-party handlers get the same `Context` and runner pipeline as built-ins.
+`describe` reports `third_party: true` for them. **Planned (12c):** the
+conformance suite and `housesitter conformance my_sensor` CLI command.
