@@ -51,7 +51,8 @@ handoff's "license not chosen; don't publish."
   is internal and can change.
 - **Framing:** Housesitter depends only on the SDK's documented drop-in JSON
   format and stdin/stdout command protocol, including limits and naming rules,
-  checked by the conformance suite; SDK internals may change independently.
+  which the conformance suite will check (**Planned**, #12). SDK internals may
+  change independently.
   Each command runs in its own process, so a hanging or crashing module fails
   only that command and leaves the SDK's connection to Muse intact.
 - **Rejected:**
