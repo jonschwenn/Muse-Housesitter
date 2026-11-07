@@ -368,3 +368,283 @@ def test_render_capture_without_head_problems_publishes(tmp_path):
     rc, out = _render(tmp_path, artifact)
     assert rc == 0
     assert "typical / index-phone" in (out / "comment.md").read_text()
+
+
+# Removed captures (issue #21) -------------------------------------------------
+#
+# A removed capture keeps its base PNG on the pr-evidence branch, so the
+# published comment shows the before image and the push carries the base PNG.
+
+
+def test_render_removed_capture_publishes_before_image(tmp_path):
+    manifest = {
+        "version": 1,
+        "captures": [
+            {
+                "fixture": "typical",
+                "view": "index-phone",
+                "status": "removed",
+                "base": "typical__index-phone__base.png",
+                "head": None,
+                "diff": None,
+                "head_problems": [],
+            }
+        ],
+    }
+    artifact = _artifact(
+        tmp_path, pngs=("typical__index-phone__base.png",), manifest=manifest
+    )
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "Removed page: no after image (the head no longer has this page)." in body
+    assert "typical__index-phone__base.png" in body
+    assert "after: typical / index-phone" not in body
+    assert "diff: typical / index-phone" not in body
+    files = sorted(p.name for p in (out / "files").iterdir())
+    assert files == ["typical__index-phone__base.png", "ui_manifest.json"]
+
+
+# Publisher/comment agreement (adversarial review) -----------------------------
+#
+# A hostile capture that names files its status must not show (removed + head,
+# removed + diff, added + base, unchanged + names) is dropped from the
+# comment, and the push carries exactly the pictured files: no unreferenced
+# PNG lands on the pr-evidence branch. The same holds for captures dropped
+# for any other reason (e.g. a bad view).
+
+
+def _capture(fixture, view, status, base, head, diff, **extra):
+    capture = {
+        "fixture": fixture,
+        "view": view,
+        "status": status,
+        "base": base,
+        "head": head,
+        "diff": diff,
+        "head_problems": [],
+    }
+    capture.update(extra)
+    return capture
+
+
+def _img_names(body):
+    import re
+
+    return sorted(
+        src.rsplit("/", 1)[-1] for src in re.findall(r'<img src="([^"]+)"', body)
+    )
+
+
+@pytest.mark.parametrize(
+    "capture, pngs, banned",
+    [
+        (
+            _capture(
+                "typical",
+                "index-phone",
+                "removed",
+                "typical__index-phone__base.png",
+                "typical__index-phone__head.png",
+                None,
+            ),
+            ("typical__index-phone__base.png", "typical__index-phone__head.png"),
+            ["typical__index-phone__head.png"],
+        ),
+        (
+            _capture(
+                "typical",
+                "index-phone",
+                "removed",
+                "typical__index-phone__base.png",
+                None,
+                "typical__index-phone__diff.png",
+            ),
+            ("typical__index-phone__base.png", "typical__index-phone__diff.png"),
+            ["typical__index-phone__diff.png"],
+        ),
+        (
+            _capture(
+                "typical",
+                "index-phone",
+                "added",
+                "typical__index-phone__base.png",
+                "typical__index-phone__head.png",
+                None,
+            ),
+            ("typical__index-phone__base.png", "typical__index-phone__head.png"),
+            ["typical__index-phone__base.png"],
+        ),
+        (
+            _capture(
+                "typical",
+                "index-phone",
+                "unchanged",
+                "typical__index-phone__base.png",
+                "typical__index-phone__head.png",
+                None,
+            ),
+            ("typical__index-phone__base.png", "typical__index-phone__head.png"),
+            [
+                "typical__index-phone__base.png",
+                "typical__index-phone__head.png",
+            ],
+        ),
+    ],
+)
+def test_render_drops_forbidden_names_and_pushes_only_pictured(
+    tmp_path, capture, pngs, banned
+):
+    manifest = {"version": 1, "captures": [capture]}
+    artifact = _artifact(tmp_path, pngs=pngs, manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "Omitted 1 UI capture(s) with invalid manifest entries." in body
+    assert "<img" not in body
+    for name in banned:
+        assert name not in body
+    files = sorted(p.name for p in (out / "files").iterdir())
+    assert files == ["ui_manifest.json"]
+
+
+@pytest.mark.parametrize(
+    "capture",
+    [
+        _capture(
+            "typical",
+            "index-phone",
+            "removed",
+            "typical__index-phone__base.png",
+            None,
+            None,
+            diff_error="diff unavailable: boom",
+        ),
+        _capture(
+            "typical",
+            "index-phone",
+            "removed",
+            "typical__index-phone__base.png",
+            None,
+            None,
+            head_problems=["console.error: boom"],
+        ),
+        _capture(
+            "typical",
+            "index-phone",
+            "added",
+            None,
+            "typical__index-phone__head.png",
+            None,
+            diff_error="diff unavailable: boom",
+        ),
+    ],
+)
+def test_render_drops_forbidden_check_fields(tmp_path, capture):
+    name = capture["base"] or capture["head"]
+    manifest = {"version": 1, "captures": [capture]}
+    artifact = _artifact(tmp_path, pngs=(name,), manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "Omitted 1 UI capture(s) with invalid manifest entries." in body
+    assert "boom" not in body
+    assert "<img" not in body
+    assert "Web UI checks failed" not in body
+    files = sorted(p.name for p in (out / "files").iterdir())
+    assert files == ["ui_manifest.json"]
+
+
+def test_render_does_not_push_files_from_entries_dropped_for_bad_view(tmp_path):
+    capture = _capture(
+        "typical",
+        "not-a-view",
+        "changed",
+        "typical__index-phone__base.png",
+        "typical__index-phone__head.png",
+        None,
+    )
+    manifest = {"version": 1, "captures": [capture]}
+    artifact = _artifact(
+        tmp_path,
+        pngs=(
+            "typical__index-phone__base.png",
+            "typical__index-phone__head.png",
+        ),
+        manifest=manifest,
+    )
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "Omitted 1 UI capture(s) with invalid manifest entries." in body
+    files = sorted(p.name for p in (out / "files").iterdir())
+    assert files == ["ui_manifest.json"]
+
+
+def test_pushed_files_equal_pictured_files_over_mixed_manifest(tmp_path):
+    manifest = {
+        "version": 1,
+        "captures": [
+            _capture(
+                "added-fix",
+                "index-phone",
+                "added",
+                None,
+                "added-fix__index-phone__head.png",
+                None,
+            ),
+            _capture(
+                "removed-fix",
+                "index-desktop",
+                "removed",
+                "removed-fix__index-desktop__base.png",
+                None,
+                None,
+            ),
+            _capture(
+                "changed-fix",
+                "eink",
+                "changed",
+                "changed-fix__eink__base.png",
+                "changed-fix__eink__head.png",
+                "changed-fix__eink__diff.png",
+            ),
+            _capture(
+                "nodiff-fix",
+                "index-desktop",
+                "changed",
+                "nodiff-fix__index-desktop__base.png",
+                "nodiff-fix__index-desktop__head.png",
+                None,
+                diff_error="diff unavailable: boom",
+            ),
+            _capture(
+                "same-fix",
+                "index-phone",
+                "unchanged",
+                None,
+                None,
+                None,
+            ),
+        ],
+    }
+    pngs = (
+        "added-fix__index-phone__head.png",
+        "removed-fix__index-desktop__base.png",
+        "changed-fix__eink__base.png",
+        "changed-fix__eink__head.png",
+        "changed-fix__eink__diff.png",
+        "nodiff-fix__index-desktop__base.png",
+        "nodiff-fix__index-desktop__head.png",
+    )
+    artifact = _artifact(tmp_path, pngs=pngs, manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    full, _, _ = pr_evidence.render_ui_section(manifest, REPO, PR, HEAD_SHA)
+    assert _img_names(body) == _img_names(full)
+    assert sorted(_img_names(full)) == sorted(pngs)
+    files = sorted(
+        p.name for p in (out / "files").iterdir() if p.name != "ui_manifest.json"
+    )
+    assert files == sorted(_img_names(full))

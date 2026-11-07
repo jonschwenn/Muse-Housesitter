@@ -978,3 +978,59 @@ def test_section_with_an_unusable_browser_keeps_its_rows(browser):
     assert "9" * 33 not in full and "131.0.6778" not in full
     assert "| Capture | Status | Checks |" in table
     assert "`typical / index-phone`" in table
+
+
+# Removed captures (issue #21) ------------------------------------------------
+#
+# A removed capture keeps its base PNG on the pr-evidence branch, so the
+# comment shows the before image with no after or diff image.
+
+
+REMOVED_SENTENCE = "Removed page: no after image (the head no longer has this page)."
+ADDED_SENTENCE = "New page: no before image (the base doesn't have this page)."
+
+
+def _removed_manifest():
+    return {
+        "version": 1,
+        "captures": [
+            {
+                "fixture": "typical",
+                "view": "index-phone",
+                "status": "removed",
+                "base": "typical__index-phone__base.png",
+                "head": None,
+                "diff": None,
+                "head_problems": [],
+            }
+        ],
+    }
+
+
+def test_section_shows_removed_capture_with_before_image_only():
+    full, table = ui_evidence.build_ui_section(
+        _removed_manifest(), REPO, 7, HEAD_SHA, 60_000, True
+    )
+    assert "| `typical / index-phone` | removed | pass |" in table
+    assert "<details><summary>typical</summary>" in full
+    assert REMOVED_SENTENCE in full
+    assert "typical__index-phone__base.png" in full
+    assert "after: typical / index-phone" not in full
+    assert "diff: typical / index-phone" not in full
+    assert "Diff unavailable" not in full
+
+
+def test_section_with_only_unchanged_captures_has_no_details():
+    full, table = ui_evidence.build_ui_section(
+        make_manifest(status="unchanged"), REPO, 7, HEAD_SHA, 60_000, True
+    )
+    assert "| `typical / index-phone` | unchanged |" in table
+    assert "<details>" not in full
+
+
+def test_added_sentence_names_the_page_not_the_web_dir():
+    full, _ = ui_evidence.build_ui_section(
+        make_manifest(), REPO, 7, HEAD_SHA, 60_000, True
+    )
+    assert ADDED_SENTENCE in full
+    assert "the base has no `web/`" not in full

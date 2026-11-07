@@ -767,7 +767,7 @@ def build_ui_section(
     for cap in manifest["captures"]:
         by_fixture.setdefault(cap["fixture"], []).append(cap)
     for fixture in sorted(by_fixture):
-        shown = [c for c in by_fixture[fixture] if c["status"] in ("added", "changed")]
+        shown = [c for c in by_fixture[fixture] if c["status"] in ("added", "changed", "removed")]
         if not shown:
             continue
         block = [f"<details><summary>{html.escape(fixture)}</summary>", ""]
@@ -776,12 +776,23 @@ def build_ui_section(
             block += [f"#### `{label}`", ""]
             if cap["status"] == "added":
                 block += [
-                    "New page: no before image (the base has no `web/`).",
+                    "New page: no before image (the base doesn't have this page).",
                     "",
                     img_tag(
                         f"{url}/{cap['head']}",
                         _view_width(cap["view"]),
                         f"after: {label}",
+                    ),
+                    "",
+                ]
+            elif cap["status"] == "removed":
+                block += [
+                    "Removed page: no after image (the head no longer has this page).",
+                    "",
+                    img_tag(
+                        f"{url}/{cap['base']}",
+                        _view_width(cap["view"]),
+                        f"before: {label}",
                     ),
                     "",
                 ]
@@ -849,7 +860,9 @@ def validate_artifact(directory: Path) -> list:
     Only top-level ``*.png`` files matching the capture name pattern plus
     ``ui_manifest.json`` are allowed: no symlinks, no subdirectories, no
     paths outside the directory, PNG magic bytes, and per-file and total
-    size caps. Small enough for CI to inline, importable so unit tests pin it.
+    size caps. The manifest must be a JSON object with a ``captures`` list,
+    and every file it names must be a capture-named file that exists here.
+    Small enough for CI to inline, importable so unit tests pin it.
     """
     errors = []
     if not directory.is_dir():

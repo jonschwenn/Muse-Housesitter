@@ -22,8 +22,10 @@ Subcommands (called by the workflow, in order across its jobs):
     substitute --comment OUT/comment.md --sha <push sha>
         Pin the placeholder to the evidence push SHA. Validates the SHA.
 
-Exit codes: 0 ok, 1 the artifact is invalid (skip the publish: no push, no
-comment), 2 operational error (bad arguments, unreadable files).
+Exit codes: 0 ok; 1 the artifact is invalid, including unreadable or
+malformed artifact files (render: skip the publish, no push, no comment);
+2 bad caller arguments (render), or an unreadable or invalid comment file
+or SHA (substitute).
 """
 
 from __future__ import annotations
@@ -132,33 +134,62 @@ def render_comment(artifact: Path, repo: str, pr: int, head_sha: str) -> str:
 
 
 def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
-    """Copy exactly the validated PNGs and manifest. Returns file names.
+    """Copy exactly the pictured PNGs and manifest. Returns file names.
 
     The allow-list is re-checked here at copy time (defense in depth: the
     workflow's push step never globs the untrusted directory itself).
+    What counts as pushable is decided by pr_evidence.select_ui_captures,
+    the same function the comment renderer uses: each kept capture
+    contributes exactly the files its details block references, so the push
+    carries exactly what the full Web UI section pictures (under the
+    table-only budget fallback, pushed images are not pictured). PNGs named only
+    by dropped entries (or by forbidden fields of any entry) are skipped;
+    a capture-named PNG the manifest does not mention anywhere is still a
+    refusal, as before.
     """
     dest.mkdir(parents=True, exist_ok=True)
-    copied = []
-    for entry in sorted(ui_dir.iterdir()):
-        if entry.is_symlink() or not entry.is_file():
-            continue
-        name = entry.name
-        if name == ui_evidence.MANIFEST_NAME or ui_evidence.CAPTURE_RE.fullmatch(name):
-            shutil.copyfile(entry, dest / name)
-            copied.append(name)
-    manifest_names: set[str] = set()
-    data = json.loads((dest / ui_evidence.MANIFEST_NAME).read_text(encoding="utf-8"))
+    try:
+        data = json.loads(
+            (ui_dir / ui_evidence.MANIFEST_NAME).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, RecursionError) as exc:
+        raise PublishError(f"manifest is unreadable: {exc}") from exc
     captures = data.get("captures") if isinstance(data, dict) else None
     if not isinstance(captures, list) or not all(isinstance(c, dict) for c in captures):
         raise PublishError("manifest must be an object with a list of capture objects")
+    kept, _ = pr_evidence.select_ui_captures(data)
+    referenced: set[str] = set()
+    for _, files in kept:
+        referenced.update(files)
+    manifest_names: set[str] = set()
     for capture in captures:
         for key in ("base", "head", "diff"):
             value = capture.get(key)
             if isinstance(value, str):
                 manifest_names.add(value)
-    unlisted = [n for n in copied if n != ui_evidence.MANIFEST_NAME and n not in manifest_names]
+    copied = []
+    unlisted = []
+    for entry in sorted(ui_dir.iterdir()):
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        name = entry.name
+        if name == ui_evidence.MANIFEST_NAME:
+            shutil.copyfile(entry, dest / name)
+            copied.append(name)
+        elif ui_evidence.CAPTURE_RE.fullmatch(name):
+            if name in referenced:
+                shutil.copyfile(entry, dest / name)
+                copied.append(name)
+            elif name in manifest_names:
+                # Named only by a dropped entry or a forbidden field: leave
+                # it behind so unreferenced bytes never reach the branch.
+                continue
+            else:
+                unlisted.append(name)
     if unlisted:
-        raise PublishError(f"unlisted files would be pushed: {', '.join(sorted(unlisted))}")
+        raise PublishError(
+            f"unlisted files would be pushed: {', '.join(sorted(unlisted))}"
+        )
     return copied
 
 
