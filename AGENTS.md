@@ -60,7 +60,8 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
    `housesitter.sdk` (the public module API), and the stdlib. It never
    imports another module or core internals, and it does network and file
    I/O only through `Context`. The core never imports module internals.
-   (An import-scan lint backs this up. It is a guard rail, not a sandbox.)
+   (**Planned:** an import-scan lint will back this up. It is a guard rail,
+   not a sandbox.)
 
 ## How work happens
 

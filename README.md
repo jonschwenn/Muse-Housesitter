@@ -17,8 +17,9 @@ It gathers measurements from systems in the home and hands them to Muse as
 commands Muse can call. Muse does the analysis and makes the
 recommendations, and you decide what to change.
 
-> **Status: early.** Only the project scaffolding and CI exist so far. The
-> design is in
+> **Status: early.** The core building blocks exist (HTTP client, secrets
+> reader, output envelope, module API, registry, and config loader), but no
+> module and no runnable commands yet. The design is in
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and the first module's spec
 > is in [`docs/modules/unifi_wifi.md`](docs/modules/unifi_wifi.md).
 
