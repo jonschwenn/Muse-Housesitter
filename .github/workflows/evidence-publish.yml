@@ -170,15 +170,31 @@ jobs:
           git remote add origin "https://github.com/${REPO}.git"
           # Authenticate without putting the token in the remote URL: git
           # sends this header on every request instead.
+          # GitHub's git server takes Basic auth with the x-access-token
+          # user (as actions/checkout sends it), not a Bearer header. The
+          # encoded value is a new string the runner doesn't know is secret,
+          # so mask it before anything could print it.
+          basic_auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$basic_auth"
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0="http.extraHeader"
-          export GIT_CONFIG_VALUE_0="Authorization: Bearer ${GH_TOKEN}"
+          export GIT_CONFIG_VALUE_0="Authorization: Basic ${basic_auth}"
           # Shallow: only the branch tip is needed, not every earlier PR's PNGs.
-          if git fetch --depth 1 origin pr-evidence 2>/dev/null; then
-            git checkout -q pr-evidence
-          else
-            git checkout -q --orphan pr-evidence
-          fi
+          # Tell "no pr-evidence branch yet" (ls-remote exit 2) apart from
+          # "can't reach or log in to GitHub" (anything else), so an auth
+          # failure stops here with a clear message instead of being hidden.
+          set +e
+          git ls-remote --exit-code --heads origin pr-evidence > /dev/null
+          remote_rc=$?
+          set -e
+          case "$remote_rc" in
+            0) git fetch --depth 1 origin pr-evidence
+               git checkout -q -b pr-evidence FETCH_HEAD ;;
+            2) echo "no pr-evidence branch yet; starting it"
+               git checkout -q --orphan pr-evidence ;;
+            *) echo "cannot reach the repository (git ls-remote exit $remote_rc)"
+               exit 1 ;;
+          esac
           dest="pr/${PR}/${HEAD_SHA}"
           shopt -s nullglob
           pngs=(../rendered/files/*.png)
