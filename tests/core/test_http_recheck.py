@@ -356,11 +356,18 @@ def test_fast_requests_leave_no_threads_behind():
     """A fast request must succeed and leave the watchdog threadless."""
     routes = {("GET", "/s"): Canned(body=b"{}")}
     with ScriptedServer(canned_handler(routes)) as server:
-        before = threading.active_count()
+        before = set(threading.enumerate())
         with Client("http", "127.0.0.1", server.port, ALLOW_S,
                     default_timeout_s=10) as client:
             response = client.request("GET", "/s", deadline_s=5)
-        after = threading.active_count()
+        # Compare thread objects, not a bare count: the test server's own
+        # per-connection handler thread may still be closing its socket
+        # here, which made a count comparison flaky. The watchdog is a
+        # threading.Timer, so no new live Timer may remain.
+        leftover = [
+            thread for thread in threading.enumerate()
+            if thread not in before and isinstance(thread, threading.Timer)
+        ]
     assert response.status == 200
     assert response.body == b"{}"
-    assert after <= before
+    assert leftover == []
