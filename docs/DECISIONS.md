@@ -164,8 +164,10 @@ handoff's "license not chosen; don't publish."
   because only `pull_request_target` runs it from the base.
 - **Retention:** the `pr-evidence` branch only grows: one directory per head
   SHA, plus a commit each time evidence is pushed. Only added, removed, or
-  changed captures are pushed; unchanged ones appear in the table only. A
-  run that brings no PNGs pushes nothing at all: no commit, no push, just
+  changed captures are pushed; unchanged ones appear in the table only.
+  As of 2026-11-07, the push carries exactly the images the full comment
+  section pictures, including removed captures' before images (issue #21).
+  A run that brings no PNGs pushes nothing at all: no commit, no push, just
   the comment. A full clone fetches this branch too, so contributors who
   don't need it can clone with `--single-branch`. Image URLs are pinned to
   commit SHAs, so deleting old directories in a new commit frees nothing

@@ -141,8 +141,12 @@ PR #1 predates the tooling and has no evidence.
   decoded pixel equality, not file bytes: a stdlib `zlib` PNG decoder keeps
   the comparison a unit-testable pure function with no new dependency
   (byte-identical files short-circuit, which is sound, and anything else is
-  decoded and compared pixel by pixel). Changed pairs get a highlighted
-  diff image: agreed pixels dimmed towards white, differing pixels red. A
+  decoded and compared pixel by pixel). In the comment, added captures get
+  only the after image and a note that the base has no page; removed captures
+  get only the before image and a note that the head no longer has the page.
+  Unchanged captures get a table row only, with no images. Changed pairs get
+  before and after images plus a highlighted diff image: agreed pixels
+  dimmed towards white, differing pixels red. A
   pair whose PNGs won't decode is marked changed with no diff image and a
   "diff unavailable" note, instead of crashing before the manifest is
   written.
@@ -158,7 +162,15 @@ PR #1 predates the tooling and has no evidence.
   an allow-list (`chromium` → Playwright's bundled Chromium, `chrome` →
   Google Chrome, `chrome-beta` → Google Chrome Beta, `msedge` → Microsoft
   Edge), and browser version against 1–4 dot-separated groups of digits,
-  at most 32 characters. An unrecognised browser gets "The manifest does
+  at most 32 characters. The manifest must be an object with a `captures`
+  list, or the artifact is invalid and nothing is published. Each capture's
+  image fields must fit its status (added: only an after image; removed:
+  only a before image; unchanged: none), only a changed capture without a
+  diff image may carry a diff error, and removed must carry no check
+  problems. Entries that break these rules are dropped and counted in the
+  "Omitted N UI capture(s)" note, so a hostile manifest cannot push images
+  the comment never shows or report check failures for a page that no
+  longer exists. An unrecognised browser gets "The manifest does
   not record a recognised browser." followed by the images sentence; bad
   values are never echoed. In the published comment, the browser and images
   sentences appear only when at least one capture passes validation. With
@@ -194,8 +206,13 @@ PR #1 predates the tooling and has no evidence.
 - Retention: the `pr-evidence` branch only grows (one directory per head
   SHA). Only added, removed, or changed captures are pushed; unchanged
   captures are listed in the table only, and runs that bring no PNGs push
-  nothing at all. Pruning and its trade-off are described in DECISIONS D12,
-  "Retention."
+  nothing at all. Removed captures' before images are pushed and pictured in
+  the comment, so reviewers can see what disappeared rather than just a
+  "removed" row. The publisher pushes exactly the images the full Web UI
+  section pictures: the same function decides both, so files named only by
+  dropped entries are not pushed. (When the details don't fit the comment
+  budget, the comment falls back to the table, and no images are pictured.)
+  Pruning and its trade-off are described in DECISIONS D12, "Retention."
 - A PR that changes no output (docs, CI) still gets the comment, reading
   "no output change." That is evidence too.
 
