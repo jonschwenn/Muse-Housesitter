@@ -254,36 +254,43 @@ def load_ui_manifest(ui_dir: Path | None) -> dict | None:
     path = Path(ui_dir) / "ui_manifest.json"
     if not path.is_file():
         return None
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not isinstance(data.get("captures"), list):
         raise ValueError("UI manifest must be an object with a captures list")
     return data
 
 
-def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tuple:
-    """Build (full section, table-only section, check-failure count).
+# Names a status must not carry: the comment never references them, so the
+# push must not carry them either. Added shows only head, removed only base,
+# unchanged shows no image at all (its PNGs are deleted by build_manifest).
+UI_FORBIDDEN_NAMES = {
+    "added": ("base", "diff"),
+    "removed": ("head", "diff"),
+    "unchanged": ("base", "head", "diff"),
+}
 
-    Every manifest value is re-validated: capture names against the capture
-    regex, status against the enum, the view against the known views, and
-    problems escaped (via code spans) and length-capped. Captures that fail
-    validation are dropped and counted, never rendered. Image URLs are built
-    from the validated repo/PR/head SHA plus the validated file name, so they
-    always match the pinned evidence-branch pattern exactly. The browser key
-    is untrusted too: only an allow-listed channel with a strict numeric
-    version is named, otherwise a neutral sentence renders instead.
+
+def select_ui_captures(manifest: dict) -> tuple:
+    """Split the manifest into kept captures and a dropped count.
+
+    Returns ([(capture, referenced files)], dropped): for every kept
+    capture, exactly the PNG names the details block references as <img>
+    URLs (added -> head; removed -> base; changed -> base, head, and diff
+    when set; unchanged -> none). This is the single decision point for
+    which images the full Web UI section pictures;
+    publish_evidence.copy_pushable_files copies exactly these names (plus
+    the manifest), so the push carries exactly what the full section
+    pictures. When the comment budget forces the table-only fallback, the
+    pushed images are not pictured (docs/REVIEW.md, "Retention").
+
+    Besides the needed names per status, added/removed/unchanged forbid
+    the names above; a non-None diff_error is allowed only on a changed
+    capture without a diff image; and removed forbids non-empty
+    head_problems (a removed page has no head run to report checks for).
+    A violating entry is dropped, like every other invalid entry.
     """
-    if not UI_REPO_RE.fullmatch(repo or ""):
-        raise ValueError(f"bad repo: {repo!r}")
-    if not isinstance(pr, int) or pr <= 0:
-        raise ValueError(f"bad PR number: {pr!r}")
-    if not UI_SHA_RE.fullmatch(head_sha or ""):
-        raise ValueError(f"bad head SHA: {head_sha!r}")
-    url = (
-        f"https://raw.githubusercontent.com/{repo}/{SHA_PLACEHOLDER}"
-        f"/pr/{pr}/{head_sha}"
-    )
     kept, dropped = [], 0
-    for cap in manifest["captures"]:
+    for cap in manifest.get("captures", []):
         if not isinstance(cap, dict):
             dropped += 1
             continue
@@ -316,7 +323,56 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
         if any(not isinstance(names[key], str) for key in need):
             dropped += 1
             continue
-        kept.append(cap)
+        forbidden = UI_FORBIDDEN_NAMES.get(status, ())
+        if any(names[key] is not None for key in forbidden):
+            dropped += 1
+            continue
+        # A diff error only exists for a changed pair whose diff failed, so
+        # it never comes with a diff image or with any other status.
+        if diff_error is not None and (status != "changed" or names["diff"] is not None):
+            dropped += 1
+            continue
+        if status == "removed" and len(problems) != 0:
+            dropped += 1
+            continue
+        if status == "added":
+            files = [names["head"]]
+        elif status == "removed":
+            files = [names["base"]]
+        elif status == "changed":
+            files = [names["base"], names["head"]]
+            if names["diff"] is not None:
+                files.append(names["diff"])
+        else:
+            files = []
+        kept.append((cap, files))
+    return kept, dropped
+
+
+def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tuple:
+    """Build (full section, table-only section, check-failure count).
+
+    Every manifest value is re-validated: capture names against the capture
+    regex, status against the enum, the view against the known views, and
+    problems escaped (via code spans) and length-capped. Captures that fail
+    validation are dropped and counted, never rendered. Image URLs are built
+    from the validated repo/PR/head SHA plus the validated file name, so they
+    always match the pinned evidence-branch pattern exactly. The browser key
+    is untrusted too: only an allow-listed channel with a strict numeric
+    version is named, otherwise a neutral sentence renders instead.
+    """
+    if not UI_REPO_RE.fullmatch(repo or ""):
+        raise ValueError(f"bad repo: {repo!r}")
+    if not isinstance(pr, int) or pr <= 0:
+        raise ValueError(f"bad PR number: {pr!r}")
+    if not UI_SHA_RE.fullmatch(head_sha or ""):
+        raise ValueError(f"bad head SHA: {head_sha!r}")
+    url = (
+        f"https://raw.githubusercontent.com/{repo}/{SHA_PLACEHOLDER}"
+        f"/pr/{pr}/{head_sha}"
+    )
+    kept_with_files, dropped = select_ui_captures(manifest)
+    kept = [cap for cap, _ in kept_with_files]
     lines = [
         "## Web UI",
         "",
@@ -368,7 +424,7 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
     for cap in kept:
         by_fixture.setdefault(_ui_cell(cap.get("fixture", ""), MAX_UI_LABEL_LEN), []).append(cap)
     for fixture in sorted(by_fixture):
-        shown = [c for c in by_fixture[fixture] if c["status"] in ("added", "changed")]
+        shown = [c for c in by_fixture[fixture] if c["status"] in ("added", "changed", "removed")]
         if not shown:
             continue
         block = [f"<details><summary>{html.escape(fixture)}</summary>", ""]
@@ -378,9 +434,16 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
             block += [f"#### {code_span(label)}", ""]
             if cap["status"] == "added":
                 block += [
-                    "New page: no before image (the base has no `web/`).",
+                    "New page: no before image (the base doesn't have this page).",
                     "",
                     _ui_img(f"{url}/{cap['head']}", width, f"after: {label}"),
+                    "",
+                ]
+            elif cap["status"] == "removed":
+                block += [
+                    "Removed page: no after image (the head no longer has this page).",
+                    "",
+                    _ui_img(f"{url}/{cap['base']}", width, f"before: {label}"),
                     "",
                 ]
             else:

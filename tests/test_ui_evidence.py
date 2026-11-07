@@ -399,6 +399,41 @@ def test_validator_rejects_section_files(tmp_path):
     assert any("unexpected file name" in e for e in ui_evidence.validate_artifact(directory))
 
 
+@pytest.mark.parametrize("captures", [{}, "x", None])
+def test_validator_rejects_missing_or_non_list_captures(tmp_path, captures):
+    # Issue #22: the publisher's loader requires a captures list, so the
+    # validator must too; otherwise a bad artifact exits 2, not 1.
+    directory = write_valid_artifact(tmp_path / "nocaptures")
+    manifest = json.loads((directory / ui_evidence.MANIFEST_NAME).read_text())
+    if captures is None:
+        del manifest["captures"]
+    else:
+        manifest["captures"] = captures
+    (directory / ui_evidence.MANIFEST_NAME).write_text(json.dumps(manifest))
+    assert any("captures list" in e for e in ui_evidence.validate_artifact(directory))
+
+
+@pytest.mark.parametrize("entry", [42, "x", None])
+def test_validator_names_invalid_capture_entries_plainly(tmp_path, entry):
+    # Valid JSON with a junk entry: fail closed, with a message that says so
+    # (not "not valid JSON", and no Python internals).
+    directory = write_valid_artifact(tmp_path / "badentry")
+    manifest = json.loads((directory / ui_evidence.MANIFEST_NAME).read_text())
+    manifest["captures"].append(entry)
+    (directory / ui_evidence.MANIFEST_NAME).write_text(json.dumps(manifest))
+    errors = ui_evidence.validate_artifact(directory)
+    assert "manifest has an invalid capture entry" in errors
+
+
+def test_validator_caps_echoed_manifest_names(tmp_path):
+    directory = write_valid_artifact(tmp_path / "longname")
+    manifest = json.loads((directory / ui_evidence.MANIFEST_NAME).read_text())
+    manifest["captures"][0]["head"] = "A" * 10_000
+    (directory / ui_evidence.MANIFEST_NAME).write_text(json.dumps(manifest))
+    errors = ui_evidence.validate_artifact(directory)
+    assert errors and all(len(e) < 300 for e in errors)
+
+
 # Manifest building with undecodable PNGs ----------------------------------------
 
 
@@ -943,3 +978,59 @@ def test_section_with_an_unusable_browser_keeps_its_rows(browser):
     assert "9" * 33 not in full and "131.0.6778" not in full
     assert "| Capture | Status | Checks |" in table
     assert "`typical / index-phone`" in table
+
+
+# Removed captures (issue #21) ------------------------------------------------
+#
+# A removed capture keeps its base PNG on the pr-evidence branch, so the
+# comment shows the before image with no after or diff image.
+
+
+REMOVED_SENTENCE = "Removed page: no after image (the head no longer has this page)."
+ADDED_SENTENCE = "New page: no before image (the base doesn't have this page)."
+
+
+def _removed_manifest():
+    return {
+        "version": 1,
+        "captures": [
+            {
+                "fixture": "typical",
+                "view": "index-phone",
+                "status": "removed",
+                "base": "typical__index-phone__base.png",
+                "head": None,
+                "diff": None,
+                "head_problems": [],
+            }
+        ],
+    }
+
+
+def test_section_shows_removed_capture_with_before_image_only():
+    full, table = ui_evidence.build_ui_section(
+        _removed_manifest(), REPO, 7, HEAD_SHA, 60_000, True
+    )
+    assert "| `typical / index-phone` | removed | pass |" in table
+    assert "<details><summary>typical</summary>" in full
+    assert REMOVED_SENTENCE in full
+    assert "typical__index-phone__base.png" in full
+    assert "after: typical / index-phone" not in full
+    assert "diff: typical / index-phone" not in full
+    assert "Diff unavailable" not in full
+
+
+def test_section_with_only_unchanged_captures_has_no_details():
+    full, table = ui_evidence.build_ui_section(
+        make_manifest(status="unchanged"), REPO, 7, HEAD_SHA, 60_000, True
+    )
+    assert "| `typical / index-phone` | unchanged |" in table
+    assert "<details>" not in full
+
+
+def test_added_sentence_names_the_page_not_the_web_dir():
+    full, _ = ui_evidence.build_ui_section(
+        make_manifest(), REPO, 7, HEAD_SHA, 60_000, True
+    )
+    assert ADDED_SENTENCE in full
+    assert "the base has no `web/`" not in full

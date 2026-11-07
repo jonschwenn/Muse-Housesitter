@@ -767,7 +767,7 @@ def build_ui_section(
     for cap in manifest["captures"]:
         by_fixture.setdefault(cap["fixture"], []).append(cap)
     for fixture in sorted(by_fixture):
-        shown = [c for c in by_fixture[fixture] if c["status"] in ("added", "changed")]
+        shown = [c for c in by_fixture[fixture] if c["status"] in ("added", "changed", "removed")]
         if not shown:
             continue
         block = [f"<details><summary>{html.escape(fixture)}</summary>", ""]
@@ -776,12 +776,23 @@ def build_ui_section(
             block += [f"#### `{label}`", ""]
             if cap["status"] == "added":
                 block += [
-                    "New page: no before image (the base has no `web/`).",
+                    "New page: no before image (the base doesn't have this page).",
                     "",
                     img_tag(
                         f"{url}/{cap['head']}",
                         _view_width(cap["view"]),
                         f"after: {label}",
+                    ),
+                    "",
+                ]
+            elif cap["status"] == "removed":
+                block += [
+                    "Removed page: no after image (the head no longer has this page).",
+                    "",
+                    img_tag(
+                        f"{url}/{cap['base']}",
+                        _view_width(cap["view"]),
+                        f"before: {label}",
                     ),
                     "",
                 ]
@@ -849,7 +860,9 @@ def validate_artifact(directory: Path) -> list:
     Only top-level ``*.png`` files matching the capture name pattern plus
     ``ui_manifest.json`` are allowed: no symlinks, no subdirectories, no
     paths outside the directory, PNG magic bytes, and per-file and total
-    size caps. Small enough for CI to inline, importable so unit tests pin it.
+    size caps. The manifest must be a JSON object with a ``captures`` list,
+    and every file it names must be a capture-named file that exists here.
+    Small enough for CI to inline, importable so unit tests pin it.
     """
     errors = []
     if not directory.is_dir():
@@ -891,23 +904,35 @@ def validate_artifact(directory: Path) -> list:
         errors.append(f"manifest is over the {MANIFEST_MAX_BYTES} cap")
     else:
         try:
-            manifest = json.loads(manifest_path.read_text())
-            names = {
-                c.get(n)
-                for c in manifest.get("captures", [])
-                for n in ("base", "head", "diff")
-            }
-            names.discard(None)
-            for name in sorted(names, key=str):
-                text = str(name)
-                if ".." in text.split("/"):
-                    errors.append(f"manifest path escapes the directory: {text}")
-                elif not CAPTURE_RE.fullmatch(text):
-                    errors.append(f"manifest names an unexpected file: {text}")
-                elif not (directory / text).is_file():
-                    errors.append(f"manifest names a missing file: {text}")
-        except (ValueError, AttributeError, TypeError) as exc:
-            errors.append(f"manifest is not valid JSON: {exc}")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError) as exc:
+            # RecursionError: deeply nested JSON well under the size cap.
+            errors.append(f"manifest is unreadable or not valid JSON: {type(exc).__name__}")
+        else:
+            if not isinstance(manifest, dict) or not isinstance(
+                manifest.get("captures"), list
+            ):
+                errors.append("manifest must be an object with a captures list")
+            else:
+                try:
+                    names = {
+                        c.get(n)
+                        for c in manifest.get("captures", [])
+                        for n in ("base", "head", "diff")
+                    }
+                except (AttributeError, TypeError):
+                    errors.append("manifest has an invalid capture entry")
+                else:
+                    names.discard(None)
+                    for name in sorted(names, key=str):
+                        # Manifest values are hostile: cap what the log echoes.
+                        text = str(name)[:120]
+                        if ".." in text.split("/"):
+                            errors.append(f"manifest path escapes the directory: {text}")
+                        elif not CAPTURE_RE.fullmatch(text):
+                            errors.append(f"manifest names an unexpected file: {text}")
+                        elif not (directory / text).is_file():
+                            errors.append(f"manifest names a missing file: {text}")
     if total > MAX_TOTAL_BYTES:
         errors.append(f"PNGs total {total} bytes, over the cap")
     return errors

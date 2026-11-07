@@ -570,3 +570,267 @@ def test_ui_section_without_captures_has_no_omission_note():
     )
     assert "nothing to show" in full
     assert "Omitted" not in full
+
+
+# Removed captures (issue #21) ------------------------------------------------
+#
+# A removed capture keeps its base PNG on the pr-evidence branch, so the
+# comment shows the before image with no after or diff image.
+
+
+REMOVED_SENTENCE = "Removed page: no after image (the head no longer has this page)."
+ADDED_SENTENCE = "New page: no before image (the base doesn't have this page)."
+
+
+def _removed_capture():
+    return _ui_capture(
+        status="removed",
+        base="typical__index-phone__base.png",
+        head=None,
+        diff=None,
+    )
+
+
+def test_ui_section_shows_removed_capture_with_before_image_only():
+    full, table, _ = pr_evidence.render_ui_section(
+        _ui_manifest(_removed_capture()), UI_REPO, UI_PR, UI_SHA
+    )
+    assert "| `typical / index-phone` | removed |" in table
+    assert "<details><summary>typical</summary>" in full
+    assert REMOVED_SENTENCE in full
+    assert (
+        "https://raw.githubusercontent.com/"
+        f"{UI_REPO}/__HOUSESITTER_EVIDENCE_SHA__/pr/{UI_PR}/{UI_SHA}/"
+        "typical__index-phone__base.png" in full
+    )
+    assert 'alt="before: typical / index-phone"' in full
+    assert "after: typical / index-phone" not in full
+    assert "diff: typical / index-phone" not in full
+    assert "Diff unavailable" not in full
+
+
+def test_ui_section_with_only_unchanged_captures_has_no_details():
+    # Honest unchanged captures carry no file names (build_manifest deletes
+    # the PNGs and records None for base/head/diff).
+    manifest = _ui_manifest(
+        _ui_capture(
+            status="unchanged",
+            base=None,
+            head=None,
+            diff=None,
+        )
+    )
+    full, table, _ = pr_evidence.render_ui_section(manifest, UI_REPO, UI_PR, UI_SHA)
+    assert "| `typical / index-phone` | unchanged |" in table
+    assert "<details>" not in full
+
+
+def test_ui_added_sentence_names_the_page_not_the_web_dir():
+    full, _, _ = pr_evidence.render_ui_section(
+        _ui_manifest(_ui_capture()), UI_REPO, UI_PR, UI_SHA
+    )
+    assert ADDED_SENTENCE in full
+    assert "the base has no `web/`" not in full
+
+
+# Publisher validation: forbidden fields (adversarial review) -----------------
+#
+# added forbids base and diff; removed forbids head and diff; unchanged
+# forbids base, head and diff. Added and removed forbid a non-None
+# diff_error; removed forbids non-empty head_problems. A violating entry is
+# dropped and counted in the omission note, like every other invalid entry.
+
+
+def _changed_capture():
+    return _ui_capture(
+        status="changed",
+        base="typical__index-phone__base.png",
+        head="typical__index-phone__head.png",
+        diff="typical__index-phone__diff.png",
+    )
+
+
+@pytest.mark.parametrize(
+    "capture",
+    [
+        # removed must not name a head or diff file
+        _ui_capture(
+            status="removed",
+            base="typical__index-phone__base.png",
+            head="typical__index-phone__head.png",
+            diff=None,
+        ),
+        _ui_capture(
+            status="removed",
+            base="typical__index-phone__base.png",
+            head=None,
+            diff="typical__index-phone__diff.png",
+        ),
+        # added must not name a base file
+        _ui_capture(
+            status="added",
+            base="typical__index-phone__base.png",
+            head="typical__index-phone__head.png",
+            diff=None,
+        ),
+        # unchanged must not name any file
+        _ui_capture(
+            status="unchanged",
+            base="typical__index-phone__base.png",
+            head=None,
+            diff=None,
+        ),
+        _ui_capture(
+            status="unchanged",
+            base=None,
+            head="typical__index-phone__head.png",
+            diff=None,
+        ),
+        _ui_capture(
+            status="unchanged",
+            base=None,
+            head=None,
+            diff="typical__index-phone__diff.png",
+        ),
+    ],
+)
+def test_ui_section_drops_captures_with_forbidden_file_names(capture):
+    full, table, failures = pr_evidence.render_ui_section(
+        _ui_manifest(capture), UI_REPO, UI_PR, UI_SHA
+    )
+    assert failures == 0
+    assert "**Omitted 1 UI capture(s) with invalid manifest entries.**" in full
+    assert "| Capture | Status | Checks |" not in table
+    assert "<img" not in full
+    assert "typical__index-phone__base.png" not in full
+    assert "typical__index-phone__head.png" not in full
+    assert "typical__index-phone__diff.png" not in full
+
+
+@pytest.mark.parametrize(
+    "capture",
+    [
+        _ui_capture(
+            status="removed",
+            base="typical__index-phone__base.png",
+            head=None,
+            diff=None,
+            diff_error="diff unavailable: boom",
+        ),
+        _ui_capture(
+            status="removed",
+            base="typical__index-phone__base.png",
+            head=None,
+            diff=None,
+            head_problems=["console.error: boom"],
+        ),
+        _ui_capture(
+            status="added",
+            base=None,
+            head="typical__index-phone__head.png",
+            diff=None,
+            diff_error="diff unavailable: boom",
+        ),
+        # A diff error means no diff image: both at once is contradictory.
+        _ui_capture(
+            status="changed",
+            base="typical__index-phone__base.png",
+            head="typical__index-phone__head.png",
+            diff="typical__index-phone__diff.png",
+            diff_error="diff unavailable: boom",
+        ),
+        # Unchanged pairs are equal pixels, so a diff never failed.
+        _ui_capture(
+            status="unchanged",
+            base=None,
+            head=None,
+            diff=None,
+            diff_error="diff unavailable: boom",
+        ),
+    ],
+)
+def test_ui_section_drops_captures_with_forbidden_check_fields(capture):
+    full, table, failures = pr_evidence.render_ui_section(
+        _ui_manifest(capture), UI_REPO, UI_PR, UI_SHA
+    )
+    # A hostile removed/added entry must not count toward the failure banner.
+    assert failures == 0
+    assert "**Omitted 1 UI capture(s) with invalid manifest entries.**" in full
+    assert "| Capture | Status | Checks |" not in table
+    assert "boom" not in full
+    assert "<img" not in full
+
+
+def test_ui_section_keeps_honest_changed_with_diff_error():
+    manifest = _ui_manifest(
+        _ui_capture(
+            status="changed",
+            base="typical__index-phone__base.png",
+            head="typical__index-phone__head.png",
+            diff=None,
+            diff_error="diff unavailable: boom",
+        )
+    )
+    full, table, failures = pr_evidence.render_ui_section(
+        manifest, UI_REPO, UI_PR, UI_SHA
+    )
+    assert failures == 1
+    assert "| `typical / index-phone` | changed |" in table
+    assert "typical__index-phone__base.png" in full
+    assert "typical__index-phone__head.png" in full
+    assert "Diff unavailable:" in full
+
+
+def test_select_ui_captures_reports_exactly_the_pictured_files():
+    manifest = _ui_manifest(
+        _ui_capture(fixture="added-fix", head="added-fix__index-phone__head.png"),
+        _ui_capture(
+            fixture="removed-fix",
+            view="index-desktop",
+            status="removed",
+            base="removed-fix__index-desktop__base.png",
+            head=None,
+            diff=None,
+        ),
+        _ui_capture(
+            fixture="changed-fix",
+            view="eink",
+            status="changed",
+            base="changed-fix__eink__base.png",
+            head="changed-fix__eink__head.png",
+            diff="changed-fix__eink__diff.png",
+        ),
+        _ui_capture(
+            status="changed",
+            base="typical__index-desktop__base.png",
+            head="typical__index-desktop__head.png",
+            diff=None,
+            diff_error="diff unavailable: boom",
+            fixture="other",
+            view="index-desktop",
+        ),
+        _ui_capture(
+            fixture="same-fix",
+            status="unchanged",
+            base=None,
+            head=None,
+            diff=None,
+        ),
+    )
+    kept, dropped = pr_evidence.select_ui_captures(manifest)
+    assert dropped == 0
+    pictured = {}
+    for cap, files in kept:
+        pictured[cap["fixture"] + "/" + cap["view"]] = files
+    assert pictured["added-fix/index-phone"] == ["added-fix__index-phone__head.png"]
+    assert pictured["removed-fix/index-desktop"] == ["removed-fix__index-desktop__base.png"]
+    assert pictured["changed-fix/eink"] == [
+        "changed-fix__eink__base.png",
+        "changed-fix__eink__head.png",
+        "changed-fix__eink__diff.png",
+    ]
+    assert pictured["other/index-desktop"] == [
+        "typical__index-desktop__base.png",
+        "typical__index-desktop__head.png",
+    ]
+    assert pictured["same-fix/index-phone"] == []
