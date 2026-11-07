@@ -266,14 +266,24 @@ class TestLog:
 
 
 class TestStoreStub:
-    def test_methods_refuse(self):
-        ctx = make_ctx()
-        with pytest.raises(NotImplementedError, match="store arrives in 12b"):
-            ctx.store.save("snapshot", {})
-        with pytest.raises(NotImplementedError, match="store arrives in 12b"):
-            ctx.store.list("snapshot")
-        with pytest.raises(NotImplementedError, match="store arrives in 12b"):
-            ctx.store.load("snapshot_id")
+    def test_default_store_raises_not_implemented(self):
+        store = make_ctx().store
+        with pytest.raises(
+            NotImplementedError, match="no store is attached"
+        ):
+            store.save("snapshot", {})
+        with pytest.raises(
+            NotImplementedError, match="no store is attached"
+        ):
+            store.list("snapshot")
+        with pytest.raises(
+            NotImplementedError, match="no store is attached"
+        ):
+            store.load("snapshot_20261104T151500Z_0001")
+
+    def test_injected_store_is_returned(self):
+        sentinel = object()
+        assert make_ctx(store=sentinel).store is sentinel
 
 
 class TestHttpBaseUrl:

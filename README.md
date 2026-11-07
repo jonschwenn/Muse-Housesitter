@@ -17,11 +17,19 @@ It gathers measurements from systems in the home and hands them to Muse as
 commands Muse can call. Muse does the analysis and makes the
 recommendations, and you decide what to change.
 
-> **Status: early.** The core building blocks exist (HTTP client, secrets
-> reader, output envelope, module API, registry, and config loader), but no
-> module and no runnable commands yet. The design is in
-> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and the first module's spec
-> is in [`docs/modules/unifi_wifi.md`](docs/modules/unifi_wifi.md).
+> **Status: early.** The core runs commands: runner, store, drop-ins, and
+> CLI (`invoke`, `list`, `describe`, `doctor`, `dropins`, `install-commands`,
+> `config-check`). No data module or conformance suite yet. See
+> [the architecture](docs/ARCHITECTURE.md) and
+> [the first module's spec](docs/modules/unifi_wifi.md).
+
+`housesitter describe` lists modules and commands; each command's required
+and optional parameters are lists sorted by name, with a name, type, and
+description per entry. `housesitter doctor` reports local setup findings;
+add `--check` to run enabled modules' read-only checks. Those checks can
+list and load saved results, but cannot save them or create data directories.
+Check failures appear as stable error codes in each module's `problem` field;
+other findings remain available in the same report.
 
 ## Modules
 

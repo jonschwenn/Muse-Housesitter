@@ -37,6 +37,8 @@ def validate_module_class(cls: Any, *, expected_id: str | None = None) -> None:
     name = getattr(cls, "id", "")
     if not isinstance(name, str) or _ID_RE.fullmatch(name) is None:
         raise RegistryError(f"module has an invalid id: {name!r}")
+    if name == "housesitter":
+        raise RegistryError("module id 'housesitter' is reserved for core commands")
     if expected_id is not None and name != expected_id:
         raise RegistryError(
             f"module id {name!r} does not match its package {expected_id!r}"

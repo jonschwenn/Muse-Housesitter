@@ -339,3 +339,13 @@ class TestBuiltinDiscovery:
         install_fake_package(monkeypatch, "fakedemo", package)
         with pytest.raises(RegistryError):
             registry_mod._discover_builtin_classes()
+
+
+class TestReservedId:
+    def test_housesitter_id_is_reserved(self):
+        with pytest.raises(RegistryError):
+            validate_module_class(make_module("housesitter"))
+
+    def test_from_classes_rejects_housesitter(self):
+        with pytest.raises(RegistryError):
+            Registry.from_classes([make_module("housesitter")])
