@@ -10,6 +10,53 @@
       "id": "help",
       "title": "Top-level help",
       "argv": ["--help"]
+    },
+    {
+      "id": "list",
+      "title": "List commands",
+      "argv": ["list"]
+    },
+    {
+      "id": "describe",
+      "title": "Describe modules and commands",
+      "argv": ["describe"]
+    },
+    {
+      "id": "invoke-describe",
+      "title": "Invoke the describe command",
+      "argv": ["invoke", "housesitter.describe"]
+    },
+    {
+      "id": "doctor",
+      "title": "Doctor findings on an empty home",
+      "argv": ["doctor"]
+    },
+    {
+      "id": "config-check",
+      "title": "Config check with defaults",
+      "argv": ["config-check"]
+    },
+    {
+      "id": "dropins-print",
+      "title": "Drop-in files as JSON",
+      "argv": ["dropins", "--print", "--exec", "/opt/housesitter/bin/housesitter"]
+    },
+    {
+      "id": "install-dry-run",
+      "title": "Install commands dry run",
+      "argv": ["install-commands", "--dry-run", "--exec", "/opt/housesitter/bin/housesitter"]
+    },
+    {
+      "id": "invoke-unknown",
+      "title": "Invoke an unknown command",
+      "argv": ["invoke", "housesitter.nope.snapshot"],
+      "expect_exit": 1
+    },
+    {
+      "id": "invoke-bad-params",
+      "title": "Invoke with a wrongly typed param",
+      "argv": ["invoke", "housesitter.doctor", "--params", "{\"check\": \"yes\"}"],
+      "expect_exit": 1
     }
   ]
 }

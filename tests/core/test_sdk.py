@@ -384,6 +384,107 @@ class TestCommand:
                 timeout_ms=timeout_ms,
             )
 
+    def test_field_tree_collisions_rejected(self):
+        def cmd(*fields):
+            return sdk.Command(
+                name="snapshot",
+                handler="snapshot",
+                description="Read things.",
+                fields=fields,
+            )
+
+        # Consistent declarations are accepted.
+        cmd(sdk.Field("data.aps", "array"), sdk.Field("data.aps[].x", "string"))
+        cmd(sdk.Field("data.x", "object"), sdk.Field("data.x.y", "string"))
+        cmd(
+            sdk.Field("data.tags", "array"),
+            sdk.Field("data.tags[]", "string"),
+        )
+        cmd(
+            sdk.Field("data.aps[]", "object"),
+            sdk.Field("data.aps[].x", "string"),
+        )
+        # A segment used both as x[] and as a non-array leaf x.
+        with pytest.raises(ValueError):
+            cmd(
+                sdk.Field("data.aps", "string"),
+                sdk.Field("data.aps[].x", "string"),
+            )
+        with pytest.raises(ValueError):
+            cmd(
+                sdk.Field("data.aps", "object"),
+                sdk.Field("data.aps[].x", "string"),
+            )
+        # A non-object leaf with child fields.
+        with pytest.raises(ValueError):
+            cmd(
+                sdk.Field("data.x", "string"),
+                sdk.Field("data.x.y", "string"),
+            )
+        with pytest.raises(ValueError):
+            cmd(
+                sdk.Field("data.x", "array"),
+                sdk.Field("data.x.y", "string"),
+            )
+        # Item leaves with children must be objects.
+        with pytest.raises(ValueError):
+            cmd(
+                sdk.Field("data.a[]", "string"),
+                sdk.Field("data.a[].b", "string"),
+            )
+        # A segment used both as a list and as an object.
+        with pytest.raises(ValueError):
+            cmd(
+                sdk.Field("data.a[]", "string"),
+                sdk.Field("data.a.b", "string"),
+            )
+        with pytest.raises(ValueError):
+            cmd(
+                sdk.Field("data.a.b", "string"),
+                sdk.Field("data.a[].c", "string"),
+            )
+
+    def test_opaque_object_leaf_rejected(self):
+        # An object field must declare at least one descendant: undeclared
+        # keys would pass upstream-controlled text and identifiers through.
+        with pytest.raises(ValueError):
+            sdk.Command(
+                name="snapshot",
+                handler="snapshot",
+                description="Read things.",
+                fields=(sdk.Field("data.meta", "object"),),
+            )
+        with pytest.raises(ValueError):
+            sdk.Command(
+                name="snapshot",
+                handler="snapshot",
+                description="Read things.",
+                fields=(sdk.Field("source.meta", "object"),),
+            )
+
+    def test_object_with_declared_children_accepted(self):
+        cmd = sdk.Command(
+            name="snapshot",
+            handler="snapshot",
+            description="Read things.",
+            fields=(
+                sdk.Field("data.meta", "object"),
+                sdk.Field("data.meta.inner", "integer"),
+            ),
+        )
+        assert [item.path for item in cmd.fields] == [
+            "data.meta", "data.meta.inner",
+        ]
+
+    def test_opaque_array_leaf_still_accepted(self):
+        cmd = sdk.Command(
+            name="snapshot",
+            handler="snapshot",
+            description="Read things.",
+            fields=(sdk.Field("data.tags", "array"),),
+        )
+        assert [item.path for item in cmd.fields] == ["data.tags"]
+
     def test_fields_stored_as_tuple_and_unique(self):
         first = sdk.Field(path="data.a", type="string")
         command = sdk.Command(
@@ -417,10 +518,22 @@ class TestPaging:
         paging = sdk.Paging(
             command="get",
             lists=["clients", "aps"],
-            params={"section": "clients"},
+            params={"kind": "full", "id": "snapshot_20261104T151500Z_0001"},
             start={"clients": 120},
         )
         assert paging.lists == ("clients", "aps")
+
+    @pytest.mark.parametrize("key", ["section", "offset", "remaining"])
+    def test_reserved_params_keys_rejected(self, key):
+        # The runner sets section/offset and keeps remaining beside params.
+        with pytest.raises(ValueError):
+            sdk.Paging(command="get", lists=["a"], params={key: "x"})
+
+    def test_id_params_key_still_allowed(self):
+        paging = sdk.Paging(
+            command="get", lists=["a"], params={"id": "snapshot_1"}
+        )
+        assert dict(paging.params) == {"id": "snapshot_1"}
 
     def test_empty_lists(self):
         with pytest.raises(ValueError):
@@ -503,3 +616,114 @@ class TestModule:
 
     def test_skill_file_default(self):
         assert sdk.Module.skill_file == "SKILL.md"
+
+
+class TestStoredItem:
+    def test_valid(self):
+        item = sdk.StoredItem(
+            id="snapshot_20261104T151500Z_3fa1",
+            kind="snapshot",
+            collected_at="2026-11-04T15:15:00Z",
+            label="before",
+        )
+        assert item.kind == "snapshot"
+
+    def test_optional_fields_default_to_none(self):
+        item = sdk.StoredItem(id="snapshot_20261104T151500Z_3fa1", kind="snapshot")
+        assert item.collected_at is None
+        assert item.label is None
+
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "",
+            "snapshot",
+            "Snapshot_20261104T151500Z_3fa1",
+            "snapshot_20261104T151500Z_ZZZZ",
+            "snapshot_20261104T151500Z_3fa",
+            "snapshot_20261104151500Z_3fa1",
+            "snapshot_20261104T151500Z_3fa1.json",
+            "../snapshot_20261104T151500Z_3fa1",
+        ],
+    )
+    def test_bad_id_rejected(self, bad_id):
+        with pytest.raises(ValueError):
+            sdk.StoredItem(id=bad_id, kind="snapshot")
+
+    @pytest.mark.parametrize("bad_kind", ["", "Snapshot", "a" * 33, "a-b"])
+    def test_bad_kind_rejected(self, bad_kind):
+        with pytest.raises(ValueError):
+            sdk.StoredItem(id="snapshot_20261104T151500Z_3fa1", kind=bad_kind)
+
+    def test_kind_must_match_id_prefix(self):
+        with pytest.raises(ValueError):
+            sdk.StoredItem(id="snapshot_20261104T151500Z_3fa1", kind="other")
+        with pytest.raises(ValueError):
+            sdk.StoredItem(id="snapshot_extra_20261104T151500Z_3fa1", kind="snapshot")
+
+    def test_long_collected_at_rejected(self):
+        with pytest.raises(ValueError):
+            sdk.StoredItem(
+                id="snapshot_20261104T151500Z_3fa1",
+                kind="snapshot",
+                collected_at="x" * 33,
+            )
+
+    def test_long_label_rejected(self):
+        with pytest.raises(ValueError):
+            sdk.StoredItem(
+                id="snapshot_20261104T151500Z_3fa1",
+                kind="snapshot",
+                label="x" * 201,
+            )
+        sdk.StoredItem(
+            id="snapshot_20261104T151500Z_3fa1", kind="snapshot", label="x" * 200
+        )
+
+    def test_non_string_fields_rejected(self):
+        with pytest.raises(ValueError):
+            sdk.StoredItem(
+                id="snapshot_20261104T151500Z_3fa1", kind="snapshot", label=42
+            )
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "not-a-date",
+            "2026-11-04 15:15:00",
+            "2026-11-04T15:15:00",
+            "2026-11-04T15:15:00+00:00",
+            "2026-11-04T15:15:00Z ",
+            " 2026-11-04T15:15:00Z",
+            "",
+        ],
+    )
+    def test_bad_collected_at_format_rejected(self, bad):
+        with pytest.raises(ValueError):
+            sdk.StoredItem(
+                id="snapshot_20261104T151500Z_3fa1",
+                kind="snapshot",
+                collected_at=bad,
+            )
+
+    def test_good_collected_at_accepted(self):
+        item = sdk.StoredItem(
+            id="snapshot_20261104T151500Z_3fa1",
+            kind="snapshot",
+            collected_at="2026-11-04T15:15:00Z",
+        )
+        assert item.collected_at == "2026-11-04T15:15:00Z"
+
+
+def test_drop_in_description_writes_values_as_json():
+    from housesitter.sdk import Param
+
+    assert Param("boolean", "Flag.", default=False).drop_in_description() == (
+        "Flag. Default false."
+    )
+    assert Param("string", "Pick.", enum=("a", "b"), default="a").drop_in_description() == (
+        "Pick. One of: a, b. Default a."
+    )
+    assert Param("array", "List.", default=[1, 2]).drop_in_description() == (
+        "List. Default [1,2]."
+    )

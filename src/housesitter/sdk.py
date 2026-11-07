@@ -7,6 +7,7 @@ commands, parameters, output fields, and the context a handler runs with.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -50,6 +51,17 @@ _SETTING_TYPES = frozenset({"string", "integer", "number", "boolean", "object"})
 _NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 _FULL_NAME_RE = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+")
 _PATH_RE = re.compile(r"(data|source)(\.[a-z_][a-z0-9_]*(\[\])?)+")
+
+
+def _field_segments(path: str) -> list:
+    """``data.aps[].signal_dbm`` to ``[(aps, True), (signal_dbm, False)]``."""
+    segments = []
+    for part in path.split(".")[1:]:
+        if part.endswith("[]"):
+            segments.append((part[:-2], True))
+        else:
+            segments.append((part, False))
+    return segments
 _VERSION_RE = re.compile(r"\d+\.\d+\.\d+([.-]?[0-9A-Za-z.]+)?")
 
 
@@ -80,6 +92,21 @@ def _matches_type(type_name: str, value: Any) -> bool:
     if type_name == "array":
         return isinstance(value, (list, tuple))
     return False  # pragma: no cover - callers validate the type name first
+
+
+def _has_non_finite(value: Any) -> bool:
+    """True when a float NaN or infinity sits anywhere inside ``value``.
+
+    ``_matches_type`` checks only a container's own type; object and
+    array values need this deep walk so NaN never hides inside them.
+    """
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, Mapping):
+        return any(_has_non_finite(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_has_non_finite(item) for item in value)
+    return False
 
 
 def _freeze_value(value: Any) -> Any:
@@ -146,6 +173,8 @@ def _check_default(
 ) -> None:
     if not _matches_type(type_name, default):
         raise ValueError(f"{what} default {default!r} is not {type_name}")
+    if _has_non_finite(default):
+        raise ValueError(f"{what} default holds a non-finite number")
     if enum is not None and default not in enum:
         raise ValueError(f"{what} default {default!r} is not one of the enum values")
     if minimum is not None and default < minimum:
@@ -154,6 +183,27 @@ def _check_default(
         raise ValueError(f"{what} default is above maximum")
     if max_len is not None and len(default) > max_len:
         raise ValueError(f"{what} default is longer than max_len")
+
+
+def _plain(value: Any) -> str:
+    """Write a value the way Muse sees it in JSON: ``true``, not ``True``.
+
+    Strings stay bare; everything else is compact JSON.
+    """
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(_thaw_plain(value), separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):  # pragma: no cover - defaults are JSON-shaped
+        return str(value)
+
+
+def _thaw_plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw_plain(item) for item in value]
+    return value
 
 
 class CommandError(Exception):
@@ -210,9 +260,9 @@ class Param:
         """Description plus plain-words constraints, deterministic order."""
         parts = [self.description]
         if self.enum is not None:
-            parts.append("One of: " + ", ".join(str(e) for e in self.enum) + ".")
+            parts.append("One of: " + ", ".join(_plain(e) for e in self.enum) + ".")
         if self.default is not None:
-            parts.append(f"Default {self.default}.")
+            parts.append(f"Default {_plain(self.default)}.")
         if self.minimum is not None:
             parts.append(f"Minimum {self.minimum}.")
         if self.maximum is not None:
@@ -353,6 +403,69 @@ class Field:
             raise ValueError("field max_len must be a positive integer")
 
 
+def _check_field_tree(items: tuple) -> None:
+    """Reject field declarations that share a segment inconsistently.
+
+    ``data.x`` (type ``array``) declares the list itself while
+    ``data.x[]...`` declares its items; every other pairing of a plain
+    leaf, an item leaf, and child fields at the same segment is a
+    collision: a segment used both as ``x[]`` and as a non-array leaf
+    ``x``, a non-object leaf with child fields, or a segment used both
+    as a list and as an object.
+
+    An ``object`` field must also declare at least one descendant:
+    object keys carry upstream-controlled text and identifiers, so an
+    opaque object leaf would pass them through unsanitised.
+    """
+    # A flag-aware tree like the runner's: each node holds its declared
+    # leaf type and its children keyed by ``(name, is_list)``.
+    root: dict = {"kids": {}, "leaf": None}
+    for item in items:
+        node = root
+        for name, is_list in _field_segments(item.path):
+            key = (name, is_list)
+            if key not in node["kids"]:
+                node["kids"][key] = {"kids": {}, "leaf": None}
+            node = node["kids"][key]
+        node["leaf"] = item.type
+
+    def check(node: dict, shown: str) -> None:
+        leaf = node["leaf"]
+        plain_kids = [name for name, _ in node["kids"] if not _]
+        for (name, is_list), child in sorted(node["kids"].items()):
+            check(child, f"{shown}.{name}{'[]' if is_list else ''}")
+        sib_names = {name for name, _ in node["kids"]}
+        for name in sorted(sib_names):
+            plain = node["kids"].get((name, False))
+            listed = node["kids"].get((name, True))
+            if plain is not None and listed is not None:
+                # The only consistent pairing: a bare ``array`` leaf
+                # for the list itself plus item declarations.
+                if plain["leaf"] != "array" or plain["kids"]:
+                    raise ValueError(
+                        f"command field {shown}.{name!r} is used both "
+                        "as a list and as a non-array value"
+                    )
+        if leaf is not None and leaf != "object" and plain_kids:
+            raise ValueError(
+                f"command field {shown!r} is a {leaf} leaf "
+                "with child fields"
+            )
+
+    check(root, "data")
+
+    paths = [item.path for item in items]
+    for item in items:
+        if item.type == "object" and not any(
+            other != item.path and other.startswith(item.path + ".")
+            for other in paths
+        ):
+            raise ValueError(
+                f"command field {item.path!r} is an object leaf "
+                "with no declared fields"
+            )
+
+
 @dataclass(frozen=True)
 class Command:
     """One command a module offers to Muse."""
@@ -407,6 +520,7 @@ class Command:
         paths = [item.path for item in items]
         if len(set(paths)) != len(paths):
             raise ValueError("command fields must not repeat a path")
+        _check_field_tree(items)
         object.__setattr__(self, "fields", items)
         if (
             not isinstance(self.schema_version, int)
@@ -442,6 +556,9 @@ class Paging:
         for label, mapping in (("params", self.params), ("start", self.start)):
             if not isinstance(mapping, Mapping):
                 raise ValueError(f"paging {label} must be a mapping")
+        for key in self.params:
+            if key in ("section", "offset", "remaining"):
+                raise ValueError(f"paging params key {key!r} is reserved")
         for key, value in self.start.items():
             if key not in names:
                 raise ValueError(f"paging start key {key!r} is not a listed list")
@@ -501,6 +618,20 @@ class Result:
                 raise ValueError(f"invalid result save kind: {self.save!r}")
 
 
+# The store's own naming scheme (core/store.py): ``<kind>_<UTC stamp>_<rand>``.
+_STORE_KIND_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+_STORE_ID_RE = re.compile(
+    r"([a-z][a-z0-9_]{0,31})_(\d{8}T\d{6}Z)_([0-9a-f]{4})"
+)
+
+# Owner-supplied labels are capped at 200 characters (ARCHITECTURE §7).
+_STORE_LABEL_MAX_LEN = 200
+# A formatted ``%Y-%m-%dT%H:%M:%SZ`` stamp is 20 characters; the cap leaves room.
+_STORE_COLLECTED_AT_MAX_LEN = 32
+# Saved ``collected_at`` headers must be UTC stamps in this exact shape.
+_STORE_COLLECTED_AT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
 @dataclass(frozen=True)
 class StoredItem:
     """One saved result in the module's data directory."""
@@ -509,6 +640,32 @@ class StoredItem:
     kind: str
     collected_at: str | None = None
     label: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str):
+            raise ValueError(f"invalid stored id: {self.id!r}")
+        match = _STORE_ID_RE.fullmatch(self.id)
+        if match is None:
+            raise ValueError(f"invalid stored id: {self.id!r}")
+        if not isinstance(self.kind, str) or _STORE_KIND_RE.fullmatch(self.kind) is None:
+            raise ValueError(f"invalid stored kind: {self.kind!r}")
+        if match.group(1) != self.kind:
+            raise ValueError("stored id kind prefix does not match kind")
+        if self.collected_at is not None:
+            if not isinstance(self.collected_at, str):
+                raise ValueError("stored collected_at must be a string or None")
+            if len(self.collected_at) > _STORE_COLLECTED_AT_MAX_LEN:
+                raise ValueError("stored collected_at is too long")
+            if _STORE_COLLECTED_AT_RE.fullmatch(self.collected_at) is None:
+                raise ValueError(
+                    "stored collected_at must look like "
+                    "'2026-11-04T15:15:00Z'"
+                )
+        if self.label is not None:
+            if not isinstance(self.label, str):
+                raise ValueError("stored label must be a string or None")
+            if len(self.label) > _STORE_LABEL_MAX_LEN:
+                raise ValueError("stored label is too long")
 
 
 @dataclass(frozen=True)

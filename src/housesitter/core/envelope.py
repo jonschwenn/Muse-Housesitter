@@ -110,8 +110,14 @@ def format_error(module: str, code: str, reason: str) -> str:
 
 
 def serialize(envelope: dict) -> str:
-    """Serialise an envelope exactly as it goes to stdout (compact)."""
-    return json.dumps(envelope, separators=(",", ":"), ensure_ascii=False)
+    """Serialise an envelope exactly as it goes to stdout (compact).
+
+    Non-finite floats are never emitted: ``allow_nan=False`` makes them
+    raise ``ValueError`` instead of writing a bare ``NaN`` token.
+    """
+    return json.dumps(
+        envelope, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
 
 
 def measure(text: str) -> int:

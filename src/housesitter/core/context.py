@@ -3,6 +3,8 @@
 Modules see only the ``sdk.Context`` protocol. This class binds a module
 instance to its validated config, secrets directory, deadline, clock, HTTP
 client factory, and store, and hands handlers allow-listed HTTP sessions.
+The runner injects a real ``FileStore``; without one ``ctx.store`` is a
+stub whose every use raises ``NotImplementedError``.
 """
 
 from __future__ import annotations
@@ -38,19 +40,6 @@ def _freeze(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return tuple(_freeze(value) for value in obj)
     return obj
-
-
-class _StubStore:
-    """Placeholder until the store lands: every method refuses."""
-
-    def save(self, kind: str, obj: dict, label: str | None = None) -> str:
-        raise NotImplementedError("store arrives in 12b")
-
-    def list(self, kind: str, offset: int = 0, limit: int = 20) -> sdk.StorePage:
-        raise NotImplementedError("store arrives in 12b")
-
-    def load(self, id: str) -> dict:
-        raise NotImplementedError("store arrives in 12b")
 
 
 class _RedactingFilter(logging.Filter):
@@ -145,6 +134,18 @@ class _Session:
         self.close()
 
 
+class _NoStore:
+    """What ``ctx.store`` is when no store was injected.
+
+    Every attribute access raises ``NotImplementedError``: a handler
+    that touches the store without one is a wiring bug, and ``None``
+    would fail later with a confusing ``AttributeError``.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        raise NotImplementedError("no store is attached to this context")
+
+
 class ModuleContext:
     """The concrete ``sdk.Context``. Core-internal; modules see the protocol."""
 
@@ -165,7 +166,10 @@ class ModuleContext:
         self._deadline_monotonic = float(deadline_monotonic)
         self._now = now
         self._client_factory = client_factory or _http.Client
-        self._store = store if store is not None else _StubStore()
+        # The runner injects a real FileStore; without one the store
+        # is a stub that raises on use. Modules see only the sdk.Store
+        # protocol either way.
+        self._store = store if store is not None else _NoStore()
         self.warnings: list[str] = []
         self._secret_values: list[str] = []
         # A fresh logger per context, outside the logging manager, so the
