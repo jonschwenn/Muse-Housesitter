@@ -683,3 +683,23 @@ def test_evidence_job_uses_the_runners_chrome():
     job = text[text.index("\n  evidence:\n"):]
     assert "playwright install" not in job
     assert "--browser-channel chrome" in job
+
+
+def test_publisher_authenticates_git_the_way_github_accepts():
+    # GitHub's git server rejects "Authorization: Bearer <token>" (the first
+    # real publish failed with "could not read Username"); it takes Basic
+    # auth with the x-access-token user, as actions/checkout sends it. The
+    # encoded value is a new secret string, so it must be masked in logs.
+    text = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    assert "Authorization: Bearer" not in text
+    assert "x-access-token:" in text
+    assert "Authorization: Basic ${" in text or 'Authorization: Basic $' in text
+    assert "::add-mask::" in text
+
+
+def test_publisher_does_not_hide_fetch_failures():
+    # A failed fetch used to be read as "no pr-evidence branch yet", which
+    # hid the real auth error behind a later, vaguer push failure.
+    text = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    assert "pr-evidence 2>/dev/null" not in text
+    assert "git ls-remote --exit-code --heads origin pr-evidence" in text
