@@ -59,6 +59,27 @@ UI_REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 UI_SHA_RE = re.compile(r"[0-9a-f]{40}")
 MAX_UI_TEXT_LEN = 200  # cap per displayed check failure (matches ui_evidence)
 MAX_UI_LABEL_LEN = 100  # cap per displayed fixture/view label
+# The comment intro names the browser that captured the screenshots. These
+# values must stay identical to scripts/ui_evidence.py's (pinned by test):
+# this module never imports ui_evidence, so it keeps its own copies.
+UI_INTRO = (
+    "Fixture house only. `scripts/ui_evidence.py` captures every fixture in "
+    "`tests/fixtures/dashboard/` at phone (360x780), desktop (1280x900, light "
+    "and dark), and e-ink (800x480) sizes."
+)
+UI_IMAGES_NOTE = (
+    "Images live on the `pr-evidence` branch, pinned to the evidence push, "
+    "so they never change afterwards."
+)
+UI_BROWSER_UNKNOWN = "The manifest does not record a recognised browser."
+UI_BROWSER_NAMES = {
+    "chromium": "Playwright's bundled Chromium",
+    "chrome": "Google Chrome",
+    "chrome-beta": "Google Chrome Beta",
+    "msedge": "Microsoft Edge",
+}
+UI_BROWSER_VERSION_RE = re.compile(r"[0-9]+(\.[0-9]+){0,3}")
+UI_BROWSER_VERSION_MAX_LEN = 32
 
 
 class Refused(Exception):
@@ -197,6 +218,31 @@ def _ui_img(src: str, width: int, alt: str) -> str:
     )
 
 
+def browser_display(manifest: dict) -> str | None:
+    """E.g. "Google Chrome 131.0.6778" for a recognised browser, else None.
+
+    The manifest is untrusted data (a PR-authored artifact), so the channel
+    goes through an allow-list and the version through a strict numeric
+    shape; anything else renders the neutral sentence, never the bad value.
+    Mirrors ui_evidence.browser_display (pinned by test).
+    """
+    browser = manifest.get("browser")
+    if not isinstance(browser, dict):
+        return None
+    channel = browser.get("channel")
+    version = browser.get("version")
+    if not isinstance(channel, str) or not isinstance(version, str):
+        return None
+    name = UI_BROWSER_NAMES.get(channel)
+    if name is None:
+        return None
+    if len(version) > UI_BROWSER_VERSION_MAX_LEN:
+        return None
+    if not UI_BROWSER_VERSION_RE.fullmatch(version):
+        return None
+    return f"{name} {version}"
+
+
 def load_ui_manifest(ui_dir: Path | None) -> dict | None:
     """Read the UI manifest, or None when there is no UI evidence.
 
@@ -222,7 +268,9 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
     problems escaped (via code spans) and length-capped. Captures that fail
     validation are dropped and counted, never rendered. Image URLs are built
     from the validated repo/PR/head SHA plus the validated file name, so they
-    always match the pinned evidence-branch pattern exactly.
+    always match the pinned evidence-branch pattern exactly. The browser key
+    is untrusted too: only an allow-listed channel with a strict numeric
+    version is named, otherwise a neutral sentence renders instead.
     """
     if not UI_REPO_RE.fullmatch(repo or ""):
         raise ValueError(f"bad repo: {repo!r}")
@@ -272,35 +320,41 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
     lines = [
         "## Web UI",
         "",
-        "Fixture house only. Captured with headless Chromium via "
-        "`scripts/ui_evidence.py`: every fixture in `tests/fixtures/dashboard/` "
-        "at phone (360x780), desktop (1280x900, light and dark), and e-ink "
-        "(800x480) sizes. Images live on the `pr-evidence` branch, pinned to "
-        "the evidence push, so they never change afterwards.",
+        UI_INTRO,
         "",
     ]
+    if kept:
+        display = browser_display(manifest)
+        if display is None:
+            lines += [UI_BROWSER_UNKNOWN + " " + UI_IMAGES_NOTE, ""]
+        else:
+            lines += ["Captured headless with " + display + ". " + UI_IMAGES_NOTE, ""]
     if not manifest["captures"]:
         lines += [
             "Neither the base nor the head captured anything: no `web/` on "
             "either side, so there is nothing to show.",
             "",
         ]
-    lines += [
-        "| Capture | Status | Checks |",
-        "|---------|--------|--------|",
-    ]
     failures = 0
-    for cap in kept:
-        checks = [_ui_cell(item, MAX_UI_TEXT_LEN) for item in cap["head_problems"]]
-        if cap.get("diff_error"):
-            checks.append(_ui_cell(cap["diff_error"], MAX_UI_TEXT_LEN))
-        if checks:
-            failures += 1
-        label = _ui_cell(
-            f"{cap.get('fixture', '')} / {cap.get('view', '')}", MAX_UI_LABEL_LEN
-        )
-        checks_cell = code_span("; ".join(checks) if checks else "pass")
-        lines.append(f"| {code_span(label)} | {cap['status']} | {checks_cell} |")
+    if kept:
+        lines += [
+            "| Capture | Status | Checks |",
+            "|---------|--------|--------|",
+        ]
+        for cap in kept:
+            # Validation treats a missing head_problems as none, so must this.
+            checks = [
+                _ui_cell(item, MAX_UI_TEXT_LEN) for item in cap.get("head_problems", [])
+            ]
+            if cap.get("diff_error"):
+                checks.append(_ui_cell(cap["diff_error"], MAX_UI_TEXT_LEN))
+            if checks:
+                failures += 1
+            label = _ui_cell(
+                f"{cap.get('fixture', '')} / {cap.get('view', '')}", MAX_UI_LABEL_LEN
+            )
+            checks_cell = code_span("; ".join(checks) if checks else "pass")
+            lines.append(f"| {code_span(label)} | {cap['status']} | {checks_cell} |")
     lines += [""]
     if dropped:
         lines += [
@@ -340,7 +394,8 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
                     reason = _ui_cell(
                         cap.get("diff_error") or "unknown reason", MAX_UI_TEXT_LEN
                     )
-                    block.append("Diff unavailable: " + html.escape(reason) + ".")
+                    # A code span, like the table: no markdown or HTML renders.
+                    block.append("Diff unavailable: " + code_span(reason) + ".")
                 block += [""]
         block += ["</details>", ""]
         details.append((fixture, "\n".join(block)))

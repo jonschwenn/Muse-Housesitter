@@ -495,7 +495,7 @@ def test_no_web_on_either_side_is_zero_captures(tmp_path):
     assert ui_evidence.has_web(base) is False
     assert ui_evidence.has_web(head) is False
     manifest = ui_evidence.build_manifest(base, head, out, {})
-    assert manifest == {"version": 1, "captures": []}
+    assert manifest == {"version": 1, "browser": None, "captures": []}
     assert ui_evidence.validate_artifact(out) != []  # no manifest written
     (out / ui_evidence.MANIFEST_NAME).write_text(json.dumps(manifest))
     assert ui_evidence.validate_artifact(out) == []
@@ -717,3 +717,229 @@ def test_publisher_does_not_hide_fetch_failures():
     text = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
     assert "pr-evidence 2>/dev/null" not in text
     assert "git ls-remote --exit-code --heads origin pr-evidence" in text
+
+
+# Browser provenance (issue #8) -------------------------------------------------
+#
+# CI captures with the runner's Google Chrome, local runs with Playwright's
+# bundled Chromium. The manifest records which browser captured, and both
+# comment renderers name it; the publisher treats the key as hostile data.
+
+
+INTRO_SENTENCE = (
+    "Fixture house only. `scripts/ui_evidence.py` captures every fixture in "
+    "`tests/fixtures/dashboard/` at phone (360x780), desktop (1280x900, light "
+    "and dark), and e-ink (800x480) sizes."
+)
+IMAGES_SENTENCE = (
+    "Images live on the `pr-evidence` branch, pinned to the evidence push, "
+    "so they never change afterwards."
+)
+BROWSER_UNKNOWN = "The manifest does not record a recognised browser."
+
+
+def test_browser_info_maps_no_channel_to_bundled_chromium():
+    assert ui_evidence.browser_info(None, "141.0.7390") == {
+        "channel": "chromium",
+        "version": "141.0.7390",
+    }
+    assert ui_evidence.browser_info("chrome", "131.0.6778") == {
+        "channel": "chrome",
+        "version": "131.0.6778",
+    }
+
+
+def test_build_manifest_records_the_capturing_browser(tmp_path):
+    base, head = _manifest_trees(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    browser = {"channel": "chrome", "version": "131.0.6778"}
+    manifest = ui_evidence.build_manifest(base, head, out, {}, browser=browser)
+    assert manifest["version"] == 1
+    assert manifest["browser"] == browser
+
+
+def test_build_manifest_without_a_browser_records_null(tmp_path):
+    base, head = _manifest_trees(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    assert ui_evidence.build_manifest(base, head, out, {})["browser"] is None
+
+
+def _web_tree(root: Path, name: str, with_web: bool) -> Path:
+    tree = root / name
+    if with_web:
+        (tree / "web").mkdir(parents=True)
+        (tree / "web" / "index.html").write_text("<html></html>")
+        (tree / "web" / "eink.html").write_text("<html></html>")
+    else:
+        tree.mkdir(parents=True)
+    return tree
+
+
+HEAD_BROWSER = {"channel": "chrome", "version": "131.0.6778"}
+BASE_BROWSER = {"channel": "chromium", "version": "141.0.7390"}
+
+
+@pytest.mark.parametrize(
+    "base_web,head_web,want",
+    [
+        (True, True, HEAD_BROWSER),
+        (False, True, HEAD_BROWSER),
+        (True, False, BASE_BROWSER),
+        (False, False, None),
+    ],
+)
+def test_main_records_the_browser_that_captured(tmp_path, monkeypatch, base_web, head_web, want):
+    # No browser: fake the Playwright import main checks for, and capture_side
+    # itself. The manifest takes the head side's browser, else the base's,
+    # else null when neither side captured.
+    import sys
+    import types
+
+    playwright = types.ModuleType("playwright")
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = lambda: None
+    playwright.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", playwright)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+    monkeypatch.delenv("HOUSESITTER_LIVE", raising=False)
+    monkeypatch.delenv("HOUSESITTER_CONFIG", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    calls = []
+
+    def fake_capture(tree, out_dir, side, check, channel=None):
+        calls.append((side, channel))
+        browser = HEAD_BROWSER if side == "head" else BASE_BROWSER
+        return {}, dict(browser)
+
+    monkeypatch.setattr(ui_evidence, "capture_side", fake_capture)
+    base = _web_tree(tmp_path, "base", base_web)
+    head = _web_tree(tmp_path, "head", head_web)
+    out = tmp_path / "out"
+    rc = ui_evidence.main(
+        [
+            "--base-tree", str(base),
+            "--head-tree", str(head),
+            "--out-dir", str(out),
+            "--repo", REPO,
+            "--pr", "7",
+            "--head-sha", HEAD_SHA,
+            "--browser-channel", "chrome",
+        ]
+    )
+    assert rc == 0
+    assert [side for side, _ in calls] == (
+        (["base"] if base_web else []) + (["head"] if head_web else [])
+    )
+    assert {channel for _, channel in calls} <= {"chrome"}
+    manifest = json.loads((out / ui_evidence.MANIFEST_NAME).read_text())
+    assert manifest["version"] == 1
+    assert manifest["browser"] == want
+
+
+def test_validator_ignores_the_browser_key(tmp_path):
+    directory = write_valid_artifact(tmp_path / "browserkey")
+    manifest = json.loads((directory / ui_evidence.MANIFEST_NAME).read_text())
+    manifest["browser"] = {"channel": "chrome", "version": "131.0.6778"}
+    (directory / ui_evidence.MANIFEST_NAME).write_text(json.dumps(manifest))
+    assert ui_evidence.validate_artifact(directory) == []
+
+
+def test_section_names_the_capturing_browser():
+    manifest = make_manifest()
+    manifest["browser"] = {"channel": "chrome", "version": "131.0.6778"}
+    full, table = ui_evidence.build_ui_section(manifest, REPO, 7, HEAD_SHA, 60_000, True)
+    assert INTRO_SENTENCE in full and INTRO_SENTENCE in table
+    captured = "Captured headless with Google Chrome 131.0.6778. " + IMAGES_SENTENCE
+    assert captured in full and captured in table
+    assert BROWSER_UNKNOWN not in full
+
+
+def test_section_names_bundled_chromium_for_the_default_channel():
+    manifest = make_manifest()
+    manifest["browser"] = {"channel": "chromium", "version": "141.0.7390"}
+    full, _ = ui_evidence.build_ui_section(manifest, REPO, 7, HEAD_SHA, 60_000, True)
+    assert "Captured headless with Playwright's bundled Chromium 141.0.7390." in full
+
+
+def test_section_without_a_browser_key_is_neutral():
+    # An old manifest has no "browser" key: the section still renders, with
+    # the neutral sentence instead of a browser claim.
+    full, table = ui_evidence.build_ui_section(make_manifest(), REPO, 7, HEAD_SHA, 60_000, True)
+    assert BROWSER_UNKNOWN in full and BROWSER_UNKNOWN in table
+    assert IMAGES_SENTENCE in full
+    assert "Captured headless" not in full
+    assert "| `typical / index-phone` | added | pass |" in table
+
+
+HOSTILE_BROWSERS = [
+    {"channel": "chrome<script>", "version": "131.0.6778"},
+    {"channel": "chrome", "version": "1.2.3.4.5"},
+    {"channel": "chrome", "version": "9" * 40},
+    {"channel": "chrome", "version": 131},
+    {"channel": "chrome"},
+    {"channel": ["chrome"], "version": "131.0.6778"},
+    {"channel": "firefox", "version": "131.0.6778"},
+    ["chrome", "131.0.6778"],
+    "chrome",
+]
+
+
+@pytest.mark.parametrize("browser", HOSTILE_BROWSERS)
+def test_section_never_echoes_a_hostile_browser(browser):
+    manifest = make_manifest()
+    manifest["browser"] = browser
+    full, table = ui_evidence.build_ui_section(manifest, REPO, 7, HEAD_SHA, 60_000, True)
+    assert BROWSER_UNKNOWN in full and BROWSER_UNKNOWN in table
+    assert "Captured headless" not in full
+    if isinstance(browser, dict):
+        for value in browser.values():
+            if isinstance(value, str):
+                assert value not in full and value not in table
+    elif isinstance(browser, str):
+        assert browser not in full
+
+
+def test_section_without_captures_has_no_table_header():
+    manifest = {"version": 1, "browser": None, "captures": []}
+    full, table = ui_evidence.build_ui_section(manifest, REPO, 7, HEAD_SHA, 60_000, False)
+    assert "nothing to capture" in full and "nothing to capture" in table
+    assert "| Capture | Status | Checks |" not in full
+    assert "| Capture | Status | Checks |" not in table
+    assert "Captured headless" not in full
+    assert IMAGES_SENTENCE not in full
+    assert BROWSER_UNKNOWN not in full
+
+
+@pytest.mark.parametrize(
+    "channel, version, shown",
+    [
+        ("chrome", "131.0.6778.85", "Google Chrome 131.0.6778.85"),
+        ("chrome-beta", "132.0.6834", "Google Chrome Beta 132.0.6834"),
+        ("msedge", "131.0.2903", "Microsoft Edge 131.0.2903"),
+        ("chrome", "131", "Google Chrome 131"),
+        ("chrome", "9" * 32, "Google Chrome " + "9" * 32),
+    ],
+)
+def test_section_names_every_allow_listed_browser(channel, version, shown):
+    manifest = make_manifest()
+    manifest["browser"] = {"channel": channel, "version": version}
+    full, _ = ui_evidence.build_ui_section(manifest, REPO, 7, HEAD_SHA, 60_000, True)
+    assert f"Captured headless with {shown}. " + IMAGES_SENTENCE in full
+
+
+@pytest.mark.parametrize(
+    "browser",
+    [None, {"channel": "chrome", "version": "9" * 33}, ["chrome", "131.0.6778"]],
+)
+def test_section_with_an_unusable_browser_keeps_its_rows(browser):
+    manifest = make_manifest()
+    manifest["browser"] = browser
+    full, table = ui_evidence.build_ui_section(manifest, REPO, 7, HEAD_SHA, 60_000, True)
+    assert BROWSER_UNKNOWN + " " + IMAGES_SENTENCE in full
+    assert BROWSER_UNKNOWN in table
+    assert "9" * 33 not in full and "131.0.6778" not in full
+    assert "| Capture | Status | Checks |" in table
+    assert "`typical / index-phone`" in table

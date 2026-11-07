@@ -238,3 +238,45 @@ def test_substitute_rejects_a_bad_sha(tmp_path):
     assert rc == 2
     # The file is untouched on failure.
     assert ui_evidence.SHA_PLACEHOLDER in comment.read_text()
+
+
+# Browser provenance (issue #8) --------------------------------------------------
+#
+# An artifact whose manifest carries the "browser" key still validates (the
+# key is additive), and the published comment names the capturing browser.
+# A hostile browser value renders the neutral sentence instead.
+
+
+def test_render_artifact_with_browser_key_names_the_browser(tmp_path):
+    manifest = _manifest("typical__index-phone__head.png")
+    manifest["browser"] = {"channel": "chrome", "version": "131.0.6778"}
+    artifact = _artifact(tmp_path, manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    assert "Captured headless with Google Chrome 131.0.6778." in (
+        out / "comment.md"
+    ).read_text()
+
+
+def test_render_artifact_with_hostile_browser_is_neutral(tmp_path):
+    manifest = _manifest("typical__index-phone__head.png")
+    manifest["browser"] = {"channel": "chrome<script>", "version": "1.2.3.4.5"}
+    artifact = _artifact(tmp_path, manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "The manifest does not record a recognised browser." in body
+    assert "Captured headless" not in body
+    assert "chrome<script>" not in body
+    assert "1.2.3.4.5" not in body
+
+
+def test_render_capture_without_head_problems_publishes(tmp_path):
+    # A hostile manifest that omits head_problems passes validation; the
+    # publisher must still render (fail closed or publish, never crash).
+    manifest = _manifest("typical__index-phone__head.png")
+    del manifest["captures"][0]["head_problems"]
+    artifact = _artifact(tmp_path, manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    assert "typical / index-phone" in (out / "comment.md").read_text()

@@ -25,8 +25,9 @@ what changed:
 | Command-line output (envelopes, `describe`, `doctor`, errors) | **Text diffs.** CI posts one PR comment. For each changed scenario it shows a colored ```` ```diff ```` block from before to after, with the full before and after outputs in collapsible sections below. |
 | Web UI (any page Housesitter serves, if one ever exists) | **Rendered screenshots.** A headless browser captures each page before and after, plus a highlighted visual diff. The images are hosted on the `pr-evidence` branch (D12) and embedded in the same comment. |
 
-A PR with no `web/` change gets text diffs only. A PR where either side
-has `web/` also gets the Web UI section below, and the `pr-evidence` branch
+Every PR gets the Web UI section below when the artifact has
+`ui_manifest.json`, even when neither side has `web/`. The comment is
+text-only when the artifact has no manifest, and the `pr-evidence` branch
 is created on first use.
 
 **Status:** text diffs are built (`scripts/pr_evidence.py`, tested in
@@ -104,8 +105,13 @@ PR #1 predates the tooling and has no evidence.
   (800x480, never full page). A tree without `web/` contributes "no page"
   for its side. CI captures with Google Chrome on GitHub's runner
   (`--browser-channel chrome`); local runs use Playwright's bundled
-  Chromium. Playwright is a dev/CI-only extra (`ui` in
-  `pyproject.toml`), never a runtime dependency.
+  Chromium. The top-level `browser` in `ui_manifest.json` records the
+  `--browser-channel` value (or `chromium` when unset) and the launched
+  browser's version, using the head's record, else the base's, else `null`
+  when neither side has `web/`; the manifest stays at version 1,
+  and older readers ignore the extra key. The comment names that browser
+  and version only when it lists captures. Playwright is a dev/CI-only
+  extra (`ui` in `pyproject.toml`), never a runtime dependency.
 - Capture file names are `<fixture>__<view>__<side>.png`, parsed from the
   right (the view and side are fixed words). Fixture stems are lowercase
   alphanumerics plus `-` and single `_`, at most 48 chars, with no `__`
@@ -148,7 +154,20 @@ PR #1 predates the tooling and has no evidence.
   table and images built from the re-validated manifest: capture names
   against the capture regex, status against the
   added/removed/changed/unchanged enum, view against the known views,
-  problems escaped (code spans) and length-capped. Image URLs always match
+  problems escaped (code spans) and length-capped, browser channel against
+  an allow-list (`chromium` → Playwright's bundled Chromium, `chrome` →
+  Google Chrome, `chrome-beta` → Google Chrome Beta, `msedge` → Microsoft
+  Edge), and browser version against 1–4 dot-separated groups of digits,
+  at most 32 characters. An unrecognised browser gets "The manifest does
+  not record a recognised browser." followed by the images sentence; bad
+  values are never echoed. In the published comment, the browser and images
+  sentences appear only when at least one capture passes validation. With
+  no captures to list, the published comment has no table, not even an empty
+  header. In the published comment, the nothing-to-show sentence appears
+  only when the manifest's `captures` list is empty. The note
+  "**Omitted N UI capture(s) with invalid manifest entries.**" appears only
+  when at least one entry fails validation. The two never appear together.
+  Image URLs always match
   `https://raw.githubusercontent.com/<repo>/__HOUSESITTER_EVIDENCE_SHA__/pr/<n>/<head-sha>/<capture-name>`
   exactly. Scenario titles and ids in the text section go through code spans
   the same way. This protects against accidents and hostile *data*; a
