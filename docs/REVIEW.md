@@ -223,9 +223,10 @@ PR #1 predates the tooling and has no evidence.
   `HOUSESITTER_LIVE` or `HOUSESITTER_CONFIG` is set, or if
   `~/.config/housesitter/config.json` exists.
 - A new module or command adds its scenarios **in the same PR**.
-  `tests/test_pr_evidence.py` checks that every scenario runs. **Planned**:
-  once the command registry exists, conformance will fail if a registered
-  command has no scenario.
+  `tests/test_pr_evidence.py` checks that every scenario runs. Conformance
+  fails if a command of an installed built-in module has no scenario.
+  The test-only demo module is excluded because evidence runs the
+  installed CLI; third-party entry points are also excluded.
 - An unexpected change in the evidence counts as a finding in gate 2.
 - Optional extra: when a change affects how Muse uses a command, add a
   screenshot of a Muse chat driven by the fixture house, under "Muse
@@ -280,7 +281,15 @@ Use this checklist. Every item gets *yes*, *no (finding)*, or *n/a (why)*.
 **Secrets**
 - [ ] Secrets come only from `ctx.secret`.
 - [ ] Secrets are absent from argv, env dumps, logs, exceptions, envelopes, and saved files.
-- [ ] The hostile fixture's planted secrets are asserted absent everywhere.
+- [ ] The hostile fixture's planted secrets are asserted absent from output,
+      saves, and captured logs. The suite scans Python streams and fds 1/2
+      during command execution, plus records reaching `housesitter`
+      (including default `ctx.log`). Review covers import-time output,
+      threads outliving the command, other or non-propagating loggers
+      (including `ctx.log` with `propagate=False`), handlers writing
+      elsewhere, and leaks beyond exact-substring matching (MODULES §4).
+- [ ] Modules log only through `ctx.log`, as required by Context-only I/O
+      (MODULES §3).
 - [ ] Auth cookies and tokens are kept in memory only, and logout is called.
 
 **Data leaving the house**
@@ -292,7 +301,9 @@ Use this checklist. Every item gets *yes*, *no (finding)*, or *n/a (why)*.
       secret fields.
 
 **Untrusted input**
-- [ ] Device and network names are marked untrusted and capped.
+- [ ] Device and network names are marked untrusted and capped. The suite
+      checks declared untrusted fields; review checks that the declarations
+      cover every field that needs them.
 - [ ] No upstream string is used in a description, a file path, a regex,
       or a format string.
 - [ ] Large or malformed upstream responses fail cleanly: size cap,
@@ -331,8 +342,9 @@ true**.
   or *unverifiable*.
 - Anything false or unverifiable is a finding. Fix the doc or the code.
 - Check that every field in the code's `data` output is in the spec table,
-  and every spec field is produced. Conformance tests this mechanically, and
-  the reviewer checks the *meanings and units* too.
+  and every spec field is produced. Conformance compares spec tables with
+  declarations and checks returned keys, not whether every declared field
+  is produced; the reviewer checks coverage, *meanings and units* too.
 - Check that SKILL.md's interpretation guidance (ranges, units, caveats)
   matches what the code returns.
 

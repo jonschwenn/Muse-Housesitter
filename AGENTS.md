@@ -60,8 +60,7 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
    `housesitter.sdk` (the public module API), and the stdlib. It never
    imports another module or core internals, and it does network and file
    I/O only through `Context`. The core never imports module internals.
-   (**Planned:** an import-scan lint will back this up. It is a guard rail,
-   not a sandbox.)
+   (An import-scan lint backs this up. It is a guard rail, not a sandbox.)
 
 ## How work happens
 
@@ -152,13 +151,22 @@ gh api graphql -f query='query{repository(owner:"jonschwenn",name:"Muse-Housesit
   `tests/live/`, are skipped unless `HOUSESITTER_LIVE=1`, and their output is
   never committed.
 - **Every module passes the conformance suite** (`tests/conformance/`),
-  which runs against every registered module:
+  which runs against every built-in module plus a test-only demo module
+  (third-party entry points are excluded):
   - valid command names and descriptions
   - generated drop-in files that pass the SDK's documented rules
-  - output envelope schema
-  - output within the size budget
-  - errors carry no secrets
-  - only allow-listed HTTP calls
+  - envelope schema and size budget on every case and follow-up page
+  - no captured handler output: Python stdout/stderr and fds 1/2 during
+    execution; import-time output and threads outliving the command are
+    outside capture (core protection is **Planned (#29)**)
+  - no exact planted-secret substrings in scanned output, saves, or records
+    reaching the `housesitter` logger (including default `ctx.log`);
+    other loggers, `propagate=False`, and handlers writing elsewhere are
+    outside log capture
+  - recorded HTTP calls match the allow-list and client bindings match config
+
+  Scope and limits, including the source-only import lint, are in MODULES §4
+  and §3. TLS and real destination identity are not exercised by the harness.
 - **Pin behaviour, not implementation.** Assert on normalised output and
   envelopes, not on private helpers.
 - **Regression first.** A bug fix starts with a failing test that
