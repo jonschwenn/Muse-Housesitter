@@ -249,8 +249,11 @@ If `start` has an entry for the section named by `more` and that section
 keeps zero items while items remain, the runner fails with
 `upstream_unexpected`, "one item in <section> is larger than the output limit".
 `<section>` is the declared paging list name. This refuses a continuation
-whose offset would not advance. A first page without a start entry for
-that section may keep zero items, since its `more` is a different call.
+whose offset would not advance. A page without a start entry for that
+section counts as a first page and may keep zero items. The runner
+recognises a continuation only by its start entry, so a paging command
+that continues a list must set `start` for it; without one, a repeat is
+not detected. An empty list is never the truncated section.
 
 A handler may raise `CommandError(code, reason)`. `code` must be in
 `ERROR_CODES`; `reason` is author-written plain language, never upstream

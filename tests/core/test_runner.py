@@ -1827,3 +1827,108 @@ class TestFitBeforeSave:
         saved = store.load(outcome.envelope["saved"])
         assert saved["data"]["items"] == big
         assert saved["data"]["note"] == "n"
+
+    def test_no_progress_after_empty_leading_list_fails(self, tmp_path):
+        # Deep review: an empty first list must not become the section
+        # ``more`` names; the first list actually cut is ``items``.
+        command = sdk.Command(
+            name="get",
+            handler="get",
+            description="Page demo lines.",
+            optional={
+                "section": sdk.Param("string", "Which list to continue."),
+                "offset": sdk.Param("integer", "Where to continue."),
+                "id": sdk.Param("string", "Saved result id."),
+            },
+            fields=(
+                sdk.Field("data.empty[]", "string"),
+                sdk.Field("data.items[]", "string"),
+            ),
+        )
+        module_cls = self.make_module(
+            command,
+            {"empty": [], "items": ["s" * 95000]},
+            sdk.Paging(
+                command="get",
+                lists=("empty", "items"),
+                params={"id": "snapshot_20261104T151500Z_ab12"},
+                start={"empty": 0, "items": 0},
+            ),
+            save=None,
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "one item in items is larger than the output limit"
+        )
+
+    def test_unserialisable_paging_params_fail_cleanly(self, tmp_path):
+        # Deep review: a non-JSON value in Paging.params must become an
+        # error outcome, not an exception escaping run_command.
+        module_cls = self.make_module(
+            self.GET_COMMAND,
+            {"items": list(range(30000)), "note": "n"},
+            sdk.Paging(
+                command="get", lists=("items",),
+                params={"kind": {1}},
+            ),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == "the result is not valid JSON"
+        assert stored_files(tmp_path) == []
+
+    def test_first_page_skips_empty_leading_list(self, tmp_path):
+        # Gate 2: on a first page an empty first list must not be named
+        # in ``more``; the cut list ``b`` is.
+        command = sdk.Command(
+            name="get",
+            handler="get",
+            description="Page demo readings.",
+            optional={
+                "section": sdk.Param("string", "Which list to continue."),
+                "offset": sdk.Param("integer", "Where to continue."),
+                "id": sdk.Param("string", "Saved result id."),
+            },
+            fields=(
+                sdk.Field("data.a[]", "integer"),
+                sdk.Field("data.b[]", "integer"),
+            ),
+        )
+        big = list(range(30000))
+        module_cls = self.make_module(
+            command,
+            {"a": [], "b": big},
+            sdk.Paging(command="get", lists=("a", "b")),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        assert outcome.exit_code == 0
+        kept = len(outcome.envelope["data"]["b"])
+        assert 0 < kept < len(big)
+        more = outcome.envelope["more"]
+        assert more["params"]["section"] == "b"
+        assert more["params"]["offset"] == kept
+        assert more["remaining"] == {"b": len(big) - kept}
+
+    def test_standin_id_matches_real_id_size(self, tmp_path):
+        # Gate 2: the dry run is only exact if the stand-in id measures
+        # exactly like the id the store really returns.
+        from housesitter.core import envelope as envelope_mod
+        from housesitter.core.store import FileStore
+
+        store = FileStore("demo_sensor", env={"HOME": str(tmp_path)})
+        for kind in ("snapshot", "k", "a" * 32):
+            real = store.save(kind, {"data": {}})
+            standin = f"{kind}_00000000T000000Z_0000"
+            assert sdk._STORE_ID_RE.fullmatch(real)
+            assert sdk._STORE_ID_RE.fullmatch(standin)
+            assert len(real) == len(standin)
+            assert envelope_mod.measure(real) == envelope_mod.measure(standin)

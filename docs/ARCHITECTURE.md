@@ -362,9 +362,14 @@ Stable error codes: `config_invalid`, `secret_unreadable`, `upstream_auth`,
   `more`. If it keeps zero items of that section while items remain, it
   fails with `upstream_unexpected`, "one item in <section> is larger than the output limit".
   `<section>` is the declared paging list name. Its `more.params.offset`
-  would equal the start offset, replaying the same page forever. A first
-  page without a start entry for that section may keep zero items: its
-  `more` is a different call, such as `get section=clients offset=0`.
+  would equal the start offset, replaying the same page forever. A page
+  without a start entry for that section counts as a first page and may
+  keep zero items, as when a snapshot's `more` is
+  `get section=clients offset=0`. The runner recognises a continuation
+  only by its start entry, so a paging command that continues a list must
+  set `Paging.start` for it; without one, a repeat is not detected. Empty
+  lists are never the truncated section: `section` names the first list
+  that lost items.
 - When `Result.save` is set, the file is written only after projection and
   fitting checks pass. It keeps the sanitised full result from before
   projection, including identifiers and undeclared keys, even when output

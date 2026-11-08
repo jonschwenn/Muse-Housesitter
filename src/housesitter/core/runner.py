@@ -413,7 +413,9 @@ class _EnvelopeNotJson(Exception):
 def _envelope_fits(env_dict: dict) -> bool:
     try:
         return envelope.measure(envelope.serialize(env_dict)) <= envelope.BUDGET_BYTES
-    except ValueError:
+    except (TypeError, ValueError):
+        # NaN/Infinity, or a value or key JSON cannot hold at all (for
+        # example a set in ``Paging.params``).
         raise _EnvelopeNotJson from None
 
 
@@ -560,7 +562,9 @@ def _truncate(
         kept[name] = 0
         if not fits(trial, section):
             data[name] = []
-            if first_section is None:
+            # An empty list was not cut: ``more`` names the first list
+            # that actually lost items.
+            if first_section is None and items:
                 first_section = name
             continue
         low, high = 0, len(items)
@@ -598,21 +602,22 @@ def _truncate(
             module_id=module_id,
         )
         return data, more
-    if original:
-        # Even the smallest page does not fit: ``data``/``kept`` now
-        # describe the trial with every list emptied, so measure that
-        # envelope exactly as built and report its size. No ``more``
-        # loop is possible from here, so this never returns.
-        try:
-            smallest = envelope.build_ok(
-                data=data, truncated=True, more=build_more(order[0]),
-                **fixed,
-            )
-            size = envelope.measure(envelope.serialize(smallest))
-        except ValueError:
-            raise _EnvelopeNotJson from None
-        raise _TooBigPaging(size)
-    return None
+    # Even the smallest page does not fit: ``data``/``kept`` now
+    # describe the trial with every list emptied, so measure that
+    # envelope exactly as built and report its size. No ``more``
+    # loop is possible from here, so this never returns.
+    try:
+        smallest = envelope.build_ok(
+            data=data, truncated=True,
+            more=build_more(
+                next((name for name in order if original[name]), order[0])
+            ),
+            **fixed,
+        )
+        size = envelope.measure(envelope.serialize(smallest))
+    except (TypeError, ValueError):
+        raise _EnvelopeNotJson from None
+    raise _TooBigPaging(size)
 
 
 # -- logging -----------------------------------------------------------------
