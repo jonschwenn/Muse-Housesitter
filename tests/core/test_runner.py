@@ -1427,3 +1427,90 @@ class TestNestedNonFiniteParams:
     def test_nested_non_finite_default_rejected(self):
         with pytest.raises(ValueError):
             sdk.Param("array", "Values.", default=[float("nan")])
+
+
+class _FactoryClient:
+    """Minimal stand-in for an HTTP client, recording how it was built."""
+
+    def __init__(self, scheme, host, port, **kwargs):
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+        self.kwargs = kwargs
+        self.calls = []
+
+    def request(self, method, target, headers=None, body=None, deadline_s=None):
+        self.calls.append((method, target))
+        from housesitter.core import http as http_core
+
+        return http_core.Response(status=200, headers={}, body=b"{}")
+
+    def clear_auth(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def _http_probe_module():
+    def probe(self, ctx, params):
+        with ctx.http("http://127.0.0.1:9") as session:
+            session.get("/api/x-example")
+        return sdk.Result(data={"echo": "ok"})
+
+    return type(
+        "ProbeHttpModule",
+        (sdk.Module,),
+        {
+            "id": "demo_sensor",
+            "title": "Demo sensor",
+            "version": "0.1.0",
+            "config": {},
+            "http_allow": (sdk.Allow("GET", r"/api/x-example"),),
+            "commands": (PROBE_COMMAND,),
+            "probe": probe,
+        },
+    )
+
+
+class TestClientFactory:
+    """``run_command`` passes ``client_factory`` through to the context."""
+
+    def test_factory_receives_binding(self, tmp_path):
+        created = []
+
+        def factory(scheme, host, port, **kwargs):
+            client = _FactoryClient(scheme, host, port, **kwargs)
+            created.append(client)
+            return client
+
+        module_cls = _http_probe_module()
+        outcome, _ = run(
+            module_cls,
+            "housesitter.demo_sensor.probe",
+            {"count": 1},
+            tmp_path,
+            client_factory=factory,
+        )
+        assert outcome.exit_code == 0
+        assert len(created) == 1
+        client = created[0]
+        assert (client.scheme, client.host, client.port) == ("http", "127.0.0.1", 9)
+        assert [entry.method for entry in client.kwargs["allow"]] == ["GET"]
+        assert client.kwargs["default_timeout_s"] == 15
+        assert client.calls == [("GET", "/api/x-example")]
+
+    def test_default_factory_is_http_client(self, tmp_path):
+        from housesitter.core import context as context_mod
+        from housesitter.core import http as http_core
+
+        module_cls = make_probe_module()
+        ctx = context_mod.ModuleContext(
+            module_cls(),
+            {},
+            secrets_dir=tmp_path / "secrets",
+            deadline_monotonic=100.0,
+            store=None,
+            client_factory=None,
+        )
+        assert ctx._client_factory is http_core.Client

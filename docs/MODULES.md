@@ -1,8 +1,8 @@
 # Writing a module
 
 Status: the public module API, registry, config loader, Context, runner,
-store, drop-ins, and CLI are implemented. The conformance suite and
-`housesitter conformance` CLI command are **Planned (12c)**.
+store, drop-ins, CLI, and conformance suite are implemented. The
+`housesitter conformance` CLI command is **Planned**.
 
 A module is one source of data. It is a Python package that exposes one
 `Module` subclass. It declares its config, secrets, HTTP allow-list,
@@ -17,13 +17,14 @@ drop-ins, envelopes, size budget, identifier policy, storage, and errors.
    source, identifier yes or no). It also states what the module cannot see.
    Jon reviews it before code is written.
 2. **Fixtures:** invented upstream payloads in `tests/fixtures/<id>/`.
-   Include an edge-case fixture (missing fields, nulls, odd units), a
-   hostile fixture (injection-style names, secret-bearing fields that must
-   be dropped), and a large fixture (to exercise truncation).
+   Include typical, empty, and error fixtures, an edge-case fixture
+   (missing fields, nulls, odd units), a hostile fixture (injection-style
+   names, secret-bearing fields that must be dropped), and a large fixture
+   (to exercise truncation).
 3. **Code:** `src/housesitter/modules/<id>/`.
 4. **Tests:** `tests/modules/<id>/`. These pin the normalised output
-   field by field from the fixtures. **Planned (12c):** the conformance suite will
-   pick the module up automatically.
+   field by field from the fixtures. The conformance suite picks up built-in
+   modules automatically; supply its fixture manifest (§4).
 5. **SKILL.md:** Muse-facing guidance, next to the code (§5).
 6. **Review gates** ([REVIEW.md](REVIEW.md)), including the threat and
    privacy gate.
@@ -188,7 +189,8 @@ Every declared identifier value is omitted when `identifiers="none"`,
 including nulls, before type checks. A terminal `x[]` identifier declaration
 removes the whole list, including a null list value. Untrusted strings lose
 control, formatting, and surrogate characters, have whitespace collapsed,
-and are capped at the field's `max_len`.
+and are capped at the field's `max_len`, then stripped again so the cap
+cannot leave an edge space.
 
 `Result(data, source={}, compact=None, paging=None, warnings=(),
 label=None, collected_at=None, save=None)` is what a handler returns.
@@ -361,11 +363,33 @@ Module authors must also follow these rules:
 
 - Import only the module's own package, `housesitter.sdk`, and the stdlib
   (AGENTS rule 9). Do no network I/O except through `ctx.http`.
-  **Planned (12c):** an import-scan lint will flag `socket`, `ssl`, `urllib`,
-  `http.client`, `requests`, `subprocess`, and `ctypes` in `modules/`. It
-  is a guard rail that review backs up, not a sandbox.
+  The import-scan lint (`tests/conformance/test_imports.py`) scans each
+  tested module's Python files. It allows its own package, `housesitter.sdk`
+  (including `from housesitter import sdk`), and stdlib imports except
+  `socket`, `ssl`, `urllib`, the whole `http` package (`import http`
+  alone exposes `http.client` once the core has loaded it), `subprocess`,
+  `ctypes`, `importlib`, `builtins`, `pty`, `multiprocessing`, and
+  `concurrent.futures.process`; it rejects `requests`, other non-stdlib
+  imports, and other Housesitter imports. It also flags the names
+  `__import__` and `__builtins__`, and these attributes on a simple name:
+  `anything.__import__`, `sys.modules`, `os.system`, `os.popen`, any `os`
+  attribute starting with `spawn`, `exec`, `fork`, or `posix_spawn`,
+  `asyncio.create_subprocess_exec`, `asyncio.create_subprocess_shell`, and
+  `io.open`. Modules must not bind or call the name `open`: the lint
+  conservatively flags bare `open(...)` calls even when `open` is a local
+  variable or parameter. These attribute checks use the literal names,
+  without resolving aliases.
+  Relative imports are skipped. It also scans `core/*.py`, `sdk.py`,
+  `__init__.py`, and `__main__.py` for absolute imports of
+  `housesitter.modules.<name>` and `from housesitter.modules import ...`;
+  importing the `housesitter.modules` package itself is allowed.
+  The lint reads source only: indirect access through `getattr` chains,
+  `pkgutil.importlib`, or objects reached through other modules can get
+  past it, as can I/O reached another way. It is a guard rail that review
+  backs up, not a sandbox.
 - Do no file I/O except through `ctx.store` and `ctx.secret`. Never write
-  outside the data dir.
+  outside the data dir. Log only through `ctx.log`, as part of the rule
+  that module I/O goes through Context.
 - Normalise by **allow-listing** upstream fields into documented output
   fields. Never pass through an upstream object.
 - Put units in field names. Use `null` for unknown, never `0` or `""` as a
@@ -380,37 +404,167 @@ Module authors must also follow these rules:
 - Warnings are author-written plain-language facts. They must never
   contain identifiers (MACs or IPs), upstream text, or secrets: the runner
   sanitises and caps warnings but cannot apply the identifier policy
-  inside free text. **Planned (12c):** conformance will check this rule.
+  inside free text. Conformance checks fixture output for these leaks (§4).
 - Never put identifiers, upstream text, or secrets in `Paging.params`: they
   are returned in `more.params` verbatim, outside the identifier policy.
-  Page through the saved id instead. **Planned (12c):** conformance will
-  check this rule.
+  Page through the saved id instead. Conformance checks fixture output
+  for these leaks (§4).
 
 ## 4. Conformance suite
 
-**Planned (12c):** the suite will live in `tests/conformance/` and run
-against every registered module with its fixtures. A module is not mergeable until it passes:
+The suite lives in `tests/conformance/`. It runs against every built-in
+module from `load_registry(include_entry_points=False)` plus
+`conformance_demo`, a test-only module under `tests/`. The demo is
+registered only through `Registry.from_classes` and is never installed.
+Third-party entry-point modules are excluded.
+
+Each module supplies `tests/fixtures/<id>/conformance.json`, with:
+
+- `config`: a module config object; `{port}` in its string values is
+  replaced with the fixture server's port.
+- `secrets`: a mapping of file names to invented string values.
+- `spec`: a non-empty path relative to the repo root.
+- `cases`: a non-empty list with unique, non-empty `name` values. Each
+  case has a `fixture` kind, short `command`, optional `params` object
+  (default `{}`), non-empty `routes`, and `expect`: `"ok"`, `"truncated"`,
+  or `{"error": "<stable error code>"}`. Each route has `method`, an
+  absolute `path`, and integer `status` (100..599), with optional string
+  `body` or fixture-relative `body_file` (not both), and string-valued
+  `headers`. Unknown manifest, case, and route keys are rejected.
+
+Every module must cover `typical`, `empty`, `error`, `large`, and `hostile`
+fixture kinds. See `tests/fixtures/conformance_demo/conformance.json` for
+an example. Only `empty` has a semantic label check: a case expecting
+`ok` must return empty top-level data lists. Other labels are the author's
+declaration; the separate checks below still apply.
+Each case gets its own temporary HOME, config, and secrets directory; a
+snapshot and its paging follow-ups share one. `os.environ` is restored
+after each synchronous run; threads that outlive the command are outside
+output capture, save recording, and environment restoration guarantees.
+Output when a module is first imported is also outside capture.
+Inline route bodies are parsed as JSON for planted-secret
+and string-leaf harvesting, or treated literally if parsing fails; route
+header values are harvested too.
+The harness passes `client_factory` to `run_command`, returning a real
+`http.Client` aimed at a loopback plain HTTP scripted server. The real
+allow-list, framing, and redirect handling run. TLS handshakes, CA loading,
+certificate checks, and real destination identity are not exercised;
+the requested scheme, host, and port are checked against config instead.
+
+Per-run checks cover the first run and every paging follow-up: envelope,
+HTTP requests and client binding, secrets, declared envelope and raw
+fields, sanitisation, and warnings/params (where applicable to success).
+The field and sanitisation walkers treat tuples as lists.
+
+A module is not mergeable until it passes:
 
 - The id and command names are valid. The full names are at most 64
-  characters and don't use reserved prefixes.
-- Generated drop-ins pass the SDK rules (ARCHITECTURE §2.2).
-- Every command, run against the fixture transport, returns a valid
-  envelope. The large and hostile fixtures stay within the 88 KiB budget, as measured by the SDK's formula, with correct `more`
-  paging.
-- Every HTTP call is in `http_allow`. A deliberate off-list call raises
-  `NotAllowed`.
-- The hostile fixture produces sanitised, capped names, and none of its
-  planted secret values appear in output, saved files, or logs.
-- Every field in `data` is declared, and every declared field is in the
-  module spec. The test parses the spec's field tables. The spec format
-  that makes this possible:
+  characters. Every full name starts with `housesitter.`, so the SDK's
+  reserved prefixes (`system.`, `file.`, `device.`, `link.`) cannot match.
+- Generated drop-ins pass independently checked SDK rules
+  (ARCHITECTURE §2.2): names, keys, descriptions, exec, parameters,
+  timeouts, and the 64 KiB per-file cap.
+- Every fixture case returns the expected success, truncation, or error
+  envelope, with the checked schema and metadata or stable error line.
+- Every case and follow-up page fits 88 KiB by `len(json.dumps(text)) - 2`.
+  The harness captures `sys.stdout`/`sys.stderr` and file descriptors 1
+  and 2; any captured output fails. This catches `print()`,
+  `os.write(1/2, …)`, and writes through `sys.__stdout__`/`sys.__stderr__` or stream
+  references saved earlier when they reach those descriptors during the
+  run. Buffered output that reaches them only after return is outside
+  capture, as are import-time output and threads that outlive the command.
+  Core protection is **Planned (#29)**.
+  A module declaring a list (`x[]`) or an opaque `array` field in `data`
+  needs at least one large and one hostile case that truncates; a hostile
+  case for a command that never pages may expect `ok`.
+  The harness follows `more` for at most 50 follow-ups. Checks require
+  every follow-up to be `ok` and replay the previous `more.params` exactly,
+  with offset equal to start plus items kept and the section's remaining
+  count equal to the true count left. The last page must have `more: null`;
+  reaching the cap with more pages left fails. Checks verify the registered
+  target, store-shaped paging id, section, and positive remaining counts,
+  and require the returned item count to match the saved section from
+  its start offset. Each returned item is compared with the saved item at
+  the same position, on the keys the returned item has. This checks order,
+  duplicate counts, and retained values, while allowing compact forms and
+  `identifiers: none` to omit keys, including ids. Differences only in
+  omitted keys cannot be detected.
+- Recorded HTTP requests are re-checked against `http_allow`, and client
+  bindings against config. Probes on recorded GET paths check that
+  off-list paths and write methods, `..`, `%2e%2e`, and an unopted
+  `?query` raise `NotAllowed` without opening a socket. A 302 raises
+  `upstream_unexpected` and is not followed.
+- Strings declared untrusted are checked for sanitisation and caps in
+  every successful case and follow-up page:
+  no control, formatting, or surrogate characters, repeated whitespace,
+  or edge spaces remain. Hostile cases must also hold raw input that
+  sanitising changes. Whether fields are correctly declared untrusted is
+  a gate 3 review responsibility, not proven by the suite.
+- Planted values containing `PLANTED-SECRET` are scanned in the serialised
+  envelope, captured stdout and stderr, saved files and payloads recorded
+  at write time (before retention can hide them), logs, and the error line.
+  Both Python-stream and file-descriptor captures are scanned. Log capture
+  covers records reaching the `housesitter` logger at all standard levels,
+  including formatted messages, exception tracebacks, and stack text.
+  With default settings, all `ctx.log` records reach it: Context creates a
+  `housesitter.<id>` logger parented to `housesitter`. Other loggers,
+  loggers with `propagate=False` (including a modified `ctx.log`), and
+  handlers writing elsewhere are outside this log capture. Modules must
+  log only through `ctx.log` (§3). Scanning matches exact substrings:
+  encoded, reversed, case-changed, or split secrets are not detected.
+- Every field in envelope `data` and `source` is declared. The handler's
+  raw `Result.data`, `source`, and `compact` must also contain no
+  undeclared keys, even if the runner would drop them.
+- Spec tables and declared fields match in both directions, across the
+  module's commands. The spec format that makes this possible:
   - One Markdown table per object, headed by a line containing only the
     object's path in backticks (e.g. `` `data.aps[].radios[]` ``).
   - One field per row, with the field name in the first column in
     backticks.
   - The tables also cover `summary` and `source`.
-- `SKILL.md` exists, has YAML `name` and `description`, and mentions every
-  command.
+  Tables inside triple-backtick code fences are ignored; duplicate object
+  tables are rejected.
+- Warnings and string values in `more.params` (except `id`, `section`,
+  and `offset`) contain no recognised MAC/IP addresses, planted secrets,
+  fixture upstream strings of six or more characters (a single lowercase
+  word is skipped, since author text can share it), or raw declared
+  identifier/untrusted values (matched as whole tokens). `id` must be a
+  store id. Non-string params are counted but not recursively inspected;
+  this check does not prove all free text safe.
+- `SKILL.md` is readable; its first line opens `---` front matter, which
+  must have a closing `---` fence.
+  The checker accepts a small scalar subset for `name` and `description`,
+  not full YAML. Both keys are required; unknown and duplicate keys are
+  rejected. Blank lines and comment lines are skipped; other lines must
+  be unindented `key: value` entries, except block content:
+  - Single- or double-quoted values must end with the opening quote and
+    have non-empty content after trimming; plain-scalar restrictions do
+    not apply inside quotes. YAML escapes are not decoded.
+  - Plain values must be non-empty after trimming and removing comments
+    (`#` at the start or after whitespace). They cannot contain `: `, be
+    `null`, `~`, `true`, `false`, `yes`, or `no` (any case), or start with
+    any of `[`, `{`, `&`, `*`, `!`, `|`, `>`, `#`.
+  - Block markers `>`, `>-`, `>+`, `|`, `|-`, and `|+` need non-empty
+    content in the following indented lines.
+  The body mentions every full command name. The text is scanned for
+  `PLANTED-SECRET` and exact planted values.
+- Every command in the real built-in module registry has an evidence
+  scenario. The demo is excluded because evidence runs the installed CLI
+  (REVIEW.md).
+
+Non-vacuity guards require a non-empty module list including the demo,
+all five fixture kinds, planted secrets, genuinely dirty raw hostile
+text, scanned source files, and positive examined counts where asserted
+by the tests.
+Warnings/params counts are aggregated per module; a module with nothing
+to examine must show that no successful case returned warnings or
+`more`. Evidence may examine zero
+module commands while no built-in data module is installed.
+
+`test_mutations.py` deliberately breaks modules, core behaviour, and
+copies of specs, skills, scenarios, and source files. Each fault must fail
+its check while an unmodified control passes. They demonstrate detection
+of the specific faults tested, not every way to break a rule.
 
 ## 5. SKILL.md for a module
 
@@ -448,5 +602,6 @@ equal the entry-point name, and records it as third-party. A load failure
 stops discovery rather than silently skipping the module.
 
 Third-party handlers get the same `Context` and runner pipeline as built-ins.
-`describe` reports `third_party: true` for them. **Planned (12c):** the
-conformance suite and `housesitter conformance my_sensor` CLI command.
+`describe` reports `third_party: true` for them. The repo's conformance
+suite excludes third-party entry points. **Planned:** conformance for
+third-party modules through `housesitter conformance my_sensor`.

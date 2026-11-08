@@ -1,0 +1,7 @@
+{
+  "firmware": "hub-fw 1.2.3",
+  "uptime_s": 86400,
+  "sensor_count": 4,
+  "api_version": "1.2.3",
+  "x_passphrase": "PLANTED-SECRET-status-1"
+}

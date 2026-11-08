@@ -61,8 +61,8 @@ def sanitize_text(value: Any, max_len: int = MAX_TEXT_LEN) -> Any:
     whitespace to single spaces (so newlines separate words instead of
     joining them), drop every character in Unicode categories ``Cc``,
     ``Cf``, and ``Cs`` (control, bidi overrides, zero-width characters,
-    NUL, and lone surrogates), strip the ends, and cap at ``max_len``
-    characters.
+    NUL, and lone surrogates), collapse any whitespace run that left,
+    strip the ends, and cap at ``max_len`` characters.
 
     The result is a *value* only: never use it as a JSON object key.
     Groupings that need a name use lists of ``{id, name, ...}`` objects.
@@ -73,7 +73,11 @@ def sanitize_text(value: Any, max_len: int = MAX_TEXT_LEN) -> Any:
     cleaned = "".join(
         char for char in collapsed if unicodedata.category(char) not in ("Cc", "Cf", "Cs")
     )
-    return cleaned.strip()[:max_len]
+    # Collapse again: a stripped character between two spaces (e.g.
+    # "a ‮ b") would otherwise leave a run of whitespace. Strip again
+    # after capping: a cut mid-run ("a b" at 2 -> "a ") must not leak
+    # an edge space.
+    return _WS_RE.sub(" ", cleaned).strip()[:max_len].strip()
 
 
 def sanitize_label(value: Any) -> Any:

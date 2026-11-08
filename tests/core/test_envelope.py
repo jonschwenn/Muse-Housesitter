@@ -149,3 +149,29 @@ def test_sanitiser_strips_lone_surrogates():
     assert sanitize_text("\udc00") == ""
     out = sanitize_text("a\ud800b")
     assert "Cs" not in {unicodedata.category(char) for char in out}
+
+
+def test_sanitiser_collapses_whitespace_left_by_stripped_characters():
+    # Regression (found by the 12c hostile conformance check): a bidi
+    # override or zero-width character between two spaces used to leave
+    # a double space, because whitespace was collapsed before stripping.
+    assert sanitize_text("Room ‮ sneaky") == "Room sneaky"
+    assert sanitize_text("a ​​ b") == "a b"
+    assert sanitize_text("​ padded ⁦") == "padded"
+
+
+def test_sanitiser_cap_never_leaves_edge_space():
+    # Capping ("a b" at 2 -> "a ") must strip again after the cut.
+    assert sanitize_text("a b", 2) == "a"
+    assert sanitize_text("ab cd", 3) == "ab"
+    capped = sanitize_text("word " * 50, 64)
+    assert capped == capped.strip()
+    assert len(capped) <= 64
+
+
+def test_sanitiser_label_cap_never_leaves_edge_space():
+    # "a " * 500 lands the 200-character cap on whitespace: without the
+    # post-cap strip the result would end with a space.
+    capped = sanitize_label("a " * 500)
+    assert capped == capped.strip()
+    assert len(capped) <= 200

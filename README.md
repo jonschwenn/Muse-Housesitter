@@ -19,8 +19,8 @@ recommendations, and you decide what to change.
 
 > **Status: early.** The core runs commands: runner, store, drop-ins, and
 > CLI (`invoke`, `list`, `describe`, `doctor`, `dropins`, `install-commands`,
-> `config-check`). No data module or conformance suite yet. See
-> [the architecture](docs/ARCHITECTURE.md) and
+> `config-check`). The conformance suite exists; no installed data module
+> yet. See [the architecture](docs/ARCHITECTURE.md) and
 > [the first module's spec](docs/modules/unifi_wifi.md).
 
 `housesitter describe` lists modules and commands; each command's required

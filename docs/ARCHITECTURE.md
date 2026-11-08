@@ -1,10 +1,11 @@
 # Architecture
 
 Status: the core API, registry, config, Context, HTTP client, secrets,
-store, runner, envelopes, drop-ins, and CLI are implemented. No data module
-is implemented yet. The conformance suite and `housesitter conformance`
-CLI command are **Planned (12c)**. Module examples below illustrate the
-contract; they are not installed commands.
+store, runner, envelopes, drop-ins, and CLI are implemented. No installed
+data module is implemented yet. The conformance suite is implemented in
+`tests/conformance/`. The `housesitter conformance` CLI command is
+**Planned**. Module examples below illustrate the contract; they are not
+installed commands.
 
 ## 1. The kernel of purpose
 
@@ -68,7 +69,7 @@ These come from the SDK's `commands.py`, `executor.py`, and README, as of
 
 | Component | Responsibility |
 |-----------|----------------|
-| `core/cli.py` | Implements `--version`, `invoke`, `list`, `describe`, `doctor`, `dropins`, `install-commands`, and `config-check` (§3.1). Never prints secrets. `conformance` is **Planned (12c)**. |
+| `core/cli.py` | Implements `--version`, `invoke`, `list`, `describe`, `doctor`, `dropins`, `install-commands`, and `config-check` (§3.1). Keeps secrets out of the CLI's own output; conformance checks output captured during command execution (§4), but core protection is **Planned (#29)**. `conformance` is **Planned**. |
 | `core/registry.py` | Discovers built-in subpackages of `housesitter.modules`, each defining exactly one `Module` subclass with an id matching the package name. Third-party entry points in the `housesitter.modules` group must load a `Module` subclass whose id equals the entry-point name. Validates declarations (MODULES §3), records third-party status, sorts modules by id, and builds a read-only command table. The id `housesitter` is reserved for core commands. Duplicate ids or command names, invalid declarations, or any import/load failure stop the registry. |
 | `core/config.py` | Loads `~/.config/housesitter/config.json` (or `$HOUSESITTER_CONFIG`), capped at 1 MiB. A missing file means defaults (`identifiers="full"`, retention 500) with no modules enabled. Rejects unknown top-level/core keys, unknown modules, and unknown keys in enabled module sections; validates values and applies defaults using each module's `Setting` declarations. A present module section defaults to enabled; disabled sections check only `enabled` and `retention`, ignoring other keys and values. Returns read-only config; the secrets directory is `<config dir>/secrets`. Errors name the key or file and problem, never the offending value. |
 | `core/context.py` | Implements `sdk.Context`: deeply read-only supplied config, secret reading, logging that redacts secrets read through the Context, UTC clock, remaining monotonic deadline, and allow-listed HTTP sessions. Passes the deadline on every request, maps 401/403 to `upstream_auth`, and records insecure-TLS warnings. The runner injects the module's real store; without one, using store methods raises `NotImplementedError`. |
@@ -244,7 +245,18 @@ matches the dotted command-name syntax and is at most 64 characters.
 
 ## 4. Output envelope
 
-Every command's stdout is exactly one JSON object:
+The command output contract is exactly one JSON object on stdout.
+Conformance fails output captured during command execution through
+`sys.stdout`/`sys.stderr` or file descriptors 1 and 2. This covers `print()`,
+`os.write(1/2, …)`, and writes through `sys.__stdout__`/`sys.__stderr__` or
+earlier stream references when they reach those descriptors during the run.
+Both streams are scanned for planted values. Import-time output, output
+from threads that outlive the command, and buffered output reaching the
+descriptors only after return are outside capture (MODULES §4).
+Core protection against stray handler output is **Planned (#29)**; the core
+does not yet guard those streams.
+
+Example envelope:
 
 ```json
 {
@@ -293,9 +305,9 @@ Stable error codes: `config_invalid`, `secret_unreadable`, `upstream_auth`,
 
 - The envelope is serialised compactly and measured with the SDK's own
   formula, `len(json.dumps(text)) - 2`. That measure must be ≤ **88 KiB**,
-  leaving headroom under the SDK's 96 KiB cut. **Planned (12c):** conformance will assert
-  the measure on the large and hostile fixtures, the latter heavy in
-  non-ASCII.
+  leaving headroom under the SDK's 96 KiB cut. Conformance measures the
+  serialised envelope on every case and follow-up page. Separate checks
+  reject captured stray output within the limits in §4.
 - If full data does not fit, the runner tries `Result.compact`. A fitting
   compact form still has `truncated: false` and `more: null`.
 - If that does not fit, it cuts top-level lists from the end in
@@ -393,7 +405,8 @@ means that what goes into an envelope leaves the house.
   - Unicode categories `Cc`, `Cf`, and `Cs` (control, bidi,
     zero-width, and lone surrogates) are stripped.
   - Whitespace is collapsed.
-  - Values are capped at 64 characters.
+  - Values are capped at 64 characters, then stripped again so the cap
+    cannot leave an edge space.
   - Untrusted text is **never used as a JSON object key**. Groupings are
     lists of `{id, name, count}`, so names that collide or are null can't
     merge or spoof entries.
@@ -408,9 +421,9 @@ means that what goes into an envelope leaves the house.
 |--------|--------|
 | Muse can read the UniFi password file, because it runs commands as the same account. | Accepted, and stated plainly. File modes protect the secret from *other* local users and from accidental leaks. The real control is a **View Only** UniFi account (or API key, D10) that is unique to Housesitter. |
 | The SDK's run-as account has sudo, so Muse has root. | The owner decides this. It is outside Housesitter's control. README explains the trade-off, and `doctor` reports (as information, not a failure) whether the account belongs to a sudo-related group. |
-| The allow-list is bypassed by an HTTP redirect, or by a path trick (`stat/device-basic`, `%2e%2e`, `?`). | No redirects: a 3xx raises `upstream_unexpected` with its numeric status (D15). `fullmatch` on the normalised path. `%` and `..` are always refused, even under a permissive pattern; `?...` only when the entry sets `allow_query` (D15). **Planned (12c):** conformance will test each case. |
+| The allow-list is bypassed by an HTTP redirect, or by a path trick (`stat/device-basic`, `%2e%2e`, `?`). | No redirects: a 3xx raises `upstream_unexpected` with its numeric status (D15). `fullmatch` on the normalised path. `%` and `..` are always refused, even under a permissive pattern; `?...` only when the entry sets `allow_query` (D15). Conformance tests off-list paths, traversal, unopted queries, and refusal to follow a 302. |
 | A slow upstream drips bytes to defeat the deadline. | The deadline is a hard total bound: shrinking per-stage socket timeouts plus a watchdog that shuts the live socket at the deadline, so any drip fails as `timeout` within the deadline plus a small margin (§3). |
-| A module writes to upstream. | Prevented structurally by the HTTP allow-list. **Planned (12c):** conformance will test this, and the module's threat review checks it. |
+| A module writes to upstream. | The core HTTP allow-list structurally limits methods and paths; conformance tests refusal of off-list write methods before a socket opens. Whether an allowed endpoint is truly read-only is a threat-review responsibility. Direct stdlib I/O is covered only by the import-lint guard rail (MODULES §3). |
 | Upstream returns secrets, e.g. WLAN passphrases in `rest/wlanconf` or `x_*` keys in device records. | Normalisation is an **allow-list of fields**, never "copy and delete." Optional raw dumps strip `x_*` keys and known secret fields, and are off by default. |
 | Prompt injection via a device name like `"ignore previous instructions…"`. | Names are typed data fields, sanitised and capped. SKILL.md tells Muse they are untrusted. Names never appear in `description` strings. |
 | Self-signed controller certificate. | Pin the SHA-256 fingerprint (preferred) or a CA file. `insecure: true` works, but adds a warning to every envelope. |
