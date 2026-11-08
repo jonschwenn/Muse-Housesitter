@@ -1,6 +1,6 @@
 # Review gates
 
-A change is **done** only after it passes every gate below, in order.
+A change is **done** only after it passes every required gate below, in order.
 Record the result of each gate in the PR description, with one line per
 finding: `fixed`, `won't fix: <reason>`, or `not a problem: <reason>`.
 Gates 2–4 are adversarial. The reviewer's job is to find what is wrong, not
@@ -12,6 +12,7 @@ to confirm that the author is right.
 | 2 | Independent agent review | a fresh agent, not the author | every change to code |
 | 3 | Threat and privacy review | a fresh agent or Jon | new module; any change to http allow-lists, secrets, identifiers, envelope, storage, drop-ins, or install |
 | 4 | Spec-vs-code review | a fresh agent | every change that touches code or docs |
+| — | Deep red-team review | a fresh agent from another model family | optional; considered for the changes listed in its section |
 | 5 | Human sign-off | Jon | every merge to `main` |
 
 ## Evidence: before and after (every PR)
@@ -380,6 +381,40 @@ true**.
 
 This gate exists because the project's first handoff claimed CI, a browser
 test, and assets that weren't there.
+
+## Optional: deep red-team review
+
+Consider this step for a new module; any change to http allow-lists,
+secrets, identifiers, envelope, storage, drop-ins, install, CI, or
+`ci-guard`. When one of these changes was also reviewed in gates 2–3 by
+the model family that wrote it, that is a strong reason to run this review
+rather than skip it. Same-family review alone does not put a low-risk
+change in scope.
+
+Use a fresh agent from a model family other than the author's: Codex
+running an astra-level GPT model at `xhigh` effort, or `ultra` for core,
+`ci-guard`, or install changes. The review is read-only: the reviewer edits
+nothing. Give it the diff, the spec, and the findings already handled, so
+it does not re-report them.
+
+Before a review covering a lot of code or using a lot of tokens (such as a
+large diff or any `ultra` run), tell Jon it is starting and roughly why it
+is big. This is a heads-up, not an approval gate; do not wait for approval.
+
+Handle findings like any gate: `fixed`, `won't fix: <reason>`, or
+`not a problem: <reason>`. For bugs, write a failing test first (AGENTS.md,
+"Regression first").
+
+Every PR in scope states exactly one line in its description:
+
+- `Deep review: ran (<model>, <effort>), N findings`
+- `Deep review: skipped: <reason>`
+
+Out-of-scope PRs omit the line. Nothing in CI checks or enforces the
+`Deep review:` line. The author records it, and Jon checks it at sign-off.
+
+This review is optional. It does not replace gates 2–4, and it is not
+required for doc-only or other low-risk changes.
 
 ## Gate 5: human sign-off
 

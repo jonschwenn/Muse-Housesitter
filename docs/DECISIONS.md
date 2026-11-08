@@ -415,3 +415,22 @@ handoff's "license not chosen; don't publish."
   - Refusing the whole publish on bad test data, like the UI artifact.
   - Taking pass/fail from the XML instead of the API: PR-produced counts
     cannot establish whether the test job passed.
+
+### D22. Optional deep red-team review on a different model family (2026-11-08, Jon)
+- **Decision:** explicitly consider an optional deep review on a different
+  model family for high-risk changes and record whether it ran or was
+  skipped: a new module, or any change to http allow-lists, secrets,
+  identifiers, envelope, storage, drop-ins, install, CI, or `ci-guard`.
+  Same-family review in gates 2–3 is a strong reason to run it for those
+  changes, not a trigger for low-risk changes. See REVIEW.md, "Optional:
+  deep red-team review."
+- **Why:** a model family reviewing its own code shares its blind spots.
+  On issue #13 (`unifi_wifi`), Muse Spark wrote the code and did both
+  adversarial reviews (gates 2 and 3). Each ran in a fresh session, but all
+  used the same model family. Claude and Codex found the later bugs, not
+  Spark's re-check. The project now uses an extra deep review on a different
+  model family for high-risk changes; this makes considering it deliberate.
+- **Rejected:** making it mandatory for every change (too costly for
+  doc-only PRs); leaving it informal (then it never gets considered).
+- **Status:** Jon calls this a two-way door: how we work for now, reversible
+  if it proves too heavy. Revisit with a new entry that supersedes this one.
