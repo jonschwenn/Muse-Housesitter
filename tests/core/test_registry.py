@@ -283,14 +283,30 @@ class TestEntryPoints:
     def test_load_registry_marks_third_party(self, monkeypatch, alpha):
         patch_dict_api(monkeypatch, [FakeEntryPoint("alpha_sensor", alpha)])
         registry = load_registry()
-        assert [entry.id for entry in registry.modules] == ["alpha_sensor"]
         assert registry.get_module("alpha_sensor").third_party is True
+        for entry in registry.modules:
+            if entry.id != "alpha_sensor":
+                assert entry.third_party is False
 
     def test_load_registry_empty(self, monkeypatch):
         patch_dict_api(monkeypatch, [])
         registry = load_registry()
-        assert registry.modules == ()
-        assert dict(registry.commands) == {}
+        assert all(entry.third_party is False for entry in registry.modules)
+
+    def test_load_registry_registers_unifi_wifi_builtin(self, monkeypatch):
+        # Positive pin: with no entry points, the built-in unifi_wifi
+        # module is present, marked built-in, with exactly its commands.
+        patch_dict_api(monkeypatch, [])
+        registry = load_registry()
+        entry = registry.get_module("unifi_wifi")
+        assert entry.third_party is False
+        assert sorted(
+            name for name in registry.commands
+            if name.startswith("housesitter.unifi_wifi.")
+        ) == [
+            "housesitter.unifi_wifi.get",
+            "housesitter.unifi_wifi.snapshot",
+        ]
 
 
 class FakeModuleInfo:

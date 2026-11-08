@@ -1,0 +1,193 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "mac": "02:00:00:00:00:01",
+      "name": "Living Room",
+      "model": "U7-Pro",
+      "version": "7.0.23",
+      "type": "uap",
+      "state": 1,
+      "uptime": 86400,
+      "num_sta": 5,
+      "satisfaction": 95,
+      "uplink": {
+        "type": "wire",
+        "speed": 1000
+      },
+      "radio_table": [
+        {
+          "name": "wifi0",
+          "radio": "ng",
+          "channel": "auto",
+          "ht": "40",
+          "tx_power_mode": "auto"
+        },
+        {
+          "name": "wifi1",
+          "radio": "na",
+          "channel": "36",
+          "ht": "80",
+          "tx_power_mode": "high"
+        },
+        {
+          "name": "wifi2",
+          "radio": "6e",
+          "channel": "21",
+          "ht": "160",
+          "tx_power_mode": "auto"
+        }
+      ],
+      "radio_table_stats": [
+        {
+          "name": "wifi0",
+          "channel": 6,
+          "tx_power": 20,
+          "cu_total": 35,
+          "cu_self_rx": 5,
+          "cu_self_tx": 8,
+          "num_sta": 5,
+          "satisfaction": 90,
+          "tx_packets": 10000,
+          "tx_retries": 500
+        },
+        {
+          "name": "wifi1",
+          "channel": 36,
+          "tx_power": 23,
+          "cu_total": 25,
+          "cu_self_rx": 4,
+          "cu_self_tx": 6,
+          "num_sta": 4,
+          "satisfaction": 95,
+          "tx_packets": 20000,
+          "tx_retries": 300
+        },
+        {
+          "name": "wifi2",
+          "channel": 21,
+          "tx_power": 21,
+          "cu_total": 10,
+          "cu_self_rx": 1,
+          "cu_self_tx": 2,
+          "num_sta": 2,
+          "satisfaction": 98,
+          "tx_packets": 5000,
+          "tx_retries": 50
+        }
+      ]
+    },
+    {
+      "mac": "02:00:00:00:00:02",
+      "name": "Office",
+      "model": "U6-Lite",
+      "version": "6.5.12",
+      "type": "uap",
+      "state": 1,
+      "uptime": 172800,
+      "num_sta": 4,
+      "satisfaction": 88,
+      "uplink": {
+        "type": "wire",
+        "speed": 1000
+      },
+      "radio_table": [
+        {
+          "name": "wifi0",
+          "radio": "ng",
+          "channel": "auto",
+          "ht": "20",
+          "tx_power_mode": "low"
+        },
+        {
+          "name": "wifi1",
+          "radio": "na",
+          "channel": "149",
+          "ht": "80",
+          "tx_power_mode": "medium"
+        }
+      ],
+      "radio_table_stats": [
+        {
+          "name": "wifi0",
+          "channel": 11,
+          "tx_power": 17,
+          "cu_total": 45,
+          "cu_self_rx": 6,
+          "cu_self_tx": 9,
+          "num_sta": 4,
+          "satisfaction": 85,
+          "tx_packets": 8000,
+          "tx_retries": 900
+        },
+        {
+          "name": "wifi1",
+          "channel": 149,
+          "tx_power": 20,
+          "cu_total": 30,
+          "cu_self_rx": 5,
+          "cu_self_tx": 7,
+          "num_sta": 3,
+          "satisfaction": 92,
+          "tx_packets": 15000,
+          "tx_retries": 200
+        }
+      ]
+    },
+    {
+      "mac": "02:00:00:00:00:03",
+      "name": "Garage",
+      "model": "U6-Mesh",
+      "version": "6.5.12",
+      "type": "uap",
+      "state": 1,
+      "uptime": 3600,
+      "num_sta": 3,
+      "satisfaction": 75,
+      "uplink": {
+        "type": "wireless",
+        "speed": 867
+      },
+      "radio_table": [
+        {
+          "name": "wifi0",
+          "radio": "ng",
+          "channel": "auto",
+          "ht": "20",
+          "tx_power_mode": "auto"
+        }
+      ],
+      "radio_table_stats": [
+        {
+          "name": "wifi0",
+          "channel": 1,
+          "tx_power": 18,
+          "cu_total": 55,
+          "cu_self_rx": 7,
+          "cu_self_tx": 10,
+          "num_sta": 3,
+          "satisfaction": 75,
+          "tx_packets": 3000,
+          "tx_retries": 600
+        }
+      ]
+    },
+    {
+      "mac": "02:00:00:00:00:09",
+      "name": "Main Switch",
+      "model": "USW-24",
+      "version": "6.5.12",
+      "type": "usw",
+      "state": 1,
+      "uptime": 200000,
+      "num_sta": 9,
+      "satisfaction": 100,
+      "uplink": {
+        "type": "wire",
+        "speed": 10000
+      }
+    }
+  ]
+}
