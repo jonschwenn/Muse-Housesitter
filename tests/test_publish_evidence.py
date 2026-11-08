@@ -648,3 +648,520 @@ def test_pushed_files_equal_pictured_files_over_mixed_manifest(tmp_path):
         p.name for p in (out / "files").iterdir() if p.name != "ui_manifest.json"
     )
     assert files == sorted(_img_names(full))
+
+
+
+# Test results in the comment (issue #11) --------------------------------------
+#
+# The new --test-results-dir / --jobs-json args are optional: without them the
+# comment is byte-for-byte what it was. With them, a "**Tests:**" line is
+# inserted right after the evidence heading. Bad results data degrades only
+# the test line (option A); bad UI artifacts still refuse the whole publish.
+
+def _load_test_results():
+    spec = importlib.util.spec_from_file_location(
+        "test_results", ROOT / "scripts" / "test_results.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["test_results"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_test_results = _load_test_results()
+
+
+def _junit(version="3.9.25", tests=10, failures=0, errors=0, skipped=0,
+           failing=()):
+    cases = []
+    for i in range(tests):
+        name = f"test_case_{i:02d}"
+        if name in failing:
+            cases.append(
+                f'<testcase classname="tests/test_sample.py" name="{name}">'
+                "<failure>boom</failure></testcase>"
+            )
+        else:
+            cases.append(
+                f'<testcase classname="tests/test_sample.py" name="{name}"/>'
+            )
+    return (
+        f'<?xml version="1.0"?><testsuite name="python-{version}" '
+        f'tests="{tests}" failures="{failures}" errors="{errors}" '
+        f'skipped="{skipped}">{"".join(cases)}</testsuite>'
+    ).encode()
+
+
+def _results_tree(tmp_path, versions):
+    root = tmp_path / "test-results"
+    for short, payload in versions.items():
+        sub = root / f"test-results-{short}"
+        sub.mkdir(parents=True)
+        (sub / "junit.xml").write_bytes(payload)
+    return root
+
+
+def _jobs_doc(*jobs):
+    return {"total_count": len(jobs), "jobs": list(jobs)}
+
+
+def _job(name, conclusion):
+    return {"name": name, "conclusion": conclusion}
+
+
+def _render_with_results(tmp_path, artifact, results_dir=None, jobs=None):
+    out = tmp_path / "out"
+    argv = [
+        "render",
+        "--artifact-dir", str(artifact),
+        "--out-dir", str(out),
+        "--repo", REPO,
+        "--pr", str(PR),
+        "--head-sha", HEAD_SHA,
+    ]
+    if results_dir is not None:
+        argv += ["--test-results-dir", str(results_dir)]
+    jobs_path = tmp_path / "jobs.json"
+    if jobs is not None:
+        jobs_path.write_text(json.dumps(jobs))
+        argv += ["--jobs-json", str(jobs_path)]
+    rc = publish_evidence.main(argv)
+    return rc, out
+
+
+def test_render_without_result_args_is_unchanged(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    results = _results_tree(tmp_path, {"3.9": _junit()})
+    assert results.exists()
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    text = (out / "comment.md").read_text()
+    assert text == TEXT
+    assert "**Tests:**" not in text
+
+
+def test_render_with_results_for_two_versions(tmp_path):
+    artifact = _artifact(tmp_path)
+    results = _results_tree(
+        tmp_path, {"3.9": _junit("3.9.25"), "3.x": _junit("3.14.1")}
+    )
+    jobs = _jobs_doc(_job("test (3.9)", "success"), _job("test (3.x)", "success"))
+    rc, out = _render_with_results(tmp_path, artifact, results, jobs)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "**Tests:** 10 passed on 3.9.25 and 3.14.1." in body
+    lines = body.split("\n")
+    heading = lines.index("## Before / after evidence")
+    assert lines[heading + 1].startswith("**Tests:**")
+
+
+def test_render_with_failing_version(tmp_path):
+    artifact = _artifact(tmp_path)
+    results = _results_tree(
+        tmp_path,
+        {"3.x": _junit("3.14.1", tests=3, failures=1,
+                       failing=("test_case_00",))},
+    )
+    jobs = _jobs_doc(_job("test (3.x)", "failure"))
+    rc, out = _render_with_results(tmp_path, artifact, results, jobs)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "**Tests:** **failed** on 3.14.1" in body
+    assert "`tests/test_sample.py::test_case_00`" in body
+
+
+def test_render_with_missing_results_dir_degrades_line(tmp_path):
+    artifact = _artifact(tmp_path)
+    jobs = _jobs_doc(_job("test (3.9)", "success"))
+    rc, out = _render_with_results(
+        tmp_path, artifact, tmp_path / "no-such-dir", jobs
+    )
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "no valid results file" in body
+
+
+def test_render_with_missing_jobs_json_is_unavailable(tmp_path):
+    artifact = _artifact(tmp_path)
+    results = _results_tree(tmp_path, {"3.9": _junit()})
+    out = tmp_path / "out"
+    rc = publish_evidence.main(
+        [
+            "render",
+            "--artifact-dir", str(artifact),
+            "--out-dir", str(out),
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+            "--test-results-dir", str(results),
+            "--jobs-json", str(tmp_path / "no-jobs.json"),
+        ]
+    )
+    assert rc == 0
+    assert "**Tests:** results unavailable." in (out / "comment.md").read_text()
+
+
+def test_render_with_one_bad_results_entry_degrades_only_it(tmp_path):
+    artifact = _artifact(tmp_path)
+    root = tmp_path / "test-results"
+    good = root / "test-results-3.9"
+    good.mkdir(parents=True)
+    (good / "junit.xml").write_bytes(_junit("3.9.25"))
+    bad = root / "test-results-3.x"
+    bad.mkdir(parents=True)
+    (bad / "junit.xml").write_bytes(_junit("3.14.1"))
+    (bad / "extra.txt").write_text("hostile extra entry\n")
+    jobs = _jobs_doc(_job("test (3.9)", "success"), _job("test (3.x)", "success"))
+    rc, out = _render_with_results(tmp_path, artifact, root, jobs)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "10 passed on 3.9.25" in body
+    assert "no valid results file" in body
+
+
+def test_render_with_symlinked_junit_degrades_only_it(tmp_path):
+    artifact = _artifact(tmp_path)
+    root = tmp_path / "test-results"
+    good = root / "test-results-3.9"
+    good.mkdir(parents=True)
+    (good / "junit.xml").write_bytes(_junit("3.9.25"))
+    bad = root / "test-results-3.x"
+    bad.mkdir(parents=True)
+    (bad / "real.xml").write_bytes(_junit("3.14.1"))
+    (bad / "junit.xml").symlink_to(bad / "real.xml")
+    jobs = _jobs_doc(_job("test (3.9)", "success"), _job("test (3.x)", "success"))
+    rc, out = _render_with_results(tmp_path, artifact, root, jobs)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "10 passed on 3.9.25" in body
+    assert "no valid results file" in body
+
+
+def test_render_with_bad_artifact_dir_name_degrades_line(tmp_path):
+    artifact = _artifact(tmp_path)
+    root = tmp_path / "test-results"
+    evil = root / "test-results-evil"
+    evil.mkdir(parents=True)
+    (evil / "junit.xml").write_bytes(_junit("3.9.25"))
+    jobs = _jobs_doc(_job("test (3.9)", "success"))
+    rc, out = _render_with_results(tmp_path, artifact, root, jobs)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "no valid results file" in body
+
+
+def test_render_with_too_many_result_dirs_degrades_line(tmp_path):
+    artifact = _artifact(tmp_path)
+    root = _results_tree(
+        tmp_path,
+        {
+            "3.9": _junit("3.9.25"),
+            "3.10": _junit("3.10.12"),
+            "3.11": _junit("3.11.9"),
+            "3.12": _junit("3.12.4"),
+            "3.13": _junit("3.13.0"),
+        },
+    )
+    jobs = _jobs_doc(_job("test (3.9)", "success"))
+    rc, out = _render_with_results(tmp_path, artifact, root, jobs)
+    assert rc == 0
+    assert "no valid results file" in (out / "comment.md").read_text()
+
+
+@pytest.mark.parametrize(
+    "jobs",
+    [
+        {"jobs": [{"name": "test (3.9)"}]},
+        {"jobs": [{"name": "test (3.9)", "conclusion": "exploded"}]},
+        {"jobs": "not-a-list"},
+        {"no-jobs": []},
+        ["a-list-not-a-dict"],
+    ],
+)
+def test_render_with_bad_jobs_json_is_unavailable(tmp_path, jobs):
+    artifact = _artifact(tmp_path)
+    results = _results_tree(tmp_path, {"3.9": _junit()})
+    rc, out = _render_with_results(tmp_path, artifact, results, jobs)
+    assert rc == 0
+    assert "**Tests:** results unavailable." in (out / "comment.md").read_text()
+
+
+def test_render_with_malformed_jobs_json_is_unavailable(tmp_path):
+    artifact = _artifact(tmp_path)
+    results = _results_tree(tmp_path, {"3.9": _junit()})
+    out = tmp_path / "out"
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text("{not json")
+    rc = publish_evidence.main(
+        [
+            "render",
+            "--artifact-dir", str(artifact),
+            "--out-dir", str(out),
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+            "--test-results-dir", str(results),
+            "--jobs-json", str(jobs_path),
+        ]
+    )
+    assert rc == 0
+    assert "**Tests:** results unavailable." in (out / "comment.md").read_text()
+
+
+def test_render_with_results_still_checks_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", 10)
+    artifact = _artifact(tmp_path)
+    results = _results_tree(tmp_path, {"3.9": _junit()})
+    jobs = _jobs_doc(_job("test (3.9)", "success"))
+    rc, _ = _render_with_results(tmp_path, artifact, results, jobs)
+    assert rc == 1
+
+
+def test_render_with_hostile_results_never_echoed(tmp_path):
+    artifact = _artifact(tmp_path)
+    root = tmp_path / "test-results"
+    bad = root / "test-results-3.9"
+    bad.mkdir(parents=True)
+    # Assembled at runtime so the literal never appears in the repo.
+    payload = (
+        b'<?xml version="1.0"?><testsuite name="python-3.9.25" '
+        b'tests="1" failures="1" errors="0" skipped="0">'
+        b'<testcase classname="tests/test_a.py" name="test_one">'
+        b"<failure>hunter2" + b"hunter2 twelve</failure></testcase></testsuite>"
+    )
+    (bad / "junit.xml").write_bytes(b"<!DOCTYPE x>" + payload)
+    jobs = _jobs_doc(_job("test (3.9)", "failure"))
+    rc, out = _render_with_results(tmp_path, artifact, root, jobs)
+    assert rc == 0
+    text = (out / "comment.md").read_text()
+    assert "hunter2" not in text
+
+
+# Workflow wiring (issue #11) ----------------------------------------------------
+
+
+def test_publisher_fetches_test_results_and_jobs():
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    assert "test-results-*" in workflow
+    assert "--test-results-dir" in workflow
+    assert "--jobs-json" in workflow
+    assert "attempts" in workflow
+    assert "run_attempt" in workflow
+    assert "jobs.json" in workflow
+
+
+def test_ci_produces_test_results():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "junit.xml" in workflow
+    assert "test-results-" in workflow
+    assert "test_results.py summary" in workflow
+    assert "tests/test_test_results.py" in workflow
+    assert "junit_suite_name" in workflow
+
+
+# Regression tests for the adversarial review ----------------------------------
+#
+# A near-cap evidence.md plus a Tests line must still publish (rc 0) within
+# the comment budget: the Tests line shrinks (names dropped, counts kept)
+# and then falls back to a fixed short line, instead of the whole publish
+# either failing or posting an over-budget comment. Only evidence that is
+# already over budget on its own still refuses (exit 1).
+
+
+def _padded_evidence(size):
+    assert size > len(TEXT.encode())
+    return TEXT + "x" * (size - len(TEXT.encode()))
+
+
+def _text_only_artifact(tmp_path, text):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "evidence.md").write_text(text)
+    return artifact
+
+
+def _max_names_xml(version="3.14.1", count=20):
+    cases = []
+    for i in range(count):
+        name = f"test_case_{i:02d}_" + "n" * 165
+        assert len(f"tests/test_sample.py::{name}") == 200
+        cases.append(
+            f'<testcase classname="tests/test_sample.py" name="{name}">'
+            "<failure>boom</failure></testcase>"
+        )
+    return (
+        f'<?xml version="1.0"?><testsuite name="python-{version}" '
+        f'tests="{count}" failures="{count}" errors="0" skipped="0">'
+        + "".join(cases) + "</testsuite>"
+    ).encode()
+
+
+def test_render_text_only_near_cap_tests_line_stays_in_budget(tmp_path):
+    cap = pr_evidence.MAX_COMMENT_BYTES
+    artifact = _text_only_artifact(tmp_path, _padded_evidence(cap - 100))
+    results = _results_tree(
+        tmp_path,
+        {"3.14": _junit("3.14.1", tests=3, failures=2,
+                        failing=("test_case_00", "test_case_01"))},
+    )
+    jobs = _jobs_doc(_job("test (3.14)", "failure"))
+    rc, out = _render_with_results(tmp_path, artifact, results, jobs)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert len(body.encode()) <= cap
+    assert "(2 failing)" in body
+    assert "test_case_00" not in body
+
+
+def test_render_text_only_near_cap_many_long_names_stays_in_budget(tmp_path):
+    cap = pr_evidence.MAX_COMMENT_BYTES
+    artifact = _text_only_artifact(tmp_path, _padded_evidence(cap - 100))
+    results = _results_tree(tmp_path, {"3.14": _max_names_xml()})
+    jobs = _jobs_doc(_job("test (3.14)", "failure"))
+    rc, out = _render_with_results(tmp_path, artifact, results, jobs)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert len(body.encode()) <= cap
+    assert "(20 failing)" in body
+    assert "n" * 165 not in body
+
+
+def test_render_ui_path_near_cap_tests_line_stays_in_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", 3000)
+    artifact = _artifact(tmp_path)
+    results = _results_tree(tmp_path, {"3.9": _max_names_xml("3.9.25")})
+    jobs = _jobs_doc(_job("test (3.9)", "failure"))
+    rc, out = _render_with_results(tmp_path, artifact, results, jobs)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert len(body.encode()) <= 3000
+    assert "## Web UI" in body
+    assert "(20 failing)" in body
+    assert "n" * 165 not in body
+
+
+@pytest.mark.parametrize("order", [["success", "failure"], ["failure", "success"]])
+def test_validate_jobs_duplicate_version_keeps_worst(tmp_path, order):
+    # A PR controls its own ci.yml and could add a same-named job; the worst
+    # conclusion must win so a failure can never be masked, either order.
+    docs = [_jobs_doc(*[_job("test (3.9)", conclusion) for conclusion in order])]
+    assert publish_evidence.validate_jobs(docs) == [
+        {"version": "3.9", "conclusion": "failure"}
+    ]
+
+
+def test_test_results_module_is_stdlib_only():
+    import ast
+
+    source = (ROOT / "scripts" / "test_results.py").read_text()
+    tree = ast.parse(source)
+    stdlib = {
+        "argparse", "re", "xml.etree.ElementTree", "pathlib",
+        "xml", "sys", "__future__",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name.split(".")[0] in {
+                    s.split(".")[0] for s in stdlib
+                }, alias.name
+        elif isinstance(node, ast.ImportFrom):
+            assert (node.module or "").split(".")[0] in {
+                s.split(".")[0] for s in stdlib
+            }, node.module
+
+
+# Re-review fixes (#11) -----------------------------------------------------------
+
+
+def test_render_text_only_drops_tests_line_when_even_fallback_overflows(tmp_path):
+    # Evidence 10 bytes under the cap: no Tests line fits, not even the short
+    # fallback. Option A: leave the line out, publish within budget.
+    cap = pr_evidence.MAX_COMMENT_BYTES
+    artifact = _text_only_artifact(tmp_path, _padded_evidence(cap - 10))
+    jobs = _jobs_doc(_job("test (3.14)", "failure"))
+    rc, out = _render_with_results(tmp_path, artifact, None, jobs)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert len(body.encode()) <= cap
+    assert "**Tests:**" not in body
+
+
+def test_render_ui_path_tests_line_never_tips_the_publish_into_refusal(tmp_path, monkeypatch):
+    # Find the largest evidence that publishes with its Web UI section and no
+    # test data; adding test data must never turn that into a refusal.
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", 3000)
+    jobs = _jobs_doc(_job("test (3.9)", "failure"))
+    for size in range(2990, 1000, -5):
+        base = tmp_path / f"base{size}"
+        base.mkdir()
+        artifact = _artifact(base, text=_padded_evidence(size))
+        rc, _ = _render(base, artifact)
+        if rc == 0:
+            break
+    else:
+        pytest.fail("no evidence size publishes without test data")
+    rc, out = _render_with_results(base, artifact, None, jobs)
+    assert rc == 0
+    assert len((out / "comment.md").read_text().encode()) <= 3000
+
+
+def test_render_deeply_nested_jobs_json_degrades_only_the_line(tmp_path):
+    artifact = _text_only_artifact(tmp_path, TEXT)
+    out = tmp_path / "out"
+    jobs_path = tmp_path / "deep.json"
+    jobs_path.write_text("[" * 20_000)
+    rc = publish_evidence.main([
+        "render", "--artifact-dir", str(artifact), "--out-dir", str(out),
+        "--repo", REPO, "--pr", str(PR), "--head-sha", HEAD_SHA,
+        "--jobs-json", str(jobs_path),
+    ])
+    assert rc == 0
+    assert "**Tests:** results unavailable." in (out / "comment.md").read_text()
+
+
+# Final-review fixes (#11) ---------------------------------------------------------
+
+
+def test_oversized_junit_is_refused_without_reading_it(tmp_path, monkeypatch):
+    # Size is checked before the file is read into memory.
+    results = _results_tree(tmp_path, {"3.9": _junit("3.9.25")})
+    junit = results / "test-results-3.9" / "junit.xml"
+    junit.write_bytes(b" " * 2048)
+    monkeypatch.setattr(publish_evidence.test_results, "MAX_JUNIT_BYTES", 1024)
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(self):
+        assert self.name != "junit.xml", "oversized junit.xml was read"
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    assert publish_evidence.load_test_results(results) == {"3.9": "invalid"}
+
+
+def test_load_json_docs_merges_concatenated_pages(tmp_path):
+    path = tmp_path / "jobs.json"
+    page1 = _jobs_doc(_job("test (3.9)", "success"))
+    page2 = _jobs_doc(_job("test (3.9)", "failure"))
+    page1["total_count"] = page2["total_count"] = 2
+    path.write_text(json.dumps(page1) + "\n" + json.dumps(page2))
+    docs = publish_evidence.load_json_docs(path, publish_evidence.JOBS_MAX_BYTES)
+    assert docs == [page1, page2]
+    # The failure on page 2 can't be masked by page 1's success.
+    assert publish_evidence.validate_jobs(docs) == [
+        {"version": "3.9", "conclusion": "failure"}
+    ]
+
+
+def test_validate_jobs_refuses_a_truncated_listing():
+    # total_count says there are more jobs than were fetched: a failing test
+    # job could be on a missing page, so the data is unusable.
+    page = _jobs_doc(_job("test (3.9)", "success"))
+    page["total_count"] = 5
+    assert publish_evidence.validate_jobs([page]) is None
+
+
+def test_insert_test_line_without_heading_goes_after_the_marker():
+    text = pr_evidence.MARKER + "\nno heading here\n"
+    out = publish_evidence.insert_test_line(text, "**Tests:** x")
+    assert out.split("\n")[:3] == [pr_evidence.MARKER, "**Tests:** x", "no heading here"]

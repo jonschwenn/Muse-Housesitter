@@ -36,6 +36,7 @@ EXACT_PROTECTED = {
     "scripts/pr_evidence.py": "builds the evidence comment",
     "scripts/ui_evidence.py": "captures screenshots and validates the artifact",
     "scripts/publish_evidence.py": "validates and renders evidence with write tokens",
+    "scripts/test_results.py": "parses test XML and renders the Tests line",
     # The guard itself and the tests that pin all of the above: editing the
     # tests could mask a weakened script, so they are protected too.
     "scripts/ci_guard.py": "this guard",
@@ -43,6 +44,7 @@ EXACT_PROTECTED = {
     "tests/test_pr_evidence.py": "pins the evidence comment builder",
     "tests/test_ui_evidence.py": "pins the screenshot capture and validator",
     "tests/test_publish_evidence.py": "pins the privileged publisher",
+    "tests/test_test_results.py": "pins the test-results parser and renderers",
     "tests/test_ci_guard.py": "pins this guard",
     # Build and test configuration: pytest/ruff settings (testpaths, addopts,
     # deselects, ignores), dependency pins, and packaging entry points all
