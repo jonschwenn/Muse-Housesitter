@@ -78,8 +78,8 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
    carries before/after evidence on the fixture house (REVIEW.md,
    "Evidence"): text diffs for command output, rendered screenshots for any
    web UI. Explain each change they show.
-   See REVIEW.md,
-   ["Optional: deep red-team review"](docs/REVIEW.md#optional-deep-red-team-review).
+   For high-risk changes, also see REVIEW.md, "Optional: deep red-team
+   review".
 5. **Jon signs off.** Agents never merge to `main`, and never commit or push
    without Jon saying so for that specific change. Approval does not carry
    over to the next change.

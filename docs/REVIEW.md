@@ -384,7 +384,7 @@ test, and assets that weren't there.
 
 ## Optional: deep red-team review
 
-Consider this step for a new module; any change to http allow-lists,
+Consider this step for a new module or any change to http allow-lists,
 secrets, identifiers, envelope, storage, drop-ins, install, CI, or
 `ci-guard`. When one of these changes was also reviewed in gates 2–3 by
 the model family that wrote it, that is a strong reason to run this review

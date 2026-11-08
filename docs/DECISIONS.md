@@ -432,5 +432,5 @@ handoff's "license not chosen; don't publish."
   model family for high-risk changes; this makes considering it deliberate.
 - **Rejected:** making it mandatory for every change (too costly for
   doc-only PRs); leaving it informal (then it never gets considered).
-- **Status:** Jon calls this a two-way door: how we work for now, reversible
-  if it proves too heavy. Revisit with a new entry that supersedes this one.
+- **Status:** a two-way door: how we work for now, reversible if it proves
+  too heavy or too light. Revisit with a new entry that supersedes this one.
