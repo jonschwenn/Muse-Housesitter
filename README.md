@@ -1,20 +1,12 @@
 # Muse Housesitter
 
-**An independent, unofficial personal project by Jon Schwenn.** Muse
-Housesitter is not affiliated with, sponsored by, endorsed by, or maintained
-by Meta Platforms, Inc. or its affiliates. See
-[attribution and independence](ATTRIBUTION.md) for upstream credits and
-third-party names.
+Have you ever wanted to give Claude, or really any good LLM, the ability to help you configure complex systems you run that may be working, but far from optimal? The stupid thing would be to give an LLM Agent direct access to your Unifi or Home Assistant portal. Instead the better approach is to write scripts to gather data to analyze which the LLM Agent can use to make recommendations or help with config examples.
 
-I started this project to give Muse useful measurements from systems in my
-home without giving Housesitter permission to change those systems. The
-first planned module gathers WiFi radio statistics from UniFi using a View
-Only account. Muse can interpret those measurements and suggest changes;
-the owner decides what to apply.
+Along comes Muse, which is a helpful little agent running somewhere constantly on a VM. It's pretty useful if you trust Meta and connect it to things. I wouldn't say I trust it completely, but it has a really interesting functionality of 'Gadgets'. You can load the Gadgets SDK on a Raspberry Pi for example and Muse will be able to control the Pi. For example, it could write and run scripts, access things within your home network, etc.
 
-This is a human-run project that uses AI tools for development, testing,
-and review. Contributions follow the same review gates regardless of who
-or what wrote them.
+I have a Pi on my IoT VLAN and I use it to look at radio/WiFi stats using a read-only Unifi user. I plan on extending this to other things and will be adding modules over time.
+
+Regardless of your feelings on AI, please understand that this is a human-run project using tools for code testing and release velocity. Low-quality submissions will not be accepted.
 
 ---
 
@@ -82,10 +74,18 @@ devices can reach. See [`docs/DASHBOARD.md`](docs/DASHBOARD.md).
 
 Read [`AGENTS.md`](AGENTS.md) first. It holds the rules for testing,
 review gates, and documentation, and it applies to people and agents alike.
-For announcements, demos, and responses to affiliation questions, see the
-[public communication guide](docs/COMMUNICATIONS.md).
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
 
 ## Independence, privacy, and support
+
+**An independent, unofficial personal project by Jon Schwenn.** Muse
+Housesitter is not affiliated with, sponsored by, endorsed by, or maintained
+by Meta Platforms, Inc. or its affiliates. See
+[attribution and independence](ATTRIBUTION.md) for upstream credits and
+third-party names.
 
 Housesitter runs locally, but **results returned to Muse through the SDK
 leave the Pi for Muse's service**. Module results can include device names,
@@ -103,6 +103,5 @@ Ubiquiti do not provide support for this project. See
 [ATTRIBUTION.md](ATTRIBUTION.md) for upstream credits and the separate
 software licenses and service terms.
 
-## License
-
-MIT. See [`LICENSE`](LICENSE).
+For announcements, demos, and responses to affiliation questions, see the
+[public communication guide](docs/COMMUNICATIONS.md).

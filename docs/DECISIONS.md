@@ -376,3 +376,12 @@ handoff's "license not chosen; don't publish."
 - **Rejected:** relying on a footer-only notice, using logos or badges that
   imply official status, and conflating software licensing with service
   access or brand permissions.
+
+### D20. Preserve the personal introduction; group README notices at the end (2026-11-08, Jon)
+- **Decision:** restore Jon's original four-paragraph introduction and put
+  affiliation, privacy, and support notes after the license section at the
+  end of the README. This supersedes D19's notice-placement decision.
+- **Why:** preserve the author's personal voice and keep reference notices
+  together. Upstream credits remain in `ATTRIBUTION.md`.
+- **Rejected:** rewriting the personal introduction or placing affiliation
+  notes before it.
