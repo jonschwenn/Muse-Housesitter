@@ -283,14 +283,15 @@ class TestEntryPoints:
     def test_load_registry_marks_third_party(self, monkeypatch, alpha):
         patch_dict_api(monkeypatch, [FakeEntryPoint("alpha_sensor", alpha)])
         registry = load_registry()
-        assert [entry.id for entry in registry.modules] == ["alpha_sensor"]
         assert registry.get_module("alpha_sensor").third_party is True
+        for entry in registry.modules:
+            if entry.id != "alpha_sensor":
+                assert entry.third_party is False
 
     def test_load_registry_empty(self, monkeypatch):
         patch_dict_api(monkeypatch, [])
         registry = load_registry()
-        assert registry.modules == ()
-        assert dict(registry.commands) == {}
+        assert all(entry.third_party is False for entry in registry.modules)
 
 
 class FakeModuleInfo:

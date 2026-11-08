@@ -1,0 +1,450 @@
+{
+  "cases": [
+    {
+      "command": "snapshot",
+      "expect": "ok",
+      "fixture": "typical",
+      "name": "snapshot-typical",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_login.json",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_sysinfo.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sysinfo",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_device.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/device",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_sta.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sta",
+          "status": 200
+        },
+        {
+          "body": "{}",
+          "method": "POST",
+          "path": "/api/auth/logout",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": "ok",
+      "fixture": "empty",
+      "name": "snapshot-empty",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_login.json",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_sysinfo.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sysinfo",
+          "status": 200
+        },
+        {
+          "body_file": "empty_device.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/device",
+          "status": 200
+        },
+        {
+          "body_file": "empty_sta.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sta",
+          "status": 200
+        },
+        {
+          "body": "{}",
+          "method": "POST",
+          "path": "/api/auth/logout",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": {
+        "error": "upstream_auth"
+      },
+      "fixture": "error",
+      "name": "snapshot-error-login-401",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body": "{\"meta\":{\"rc\":\"error\",\"msg\":\"api.err.Invalid\"}}",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 401
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": {
+        "error": "upstream_auth"
+      },
+      "fixture": "error",
+      "name": "snapshot-error-login-403",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body": "{\"meta\":{\"rc\":\"error\",\"msg\":\"api.err.Forbidden\"}}",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 403
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": {
+        "error": "upstream_unexpected"
+      },
+      "fixture": "error",
+      "name": "snapshot-error-stat-redirect",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_login.json",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_sysinfo.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sysinfo",
+          "status": 200
+        },
+        {
+          "headers": {
+            "Location": "/go"
+          },
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/device",
+          "status": 302
+        },
+        {
+          "body": "{}",
+          "method": "POST",
+          "path": "/api/auth/logout",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": {
+        "error": "upstream_unexpected"
+      },
+      "fixture": "error",
+      "name": "snapshot-error-stat-500",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_login.json",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_sysinfo.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sysinfo",
+          "status": 200
+        },
+        {
+          "body": "controller failure",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/device",
+          "status": 500
+        },
+        {
+          "body": "{}",
+          "method": "POST",
+          "path": "/api/auth/logout",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": {
+        "error": "upstream_unexpected"
+      },
+      "fixture": "error",
+      "name": "snapshot-error-nonjson",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_login.json",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 200
+        },
+        {
+          "body": "this is not json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sysinfo",
+          "status": 200
+        },
+        {
+          "body": "{}",
+          "method": "POST",
+          "path": "/api/auth/logout",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": {
+        "error": "upstream_unexpected"
+      },
+      "fixture": "error",
+      "name": "snapshot-error-rc",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_login.json",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_sysinfo.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sysinfo",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_device.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/device",
+          "status": 200
+        },
+        {
+          "body": "{\"meta\":{\"rc\":\"error\",\"msg\":\"api.err.Invalid\"}}",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sta",
+          "status": 200
+        },
+        {
+          "body": "{}",
+          "method": "POST",
+          "path": "/api/auth/logout",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": {
+        "error": "upstream_unexpected"
+      },
+      "fixture": "error",
+      "name": "snapshot-error-msg-injection",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_login.json",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_sysinfo.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sysinfo",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_device.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/device",
+          "status": 200
+        },
+        {
+          "body_file": "hostile_error.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sta",
+          "status": 200
+        },
+        {
+          "body": "{}",
+          "method": "POST",
+          "path": "/api/auth/logout",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": "truncated",
+      "fixture": "large",
+      "name": "snapshot-large",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_login.json",
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_sysinfo.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sysinfo",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_device.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/device",
+          "status": 200
+        },
+        {
+          "body_file": "large_sta.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sta",
+          "status": 200
+        },
+        {
+          "body": "{}",
+          "method": "POST",
+          "path": "/api/auth/logout",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "command": "snapshot",
+      "expect": "truncated",
+      "fixture": "hostile",
+      "name": "snapshot-hostile",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_login.json",
+          "headers": {
+            "X-CSRF-Token": "PLANTED-SECRET-hostile-csrf-9"
+          },
+          "method": "POST",
+          "path": "/api/auth/login",
+          "status": 200
+        },
+        {
+          "body_file": "unifi_os_sysinfo.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sysinfo",
+          "status": 200
+        },
+        {
+          "body_file": "hostile_device.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/device",
+          "status": 200
+        },
+        {
+          "body_file": "hostile_sta.json",
+          "method": "GET",
+          "path": "/proxy/network/api/s/default/stat/sta",
+          "status": 200
+        },
+        {
+          "body": "{}",
+          "method": "POST",
+          "path": "/api/auth/logout",
+          "status": 200
+        }
+      ]
+    }
+  ],
+  "config": {
+    "auth": {
+      "password_secret": "unifi_password",
+      "username": "housesitter-readonly"
+    },
+    "base_url": "https://192.0.2.1:{port}",
+    "flavor": "unifi_os",
+    "request_timeout_s": 15,
+    "site": "default",
+    "tls": {}
+  },
+  "secrets": {
+    "unifi_password": "PLANTED-SECRET-unifi-password-1"
+  },
+  "spec": "docs/modules/unifi_wifi.md"
+}

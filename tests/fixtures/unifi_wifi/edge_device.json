@@ -1,0 +1,68 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "mac": "02:00:00:00:00:21",
+      "name": "Attic",
+      "model": "U6-Lite",
+      "version": "6.5.12",
+      "type": "uap",
+      "state": 0,
+      "uptime": 100,
+      "num_sta": 0,
+      "satisfaction": 0,
+      "uplink": {
+        "type": "wire",
+        "speed": 1000
+      },
+      "radio_table": [
+        {
+          "name": "wifi0",
+          "radio": "ng",
+          "channel": "auto",
+          "ht": "80",
+          "tx_power_mode": "auto"
+        }
+      ]
+    },
+    {
+      "mac": "02:00:00:00:00:22",
+      "name": "Shed",
+      "model": "U6+",
+      "version": "6.5.12",
+      "type": "uap",
+      "uptime": "7200",
+      "num_sta": "2",
+      "satisfaction": "88",
+      "uplink": {
+        "type": "wireless",
+        "speed": "300"
+      },
+      "radio_table": [
+        {
+          "name": "wifi0",
+          "radio": "na",
+          "channel": "149",
+          "ht": "80",
+          "tx_power_mode": "medium"
+        }
+      ],
+      "radio_table_stats": [
+        {
+          "name": "wifi0",
+          "channel": "149",
+          "tx_power": 20,
+          "cu_total": 30,
+          "cu_self_rx": 5,
+          "cu_self_tx": 7,
+          "num_sta": 2,
+          "satisfaction": 92,
+          "tx_packets": 15000,
+          "tx_retries": 200
+        }
+      ]
+    }
+  ]
+}

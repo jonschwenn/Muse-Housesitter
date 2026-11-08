@@ -57,6 +57,18 @@
       "title": "Invoke with a wrongly typed param",
       "argv": ["invoke", "housesitter.doctor", "--params", "{\"check\": \"yes\"}"],
       "expect_exit": 1
+    },
+    {
+      "id": "invoke-unifi-wifi-snapshot",
+      "title": "Invoke the unifi_wifi snapshot command",
+      "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+      "expect_exit": 1
+    },
+    {
+      "id": "invoke-unifi-wifi-get",
+      "title": "Invoke the unifi_wifi get command",
+      "argv": ["invoke", "housesitter.unifi_wifi.get", "--params", "{\"id\":\"snapshot_20261104T151500Z_3fa1\"}"],
+      "expect_exit": 1
     }
   ]
 }
