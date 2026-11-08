@@ -383,6 +383,17 @@ their clients; singular `client` is used when the client count is 1.
   points at `get` with `section: "clients"` and the next `offset`.
 - Whole-snapshot output keeps `summary` and `aps` in full. Section-only
   `get` returns just that list, from `offset`; the runner pages it if needed.
+- Because `summary` and `aps` are not paged, a snapshot whose unpaged part
+  cannot fit the output limit fails before saving, with the core's
+  `upstream_unexpected` error "the result is too large even with paging:
+  the part that cannot be paged is <N> bytes; the output limit is 90112
+  bytes" (ARCHITECTURE §5). Nothing is saved. Measured on invented data:
+  the limit is reached above about 75 APs with short names, 3 radios, and
+  5 clients each, and above about 14 APs with 64-character emoji names and
+  16 radios each. Every AP record is bounded (§4.0), so an `aps` section
+  page always holds at least one AP, and the core's "one item in <section>
+  is larger than the output limit" error is not expected for a snapshot
+  this module saved.
 - When `truncated` is true, call `more.command` with `more.params` exactly.
 
 ### 4.5 Source

@@ -2149,3 +2149,72 @@ def test_noncanonical_warning_text_is_dropped():
         assert full.envelope["warnings"] == []
     finally:
         home.close()
+
+
+def _many_ap_routes(count):
+    # count APs, each with a 64-character emoji name and 16 radios:
+    # the largest AP record the module can emit.
+    routes = typical_routes("unifi_os")
+    dev = json.loads(fixture_bytes("unifi_os_device.json"))
+    template = dev["data"][0]
+    radio = template["radio_table"][0]
+    stats = template["radio_table_stats"][0]
+    aps = []
+    for index in range(count):
+        item = json.loads(json.dumps(template))
+        item["mac"] = f"02:00:00:01:00:{index:02x}"
+        item["name"] = f"{index:03d}" + "\U0001F4E1" * 61
+        item["radio_table"] = [
+            dict(radio, name=f"wifi{i}") for i in range(16)]
+        item["radio_table_stats"] = [
+            dict(stats, name=f"wifi{i}") for i in range(16)]
+        aps.append(item)
+    routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
+        status=200,
+        body=json.dumps({"meta": {"rc": "ok"}, "data": aps}).encode("utf-8"))
+    return routes
+
+
+def test_too_many_large_aps_fail_clearly_without_saving():
+    # B3: summary and aps are never paged, so a house whose unpaged part
+    # cannot fit fails with the core's clear size error and saves nothing.
+    home = SavedHome(_many_ap_routes(20))
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code != 0
+        assert snap.envelope["error"]["code"] == "upstream_unexpected"
+        message = snap.envelope["error"]["message"]
+        assert message.startswith(
+            "the result is too large even with paging: "
+            "the part that cannot be paged is ")
+        assert message.endswith(
+            f"; the output limit is {envelope.BUDGET_BYTES} bytes")
+        assert "saved" not in snap.envelope
+        store = (Path(home.home) / ".local" / "share" / "housesitter"
+                 / "unifi_wifi")
+        assert not store.exists() or not any(store.iterdir())
+    finally:
+        home.close()
+
+
+def test_large_aps_below_the_limit_still_save_and_page_by_section():
+    # The same worst-case APs, few enough to fit: saved, and a section
+    # get of aps walks every AP without a stuck continuation.
+    home = SavedHome(_many_ap_routes(10))
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        saved_id = snap.envelope["saved"]
+        assert saved_id is not None
+        seen = []
+        params = {"id": saved_id, "section": "aps"}
+        while params is not None:
+            page = home.run("housesitter.unifi_wifi.get", params)
+            assert page.exit_code == 0
+            seen.extend(page.envelope["data"]["aps"])
+            more = page.envelope["more"]
+            params = dict(more["params"]) if more is not None else None
+        assert len(seen) == 10
+        assert all(len(item["radios"]) == 16 for item in seen)
+    finally:
+        home.close()

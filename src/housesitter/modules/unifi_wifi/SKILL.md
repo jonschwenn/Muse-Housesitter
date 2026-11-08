@@ -26,6 +26,14 @@ verification was disabled during collection.
 A damaged saved snapshot gives `upstream_unexpected`: "That saved snapshot is damaged."
 When `truncated` is true, call `more.command` with `more.params` exactly;
 repeat for each returned continuation until all pages have been read.
+The AP list and the summary are never split across pages. If a house has
+too many access points to fit one answer, `snapshot` fails with
+`upstream_unexpected`: "the result is too large even with paging: ...".
+This is a known size limit, not a network or controller fault. Nothing was
+saved, so there is no `id` to `get`, and repeating the snapshot gives the
+same result. It happens at roughly 75 APs with short names, or as few as
+about 15 with very long names and many radios each. Tell the person the
+house is too large for this tool's snapshot.
 `list` is not available yet. Snapshot and get envelopes use schemas
 `housesitter.unifi_wifi.snapshot/1` and `housesitter.unifi_wifi.get/1`.
 
