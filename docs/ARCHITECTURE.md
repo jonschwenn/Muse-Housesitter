@@ -226,14 +226,19 @@ raise `not_found`; unsafe directories and failed writes raise
    warnings, and sanitise declared untrusted fields in data, source, and
    compact data. Warnings are capped at 200 characters each, de-duplicated,
    and limited to 20; on overflow the last says how many more were omitted.
-6. If `Result.save` is set, save the sanitised full result before output
-   projection. This preserves identifiers and undeclared keys locally.
-7. Apply identifier policy, drop undeclared keys, and check declared types
+6. Apply identifier policy, drop undeclared keys, and check declared types
    in data, source, and compact data (MODULES §2). A mismatch becomes
    `upstream_unexpected` and names the field path.
-8. Fit the envelope to the budget: full data, then compact data, then
-   truncation in `Paging.lists` order (§5). If nothing fits, return
-   `upstream_unexpected`.
+7. Fit the envelope to the budget: full data, then compact data, then
+   truncation in `Paging.lists` order (§5). When `Result.save` is set, use
+   a stand-in saved id of the same length as the real one. Store ids are
+   ASCII (`<kind>_YYYYMMDDTHHMMSSZ_xxxx`), so the measured size is identical.
+   Projection or fitting failures, including unfetchable paging and
+   no-progress continuations, fail without saving.
+8. Only after all checks pass, save the sanitised full result if
+   `Result.save` is set, then build the envelope with the real id. The
+   saved file preserves identifiers and undeclared keys from before
+   projection, even when output is compacted or truncated.
 9. Return the envelope. On failure the CLI also prints the stable error
    line last on stderr (§4). Records under the `housesitter` logger never
    fall through to Python's last-resort stderr handler, so late worker logs
@@ -342,11 +347,37 @@ Stable error codes: `config_invalid`, `secret_unreadable`, `upstream_auth`,
   constraints are not checked at this stage; authors must make the call
   replayable. Core-command targets instead use `housesitter.<command>`
   and are validated against the core command table.
-- When `Result.save` is set, the saved file keeps the full result even
-  when output is compacted or truncated. Saving is optional for results
-  that fit. A paging command can page its own output without saving again
-  by carrying the existing id in `Paging.params["id"]`; the current call
-  then creates no new saved file.
+- With paging lists present, if the smallest envelope still exceeds the
+  budget, the command fails
+  with `upstream_unexpected`, "the result is too large even with paging: the part that cannot be paged is <N> bytes; the output limit is 90112 bytes".
+  The smallest envelope uses compact data if supplied, otherwise full
+  data, with every paging list emptied, the saved id when applicable,
+  `truncated: true`, and the `more` object it would carry. `<N>` is its
+  size by `len(json.dumps(text)) - 2`; 90112 bytes is 88 KiB. Only the
+  measured number is inserted, never module or upstream text. Without
+  paging, or if none of the declared paging lists is present as a list,
+  a result that does not fit fails with `upstream_unexpected`, "the result
+  is too large for the output limit".
+- A continuation has an entry in `Paging.start` for the section named by
+  `more`. If it keeps zero items of that section while items remain, it
+  fails with `upstream_unexpected`, "one item in <section> is larger than the output limit".
+  `<section>` is the declared paging list name. Its `more.params.offset`
+  would equal the start offset, replaying the same page forever. A page
+  without a start entry for that section counts as a first page and may
+  keep zero items, as when a snapshot's `more` is
+  `get section=clients offset=0`. The runner recognises a continuation
+  only by its start entry, so a paging command that continues a list must
+  set `Paging.start` for it; without one, a repeat is not detected. Empty
+  lists are never the truncated section: `section` names the first list
+  that lost items.
+- When `Result.save` is set, the file is written only after projection and
+  fitting checks pass. It keeps the sanitised full result from before
+  projection, including identifiers and undeclared keys, even when output
+  is compacted or truncated. Saving is optional for results that fit. A
+  paging command can page its own output without saving again
+  by leaving `Result.save` unset and carrying the existing id in
+  `Paging.params["id"]`; the current call then creates no new saved file.
+  When `Result.save` is set, the new saved id replaces any carried id.
 
 ## 6. Files, config, and secrets
 

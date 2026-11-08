@@ -1226,7 +1226,10 @@ class TestOpaqueArrays:
                 fields=(sdk.Field("data.meta", "object"),),
             )
 
-    def test_nan_in_saved_result_is_unexpected(self, tmp_path):
+    def test_nan_in_saved_result_is_field_mismatch(self, tmp_path):
+        # Projection (ARCHITECTURE step 6) runs before the save (step
+        # 8): NaN in an opaque array is a field mismatch naming the
+        # path, and nothing is saved.
         def handler(self, ctx, params):
             return sdk.Result(
                 data={"tags": [float("nan")]}, save="snapshot"
@@ -1244,7 +1247,11 @@ class TestOpaqueArrays:
             module_cls, "housesitter.demo_sensor.snapshot", {}, tmp_path
         )
         line = failed(outcome, "upstream_unexpected")
-        assert "the module failed unexpectedly" in line
+        assert (
+            "module output does not match its declared fields (data.tags)"
+            in line
+        )
+        assert stored_files(tmp_path) == []
 
 
 class TestItemStringLists:
@@ -1514,3 +1521,451 @@ class TestClientFactory:
             client_factory=None,
         )
         assert ctx._client_factory is http_core.Client
+
+
+def stored_files(tmp_path):
+    """Every file under the test HOME's module data root."""
+    root = tmp_path / ".local" / "share" / "housesitter"
+    if not root.exists():
+        return []
+    return sorted(p for p in root.rglob("*") if p.is_file())
+
+
+class TestFitBeforeSave:
+    """The fit (full -> compact -> paging) is decided before saving.
+
+    ARCHITECTURE section 5: projection and fitting failures leave no
+    saved file; a page that cannot be paged, or a continuation that
+    makes no progress, fails with its own message.
+    """
+
+    GET_COMMAND = sdk.Command(
+        name="get",
+        handler="get",
+        description="Page demo readings.",
+        optional={
+            "section": sdk.Param("string", "Which list to continue."),
+            "offset": sdk.Param("integer", "Where to continue."),
+            "id": sdk.Param("string", "Saved result id."),
+        },
+        fields=(
+            sdk.Field("data.items[]", "integer"),
+            sdk.Field("data.note", "string", nullable=True),
+        ),
+    )
+
+    STRING_COMMAND = sdk.Command(
+        name="get",
+        handler="get",
+        description="Page demo lines.",
+        optional={
+            "section": sdk.Param("string", "Which list to continue."),
+            "offset": sdk.Param("integer", "Where to continue."),
+            "id": sdk.Param("string", "Saved result id."),
+        },
+        fields=(sdk.Field("data.items[]", "string"),),
+    )
+
+    def make_module(self, command, data, paging, save):
+        def handler(self, ctx, params):
+            return sdk.Result(data=data, paging=paging, save=save)
+
+        return type(
+            "FitModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (), "commands": (command,),
+                "get": handler,
+            },
+        )
+
+    def smallest_size(self, data, lists=("items",)):
+        """Independently measure the all-emptied envelope (stand-in id)."""
+        from housesitter.core import envelope as envelope_mod
+
+        standin = "snapshot_00000000T000000Z_0000"
+        emptied = dict(data)
+        for name in lists:
+            emptied[name] = []
+        more = {
+            "command": "housesitter.demo_sensor.get",
+            "params": {
+                "kind": "full", "id": standin,
+                "section": lists[0], "offset": 0,
+            },
+            "remaining": {
+                name: len(data[name]) for name in lists if data[name]
+            },
+        }
+        expected = envelope_mod.build_ok(
+            schema="housesitter.demo_sensor.get/1",
+            module="demo_sensor",
+            module_version="0.1.0",
+            housesitter_version=__version__,
+            collected_at="2026-11-04T15:15:00Z",
+            source={},
+            data=emptied,
+            warnings=[],
+            truncated=True,
+            saved=standin,
+            more=more,
+        )
+        return standin, envelope_mod.measure(envelope_mod.serialize(expected))
+
+    def test_too_large_even_with_paging_saves_nothing(self, tmp_path):
+        from housesitter.core import envelope as envelope_mod
+
+        items = list(range(200))
+        note = "n" * 100000
+        module_cls = self.make_module(
+            self.GET_COMMAND,
+            {"items": items, "note": note},
+            sdk.Paging(
+                command="get", lists=("items",), params={"kind": "full"}
+            ),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        _, size = self.smallest_size({"items": items, "note": note})
+        assert size > envelope_mod.BUDGET_BYTES
+        line = failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "the result is too large even with paging: "
+            f"the part that cannot be paged is {size} bytes; "
+            f"the output limit is {envelope_mod.BUDGET_BYTES} bytes"
+        )
+        assert "90112" in line
+        assert stored_files(tmp_path) == []
+
+    def test_too_large_even_with_paging_measures_compact(self, tmp_path):
+        from housesitter.core import envelope as envelope_mod
+
+        items = list(range(200))
+        full = {"items": items, "note": "n" * 100000}
+        compact = {"items": items, "note": "c" * 95000}
+
+        def handler(self, ctx, params):
+            return sdk.Result(
+                data=full,
+                compact=compact,
+                paging=sdk.Paging(
+                    command="get", lists=("items",),
+                    params={"kind": "full"},
+                ),
+                save="snapshot",
+            )
+
+        module_cls = type(
+            "CompactFitModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (), "commands": (self.GET_COMMAND,),
+                "get": handler,
+            },
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        _, size_full = self.smallest_size(full)
+        _, size_compact = self.smallest_size(compact)
+        assert size_compact > envelope_mod.BUDGET_BYTES
+        assert size_compact < size_full
+        line = failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "the result is too large even with paging: "
+            f"the part that cannot be paged is {size_compact} bytes; "
+            f"the output limit is {envelope_mod.BUDGET_BYTES} bytes"
+        )
+        assert str(size_full) not in line
+        assert stored_files(tmp_path) == []
+
+    def test_too_large_without_paging_saves_nothing(self, tmp_path):
+        module_cls = self.make_module(
+            self.GET_COMMAND,
+            {"items": list(range(30000)), "note": "n" * 100000},
+            None,
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == "the result is too large for the output limit"
+        assert "paging" not in line
+        assert stored_files(tmp_path) == []
+
+    @pytest.mark.parametrize("start", [{"items": 0}, {"items": 7}])
+    def test_no_progress_continuation_fails(self, tmp_path, start):
+        big = "s" * 95000
+        module_cls = self.make_module(
+            self.STRING_COMMAND,
+            {"items": [big]},
+            sdk.Paging(
+                command="get",
+                lists=("items",),
+                params={"id": "snapshot_20261104T151500Z_ab12"},
+                start=start,
+            ),
+            save=None,
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert line.endswith("one item in items is larger than the output limit")
+        assert outcome.error_reason == (
+            "one item in items is larger than the output limit"
+        )
+        assert outcome.envelope["ok"] is False
+
+    def test_first_page_may_keep_zero_items(self, tmp_path):
+        big = "s" * 95000
+        module_cls = self.make_module(
+            self.STRING_COMMAND,
+            {"items": [big]},
+            sdk.Paging(
+                command="get", lists=("items",), params={"kind": "full"}
+            ),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        assert outcome.exit_code == 0
+        assert outcome.envelope["truncated"] is True
+        assert outcome.envelope["data"] == {"items": []}
+        more = outcome.envelope["more"]
+        assert more["params"]["section"] == "items"
+        assert more["params"]["offset"] == 0
+        assert more["remaining"] == {"items": 1}
+        assert more["params"]["id"] == outcome.envelope["saved"]
+
+    def test_continuation_with_progress_still_works(self, tmp_path):
+        items = [f"line-{index:05d}-example" for index in range(6000)]
+        module_cls = self.make_module(
+            self.STRING_COMMAND,
+            {"items": items},
+            sdk.Paging(
+                command="get",
+                lists=("items",),
+                params={"kind": "full"},
+                start={"items": 100},
+            ),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        assert outcome.exit_code == 0
+        assert outcome.envelope["truncated"] is True
+        kept = len(outcome.envelope["data"]["items"])
+        assert 0 < kept < len(items)
+        assert outcome.envelope["data"]["items"] == items[:kept]
+        more = outcome.envelope["more"]
+        assert more["params"]["offset"] == 100 + kept
+        assert more["params"]["id"] == outcome.envelope["saved"]
+
+    def test_unfetchable_paging_saves_nothing(self, tmp_path):
+        module_cls = self.make_module(
+            self.GET_COMMAND,
+            {"items": list(range(30000)), "note": "n"},
+            sdk.Paging(command="missing", lists=("items",)),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert (
+            "the module's paging cannot fetch the rest of this result"
+            in line
+        )
+        assert stored_files(tmp_path) == []
+
+    def test_field_mismatch_saves_nothing(self, tmp_path):
+        command = sdk.Command(
+            name="get",
+            handler="get",
+            description="Page demo readings.",
+            fields=(sdk.Field("data.count", "integer"),),
+        )
+        module_cls = self.make_module(
+            command,
+            {"count": "three"},
+            sdk.Paging(command="get", lists=("items",)),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert (
+            "module output does not match its declared fields (data.count)"
+            in line
+        )
+        assert stored_files(tmp_path) == []
+
+    def test_truncated_save_keeps_full_result(self, tmp_path):
+        from housesitter.core.store import FileStore
+
+        big = list(range(30000))
+        outcome, _ = run(
+            make_paged_module(big), "housesitter.demo_sensor.get", {},
+            tmp_path,
+        )
+        assert outcome.exit_code == 0
+        assert outcome.envelope["truncated"] is True
+        kept = outcome.envelope["data"]["items"]
+        assert 0 < len(kept) < len(big)
+        assert kept == big[: len(kept)]
+        assert outcome.envelope["more"]["params"]["id"] == (
+            outcome.envelope["saved"]
+        )
+        store = FileStore("demo_sensor", env={"HOME": str(tmp_path)})
+        saved = store.load(outcome.envelope["saved"])
+        assert saved["data"]["items"] == big
+        assert saved["data"]["note"] == "n"
+
+    def test_no_progress_after_empty_leading_list_fails(self, tmp_path):
+        # Deep review: an empty first list must not become the section
+        # ``more`` names; the first list actually cut is ``items``.
+        command = sdk.Command(
+            name="get",
+            handler="get",
+            description="Page demo lines.",
+            optional={
+                "section": sdk.Param("string", "Which list to continue."),
+                "offset": sdk.Param("integer", "Where to continue."),
+                "id": sdk.Param("string", "Saved result id."),
+            },
+            fields=(
+                sdk.Field("data.empty[]", "string"),
+                sdk.Field("data.items[]", "string"),
+            ),
+        )
+        module_cls = self.make_module(
+            command,
+            {"empty": [], "items": ["s" * 95000]},
+            sdk.Paging(
+                command="get",
+                lists=("empty", "items"),
+                params={"id": "snapshot_20261104T151500Z_ab12"},
+                start={"empty": 0, "items": 0},
+            ),
+            save=None,
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "one item in items is larger than the output limit"
+        )
+
+    def test_unserialisable_paging_params_fail_cleanly(self, tmp_path):
+        # Deep review: a non-JSON value in Paging.params must become an
+        # error outcome, not an exception escaping run_command.
+        module_cls = self.make_module(
+            self.GET_COMMAND,
+            {"items": list(range(30000)), "note": "n"},
+            sdk.Paging(
+                command="get", lists=("items",),
+                params={"kind": {1}},
+            ),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == "the result is not valid JSON"
+        assert stored_files(tmp_path) == []
+
+    def test_first_page_skips_empty_leading_list(self, tmp_path):
+        # Gate 2: on a first page an empty first list must not be named
+        # in ``more``; the cut list ``b`` is.
+        command = sdk.Command(
+            name="get",
+            handler="get",
+            description="Page demo readings.",
+            optional={
+                "section": sdk.Param("string", "Which list to continue."),
+                "offset": sdk.Param("integer", "Where to continue."),
+                "id": sdk.Param("string", "Saved result id."),
+            },
+            fields=(
+                sdk.Field("data.a[]", "integer"),
+                sdk.Field("data.b[]", "integer"),
+            ),
+        )
+        big = list(range(30000))
+        module_cls = self.make_module(
+            command,
+            {"a": [], "b": big},
+            sdk.Paging(command="get", lists=("a", "b")),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        assert outcome.exit_code == 0
+        kept = len(outcome.envelope["data"]["b"])
+        assert 0 < kept < len(big)
+        more = outcome.envelope["more"]
+        assert more["params"]["section"] == "b"
+        assert more["params"]["offset"] == kept
+        assert more["remaining"] == {"b": len(big) - kept}
+
+    def test_standin_id_matches_real_id_size(self, tmp_path):
+        # Gate 2: the dry run is only exact if the stand-in id measures
+        # exactly like the id the store really returns.
+        from housesitter.core import envelope as envelope_mod
+        from housesitter.core.store import FileStore
+
+        store = FileStore("demo_sensor", env={"HOME": str(tmp_path)})
+        for kind in ("snapshot", "k", "a" * 32):
+            real = store.save(kind, {"data": {}})
+            standin = f"{kind}_00000000T000000Z_0000"
+            assert sdk._STORE_ID_RE.fullmatch(real)
+            assert sdk._STORE_ID_RE.fullmatch(standin)
+            assert len(real) == len(standin)
+            assert envelope_mod.measure(real) == envelope_mod.measure(standin)
+
+    @pytest.mark.parametrize("items", [None, 5])
+    def test_too_big_with_absent_paging_lists_saves_nothing(
+        self, tmp_path, items
+    ):
+        # Gate 2: paging declared, but no declared list is present as a
+        # list: the generic too-large failure, and nothing saved.
+        data = {"note": "n" * 100000}
+        if items is not None:
+            data["items"] = items
+        command = sdk.Command(
+            name="get",
+            handler="get",
+            description="Page demo readings.",
+            optional={
+                "section": sdk.Param("string", "Which list to continue."),
+                "offset": sdk.Param("integer", "Where to continue."),
+                "id": sdk.Param("string", "Saved result id."),
+            },
+            fields=(
+                sdk.Field("data.note", "string"),
+                sdk.Field("data.items", "integer", nullable=True),
+            ),
+        )
+        module_cls = self.make_module(
+            command, data,
+            sdk.Paging(command="get", lists=("items",)),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "the result is too large for the output limit"
+        )
+        assert stored_files(tmp_path) == []

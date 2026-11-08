@@ -2,11 +2,12 @@
 
 The pipeline: resolve the command, load config, validate params, build
 the context (with a real store), call the handler in a worker thread
-bounded by the self-deadline, sanitise untrusted fields, save, apply
-the identifier policy, fit the size budget, and build the envelope.
-Failures become an ``Outcome`` with a stable code and an author-written
-reason; the CLI prints the envelope to stdout and the last stderr line
-as ``housesitter: <module>: <code>: <reason>``.
+bounded by the self-deadline, sanitise untrusted fields, apply the
+identifier policy, fit the size budget against a stand-in saved id,
+save, and build the envelope with the real id. Failures become an
+``Outcome`` with a stable code and an author-written reason; the CLI
+prints the envelope to stdout and the last stderr line as
+``housesitter: <module>: <code>: <reason>``.
 """
 
 from __future__ import annotations
@@ -412,12 +413,34 @@ class _EnvelopeNotJson(Exception):
 def _envelope_fits(env_dict: dict) -> bool:
     try:
         return envelope.measure(envelope.serialize(env_dict)) <= envelope.BUDGET_BYTES
-    except ValueError:
+    except (TypeError, ValueError):
+        # NaN/Infinity, or a value or key JSON cannot hold at all (for
+        # example a set in ``Paging.params``).
         raise _EnvelopeNotJson from None
 
 
 class _PagingNotFetchable(Exception):
     """A truncated result whose ``more`` cannot fetch the rest."""
+
+
+class _NoProgress(Exception):
+    """A continuation that keeps zero items of its start section."""
+
+    def __init__(self, section: str) -> None:
+        super().__init__(section)
+        self.section = section
+
+
+class _TooBig(Exception):
+    """A result that fits no envelope: no paging covers the rest."""
+
+
+class _TooBigPaging(Exception):
+    """A paged result whose smallest page still exceeds the budget."""
+
+    def __init__(self, size: int) -> None:
+        super().__init__(str(size))
+        self.size = size
 
 
 # Why truncation may still fail after it is applied: the paging command
@@ -479,10 +502,14 @@ def _truncate(
 ) -> tuple | None:
     """Shrink paging lists from the end until the envelope fits.
 
-    Returns ``(data, more)`` or ``None`` when nothing fits. Lists are
-    handled in declared order: the first list is cut as little as
-    possible (binary search); only when it reaches 0 and the envelope
-    is still too big does the next list shrink.
+    Returns ``(data, more)``, or ``None`` when no declared paging list
+    is present as a list. Lists are handled in declared order: the
+    first list is cut as little as possible (binary search); only when
+    it reaches 0 and the envelope is still too big does the next list
+    shrink. Raises :class:`_NoProgress` when the chosen section is a
+    continuation start that would keep zero items while items remain,
+    and :class:`_TooBigPaging` (carrying the smallest page's size) when
+    even the envelope with every list emptied does not fit.
     """
     original: dict[str, list] = {}
     for name in paging.lists:
@@ -535,7 +562,9 @@ def _truncate(
         kept[name] = 0
         if not fits(trial, section):
             data[name] = []
-            if first_section is None:
+            # An empty list was not cut: ``more`` names the first list
+            # that actually lost items.
+            if first_section is None and items:
                 first_section = name
             continue
         low, high = 0, len(items)
@@ -554,6 +583,17 @@ def _truncate(
             first_section = name
         if first_section is None:
             first_section = section
+        # A continuation names its offset in ``paging.start``: keeping
+        # zero items of that section while items remain would replay the
+        # same page forever, so the run fails instead. (A first page
+        # without a start entry for the section may keep zero items,
+        # since its ``more`` is a different call.)
+        if (
+            first_section in paging.start
+            and kept[first_section] == 0
+            and len(original[first_section]) > 0
+        ):
+            raise _NoProgress(first_section)
         # Truncation is actually applied here: the paging command must
         # be able to fetch the rest, or the result fails instead.
         more = build_more(first_section)
@@ -562,7 +602,22 @@ def _truncate(
             module_id=module_id,
         )
         return data, more
-    return None
+    # Even the smallest page does not fit: ``data``/``kept`` now
+    # describe the trial with every list emptied, so measure that
+    # envelope exactly as built and report its size. No ``more``
+    # loop is possible from here, so this never returns.
+    try:
+        smallest = envelope.build_ok(
+            data=data, truncated=True,
+            more=build_more(
+                next((name for name in order if original[name]), order[0])
+            ),
+            **fixed,
+        )
+        size = envelope.measure(envelope.serialize(smallest))
+    except (TypeError, ValueError):
+        raise _EnvelopeNotJson from None
+    raise _TooBigPaging(size)
 
 
 # -- logging -----------------------------------------------------------------
@@ -823,28 +878,6 @@ def run_command(
         schema_name = (
             f"housesitter.{module_id}.{command.name}/{command.schema_version}"
         )
-    saved_id: str | None = None
-    if result.save is not None:
-        obj = {
-            "schema": schema_name,
-            "module": module_id,
-            "module_version": (
-                __version__ if is_core else instance.version
-            ),
-            "housesitter_version": __version__,
-            "collected_at": collected_str,
-            "label": label,
-            "source": clean_source,
-            "data": clean_data,
-            "warnings": warnings,
-        }
-        try:
-            saved_id = data_store.save(result.save, obj, label)
-        except StoreError as exc:
-            return _fail(module_id, exc.code, exc.reason)
-        except Exception:
-            return _fail(module_id, "upstream_unexpected", _FAILED_REASON)
-
     strip = config.identifiers == "none"
     data_tree = _build_tree(data_fields)
     source_tree = _build_tree(source_fields)
@@ -868,6 +901,15 @@ def run_command(
         out_source = {}
 
     module_version = __version__ if is_core else instance.version
+    # Fit against a stand-in saved id of exactly the real id's length:
+    # store ids are ``<kind>_YYYYMMDDTHHMMSSZ_xxxx`` (ASCII), so the
+    # measured size is identical. The fit decides before anything is
+    # saved, so projection and fitting failures leave no saved file.
+    standin_id = (
+        f"{result.save}_00000000T000000Z_0000"
+        if result.save is not None
+        else None
+    )
     fixed = {
         "schema": schema_name,
         "module": module_id,
@@ -876,47 +918,125 @@ def run_command(
         "collected_at": collected_str,
         "source": out_source,
         "warnings": warnings,
-        "saved": saved_id,
+        "saved": standin_id,
         "label": label,
     }
-    try:
+
+    def fit_once(active: dict) -> tuple:
+        """Fit projected data to the budget: full, compact, then paging.
+
+        Returns ``(data, truncated, more)``. Raises
+        :class:`_PagingNotFetchable`, :class:`_NoProgress`,
+        :class:`_TooBigPaging`, :class:`_TooBig`, or
+        :class:`_EnvelopeNotJson`.
+        """
         candidate = envelope.build_ok(
-            data=out_data, truncated=False, more=None, **fixed
+            data=out_data, truncated=False, more=None, **active
         )
         if _envelope_fits(candidate):
-            return Outcome(exit_code=0, envelope=candidate, log_lines=lines)
+            return out_data, False, None
         if out_compact is not None and out_compact is not _ABSENT:
             candidate = envelope.build_ok(
-                data=out_compact, truncated=False, more=None, **fixed
+                data=out_compact, truncated=False, more=None, **active
             )
             if _envelope_fits(candidate):
-                return Outcome(exit_code=0, envelope=candidate, log_lines=lines)
+                return out_compact, False, None
             working = out_compact
         else:
             working = out_data
-        if result.paging is not None:
-            try:
-                truncated = _truncate(
-                    working, result.paging, saved_id, module_id, fixed,
-                    registry=registry, is_core=is_core,
-                )
-            except _PagingNotFetchable:
-                return _fail(module_id, "upstream_unexpected", _PAGING_REASON)
-        else:
-            truncated = None
+        if result.paging is None:
+            raise _TooBig
+        truncated = _truncate(
+            working, result.paging, active["saved"], module_id, active,
+            registry=registry, is_core=is_core,
+        )
         if truncated is None:
-            return _fail(module_id, "upstream_unexpected", _TOO_BIG_REASON)
+            # No declared paging list is present as a list.
+            raise _TooBig
         final_data, more = truncated
         final = envelope.build_ok(
-            data=final_data, truncated=True, more=more, **fixed
+            data=final_data, truncated=True, more=more, **active
         )
         if not _envelope_fits(final):  # pragma: no cover - search guarantees fit
-            return _fail(module_id, "upstream_unexpected", _TOO_BIG_REASON)
-        return Outcome(exit_code=0, envelope=final, log_lines=lines)
+            raise _TooBig
+        return final_data, True, more
+
+    def fit_failure(exc: Exception) -> Outcome:
+        """Map a fitting failure to its stable error (ARCHITECTURE §5)."""
+        if isinstance(exc, _PagingNotFetchable):
+            reason = _PAGING_REASON
+        elif isinstance(exc, _NoProgress):
+            reason = (
+                f"one item in {exc.section} is larger than the output limit"
+            )
+        elif isinstance(exc, _TooBigPaging):
+            reason = (
+                "the result is too large even with paging: "
+                f"the part that cannot be paged is {exc.size} bytes; "
+                f"the output limit is {envelope.BUDGET_BYTES} bytes"
+            )
+        else:
+            reason = _TOO_BIG_REASON
+        return _fail(module_id, "upstream_unexpected", reason)
+
+    try:
+        final_data, is_truncated, more = fit_once(fixed)
+    except (_PagingNotFetchable, _NoProgress, _TooBigPaging, _TooBig) as exc:
+        return fit_failure(exc)
     except _EnvelopeNotJson:
         return _fail(
             module_id, "upstream_unexpected", "the result is not valid JSON"
         )
+
+    if result.save is not None:
+        # Only now, after every check passed, save the sanitised full
+        # result from before projection (with identifiers and undeclared
+        # keys), then re-run the fit with the real id. The real id has
+        # the stand-in's length, so the fit decides the same way.
+        obj = {
+            "schema": schema_name,
+            "module": module_id,
+            "module_version": (
+                __version__ if is_core else instance.version
+            ),
+            "housesitter_version": __version__,
+            "collected_at": collected_str,
+            "label": label,
+            "source": clean_source,
+            "data": clean_data,
+            "warnings": warnings,
+        }
+        try:
+            saved_id = data_store.save(result.save, obj, label)
+        except StoreError as exc:
+            return _fail(module_id, exc.code, exc.reason)
+        except Exception:
+            return _fail(module_id, "upstream_unexpected", _FAILED_REASON)
+        fixed = {**fixed, "saved": saved_id}
+        try:
+            final_data, is_truncated, more = fit_once(fixed)
+        except (
+            _PagingNotFetchable, _NoProgress, _TooBigPaging, _TooBig
+        ) as exc:  # pragma: no cover - same sizes decide the same fit
+            return fit_failure(exc)
+        except _EnvelopeNotJson:
+            return _fail(
+                module_id, "upstream_unexpected",
+                "the result is not valid JSON",
+            )
+
+    try:
+        final = envelope.build_ok(
+            data=final_data, truncated=is_truncated, more=more, **fixed
+        )
+        fits = _envelope_fits(final)
+    except _EnvelopeNotJson:
+        return _fail(
+            module_id, "upstream_unexpected", "the result is not valid JSON"
+        )
+    if not fits:  # pragma: no cover - fit_once already verified the size
+        return _fail(module_id, "upstream_unexpected", _TOO_BIG_REASON)
+    return Outcome(exit_code=0, envelope=final, log_lines=lines)
 
 
 def format_error_line(outcome: Outcome) -> str:

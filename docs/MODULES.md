@@ -200,11 +200,15 @@ sequence of strings, `label` an optional string, and `collected_at` an
 optional timezone-aware datetime (not necessarily UTC). `save`, when set,
 is a kind matching `[a-z][a-z0-9_]{0,31}`, such as `"snapshot"`.
 `Result` checks its own shape; fields belong to `Command`. The runner
-saves sanitised full data and source when `save` is set, before removing
-identifiers or undeclared keys. It tries full output, then `compact`, then
-`paging` to fit the budget (ARCHITECTURE §5). A fitting compact result is
-not marked truncated. Warnings from the result and Context are sanitised,
-capped at 200 characters, de-duplicated, and limited to 20; the last entry
+applies identifier policy, drops undeclared keys, and checks types before
+trying full output, then `compact`, then `paging` to fit the budget
+(ARCHITECTURE §5). When `save` is set, fitting uses a stand-in saved id
+of the same length and measured size as the real one. Only after all
+projection and fitting checks pass does it save sanitised full data and
+source from before projection, including identifiers and undeclared keys.
+Projection or fitting failures leave no saved file. A fitting compact
+result is not marked truncated. Warnings from the result and Context are
+sanitised, capped at 200 characters, de-duplicated, and limited to 20; the last entry
 reports any overflow count. Labels are sanitised and capped at 200.
 
 `Paging(command, lists=(), params={}, start={})` describes how to fetch
@@ -225,11 +229,31 @@ command to exist in the module registry (or the core command table for
 core commands) and declare `section` (string), `offset` (integer), and
 `id` (string), in either `required` or `optional`. The replay must carry a
 non-empty string `id`: the saved id, or `Paging.params["id"]` when a paging
-command pages its own output without saving again. Otherwise it fails
+command pages its own output with `save` unset. Otherwise it fails
 with `upstream_unexpected`, "the module's paging cannot fetch the rest of
 this result". Authors must ensure the handler can fetch the rest and
 accepts all replay params; the runner does not check other parameters or
 their constraints at this stage.
+
+With paging lists present, if the smallest envelope still exceeds the
+budget, the runner fails with
+`upstream_unexpected`, "the result is too large even with paging: the part that cannot be paged is <N> bytes; the output limit is 90112 bytes".
+The smallest envelope uses compact data if supplied, otherwise full data,
+with all paging lists emptied, the saved id when applicable,
+`truncated: true`, and the `more` object it would carry. `<N>` is its size
+by `len(json.dumps(text)) - 2`; only the measured number is inserted,
+never module or upstream text. Without paging, or with no declared paging
+list present as a list, an oversized result fails with
+`upstream_unexpected`, "the result is too large for the output limit".
+If `start` has an entry for the section named by `more` and that section
+keeps zero items while items remain, the runner fails with
+`upstream_unexpected`, "one item in <section> is larger than the output limit".
+`<section>` is the declared paging list name. This refuses a continuation
+whose offset would not advance. A page without a start entry for that
+section counts as a first page and may keep zero items. The runner
+recognises a continuation only by its start entry, so a paging command
+that continues a list must set `start` for it; without one, a repeat is
+not detected. An empty list is never the truncated section.
 
 A handler may raise `CommandError(code, reason)`. `code` must be in
 `ERROR_CODES`; `reason` is author-written plain language, never upstream
@@ -317,10 +341,10 @@ flowchart TD
     U --> HTTP
     HTTP --> H
     H --> S["Sanitise untrusted fields"]
-    S --> W["Save full result if Result.save is set"]
-    W --> I["Identifier policy, drop undeclared keys, check types"]
+    S --> I["Identifier policy, drop undeclared keys, check types"]
     I --> B["Size budget: full, compact, then Paging"]
-    B --> E["Build command envelope"]
+    B --> W["Save sanitised full result if Result.save is set"]
+    W --> E["Build command envelope with real id"]
     E --> M
     D -.-> ERR["Any pipeline failure"]
     V -.-> ERR
