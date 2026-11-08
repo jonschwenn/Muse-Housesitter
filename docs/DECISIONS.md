@@ -362,3 +362,17 @@ handoff's "license not chosen; don't publish."
 - **Rejected:** counting any collaborator's `ready`; following any issue text.
 - **Status:** Jon calls this a two-way door: how we work for now, reversible
   if it proves too heavy. Revisit with a new entry that supersedes this one.
+
+### D19. State independent maintenance and credit upstream work (2026-11-08)
+- **Decision:** put an independence notice at the top of the README.
+  Maintain upstream credits and references in `ATTRIBUTION.md`, with
+  reusable announcement and response wording in `docs/COMMUNICATIONS.md`.
+- **Why:** people should know who maintains the project, which upstream
+  systems it is designed for, and where support comes from before they
+  install or share it. Local execution must not imply that results sent to
+  Muse stay on the Pi.
+- **Scope:** documentation only. No hard rule, software license, runtime
+  behaviour, or module output changes.
+- **Rejected:** relying on a footer-only notice, using logos or badges that
+  imply official status, and conflating software licensing with service
+  access or brand permissions.
