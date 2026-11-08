@@ -20,6 +20,9 @@ automatic detection is **Planned** and currently fails with `config_invalid`.
 
 Omit `section` to get the whole saved snapshot. A positive `offset` requires
 a section. There is no `limit` parameter; pages fit the output size budget.
+Collection warnings are repeated when `get` reads a saved snapshot, for
+both whole snapshots and section pages. This includes the warning that TLS
+verification was disabled during collection.
 A damaged saved snapshot gives `upstream_unexpected`: "That saved snapshot is damaged."
 When `truncated` is true, call `more.command` with `more.params` exactly;
 repeat for each returned continuation until all pages have been read.
@@ -37,6 +40,15 @@ Unknown readings are `null`, not zero. Compact output omits client
   `summary.ap_count`, `ap_online_count`, and `client_count` count these
   records. `clients_by_band`, `clients_by_ap`, and `clients_by_ssid` group
   clients with counts; they do not score or rank them.
+  The SSID summary lists at most 50 named networks, plus a null entry for
+  clients with no network name. If networks were left out, a warning says
+  how many and how many clients they contain. The clients list still has
+  every client; read all pages when it is truncated.
+  Two entries in `clients_by_ssid` can show the same name: they are
+  networks whose real names differ but look the same once cleaned for
+  display (hidden characters removed, spaces trimmed, or long names cut).
+  Mention this to a person because it can mean a look-alike network,
+  without claiming that it is one.
 - AP `id` and client `id` are MAC addresses (network device identifiers).
   AP `name`, `model`, and `firmware` identify the AP; client `name` prefers
   its assigned name, then hostname. Client `ip` is its network address;
@@ -46,8 +58,10 @@ Unknown readings are `null`, not zero. Compact output omits client
   `client_count` are the controller's counts. `uplink_type` is `wire` or
   `wireless` (a mesh connection to another AP); `uplink_speed_mbps` is the
   wired uplink's reported speed in megabits per second (Mbps).
-- AP `radios` describe each radio. `band` is a frequency range: `2.4GHz`,
-  `5GHz`, `6GHz`, or `unknown`. GHz means billions of cycles per second.
+- AP `radios` list at most 16 radios per AP; extra radios are left out,
+  with a warning counting how many across all APs. `band` is a frequency
+  range: `2.4GHz`, `5GHz`, `6GHz`, or `unknown`. GHz means billions of cycles
+  per second.
   A `channel` is a numbered slice of that band; `channel_setting` is the
   configured value, such as `auto`, rather than necessarily the channel
   currently in use. `width_mhz` is the size of that slice in megahertz

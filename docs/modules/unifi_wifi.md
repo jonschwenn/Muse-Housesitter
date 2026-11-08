@@ -137,6 +137,8 @@ only `aps` or only `clients` when `section` is given.
 
 `get` rejects a positive `offset` without `section` as `bad_params`. Paging
 is by size budget only; there is no implemented `limit` parameter.
+Collection warnings are repeated on whole and section-only `get`, including
+the warning that TLS verification was disabled at collection (§4.4).
 
 There is no `compare` command. Comparing snapshots is analysis, so Muse does
 it (AGENTS rule 2). SKILL.md explains how.
@@ -167,6 +169,14 @@ it (AGENTS rule 2). SKILL.md explains how.
 - During collection, AP and wireless client records that could not be read
   or had no valid colon-separated MAC address are left out, with a counted
   warning. MACs are normalised to lowercase.
+- Each AP keeps the first 16 radio records produced, in their current
+  order. Extra radios are left out with a warning counting the total
+  omitted across all APs (§4.4). This bounds each AP record so an AP section
+  page can always return at least one AP.
+- The SSID summary keeps at most 50 non-null network groups (§4.3), with a
+  counted warning for omitted groups and their clients (§4.4). The null
+  group is always kept and does not count toward the limit. No clients are
+  removed from `data.clients` by this summary limit.
 - Controller strings that are not user-chosen are restricted: `model`,
   `firmware`, and `controller_version` match `[A-Za-z0-9._+-]{1,64}`;
   `wifi_standard_raw` matches `[A-Za-z0-9._-]{1,16}`. `channel_setting`
@@ -202,7 +212,7 @@ Duplicate AP MACs keep the first record, with a counted warning.
 | `satisfaction_pct` | int\|null | % | `satisfaction` | UniFi's own experience score, defined by Ubiquiti. |
 | `uplink_type` | string\|null | — | `uplink.type` | `wire` or `wireless` (mesh). |
 | `uplink_speed_mbps` | int\|null | Mbps | `uplink.speed` | Wired link speed to the switch. |
-| `radios` | list | — | `radio_table` joined to `radio_table_stats` by `name` | One entry per radio, below. |
+| `radios` | list | — | `radio_table` joined to `radio_table_stats` by `name` | At most 16 entries, one per retained radio, below. |
 
 `data.aps[].radios[]`
 
@@ -276,7 +286,7 @@ keyed by untrusted names (ARCHITECTURE §7).
 | `client_count` | int | — | derived | Clients in `clients`. |
 | `clients_by_band` | list | — | derived | `[{band, count}]` for every band value, including zeros. |
 | `clients_by_ap` | list | — | derived | `[{ap_id, ap_name, count}]`. `ap_id` is an **identifier** and `ap_name` is **untrusted**. |
-| `clients_by_ssid` | list | — | derived | `[{ssid, count}]`. `ssid` is **untrusted**. A null SSID is its own entry. |
+| `clients_by_ssid` | list | — | derived | `[{ssid, count}]`. At most 50 non-null groups, plus a null group if present. `ssid` is **untrusted**; distinct groups can display the same name (below). |
 
 `data.summary.clients_by_band[]`
 
@@ -297,18 +307,72 @@ keyed by untrusted names (ARCHITECTURE §7).
 
 | Field | Type | Unit | Source | Meaning |
 |-------|------|------|--------|---------|
-| `ssid` | string\|null | — | `clients[].ssid` | Network name. **Untrusted.** Sorted by SSID, with a null group last if any clients have a null SSID. |
-| `count` | int | — | derived | Clients on this SSID. |
+| `ssid` | string\|null | — | `clients[].ssid` | Network name from the raw `essid` grouping, then sanitised. **Untrusted.** Sorted by SSID, with a null group last if any clients have a null SSID. |
+| `count` | int | — | derived | Clients in this raw SSID group; at least 1. |
+
+An SSID is a WiFi network name. Collection groups by the raw SSID before
+sanitising it. Distinct groups whose names become equal after
+sanitising (stripped control or formatting characters, trimmed whitespace,
+or truncation to the length limit) can therefore display the same name;
+they stay separate. The client and summary SSID fields share the same 64-character
+limit so their displayed names compare equally.
+
+If there are more than 50 non-null groups, keep the 50 with the most
+clients, breaking ties by ascending SSID string. Emit those groups in the
+usual SSID order, with the null group last. The null group is always kept
+and does not count toward 50. A warning counts the omitted groups and their
+clients; the clients list still includes every client.
 
 ### 4.4 Order, compact form, paging
 
 `get` re-validates saved records with the same rules used at collection.
-An AP or client record that cannot be read or has no valid MAC `id`, or a
-source with an invalid `kind`, `flavor`, or `site` (§4.5 and §5), fails the
-whole command with `upstream_unexpected`, "That saved snapshot is damaged."
+An AP or client record that cannot be read or has no valid MAC `id`, an AP
+with more than 16 saved radios, or a source with an invalid `kind`, `flavor`,
+or `site` (§4.5 and §5), fails the whole command with
+`upstream_unexpected`, "That saved snapshot is damaged."
 Records are not dropped, so paging offsets do not shift. Other invalid
 values in nullable fields become `null`; an invalid band becomes `"unknown"`.
-Whole-snapshot `get` recomputes `summary` from the re-validated records.
+Whole-snapshot `get` preserves and validates the saved `clients_by_ssid`
+groups; it recomputes the rest of `summary` from the re-validated records.
+The saved SSID summary must be a list of objects with exactly `ssid`
+(string or null) and `count` (integer, not boolean, at least 1). It may have
+at most 50 non-null entries and at most one null entry, which must be last.
+The null entry's count must equal the number of re-validated clients with
+a null SSID exactly. For each other displayed name, the sum of its entries'
+counts must not exceed the number of re-validated clients with that name:
+it can be lower, because a raw group that displays the same name may be the
+one the 50-group limit left out. The shortfall, summed over all names
+(including names not listed at all), must be zero without a recognised
+saved SSID-summary warning. With one, the summary must list exactly 50
+named groups, the warning's group count must not exceed its client count,
+and the shortfall must equal its client count. Any failure gives the same
+damaged-snapshot error. This preserves groups that display identically instead of merging
+them on read.
+
+Whole and section-only `get` also validate saved top-level `warnings`:
+missing means an empty list; any value other than a list of strings gives
+the damaged-snapshot error. Each string must match a known warning
+template exactly, including its singular or plural wording, to be
+repeated: unreadable AP/client records, duplicate AP/client MACs, the
+radio and SSID limits below, the exact core warning
+"TLS verification disabled by config (unifi_wifi.tls.insecure)", or
+"N more warnings omitted". Counts are decimal integers from 1 to
+`10**9`, without leading zeros. Recognised warnings are regenerated from
+shared templates and parsed counts, never copied from saved text.
+Unrecognised strings are silently dropped. Saved warnings come first,
+followed by warnings from re-validation, with duplicates removed.
+
+Limit warnings use these exact texts (`N` and `M` are counts):
+
+- "1 radio record beyond the 16-per-AP limit was left out"
+- "N radio records beyond the 16-per-AP limit were left out"
+- "1 more SSID group with 1 client was not listed in the summary"
+- "1 more SSID group with M clients was not listed in the summary"
+- "N more SSID groups with M clients were not listed in the summary"
+
+The radio warning counts omitted radios across all APs and is emitted only
+when at least one was omitted. The SSID warning counts omitted groups and
+their clients; singular `client` is used when the client count is 1.
 
 - `aps` are ordered by `name`, then `id`. `clients` are ordered by
   `ap_name`, then `name`, then `id`. The order is deterministic and doesn't
@@ -429,3 +493,15 @@ The tests check:
   Pending Jon's decision.
 - **D-auto.** Automatic flavour detection needs a core change (§2.2).
   **Planned**, pending Jon's decision.
+- **D1. Decided 2026-11-08 by Jon:** keep at most 16 radios per AP,
+  warn with the total omitted, and reject saved APs over that limit (§4.0,
+  §4.4).
+- **D2. Decided 2026-11-08 by Jon:** keep raw SSID groups separate even
+  when their displayed names match; whole `get` validates and preserves
+  the saved groups (§4.3, §4.4).
+- **D3. Decided 2026-11-08 by Jon:** whole and section-only `get` repeat
+  recognised collection warnings from shared templates, including disabled
+  TLS verification, with saved warnings first and duplicates removed (§4.4).
+- **D4. Decided 2026-11-08 by Jon:** keep at most 50 non-null SSID groups,
+  choosing by client count with SSID ties, always keep the null group, and
+  warn with omitted group and client counts; keep every client (§4.3, §4.4).
