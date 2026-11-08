@@ -375,8 +375,9 @@ Stable error codes: `config_invalid`, `secret_unreadable`, `upstream_auth`,
   projection, including identifiers and undeclared keys, even when output
   is compacted or truncated. Saving is optional for results that fit. A
   paging command can page its own output without saving again
-  by carrying the existing id in `Paging.params["id"]`; the current call
-  then creates no new saved file.
+  by leaving `Result.save` unset and carrying the existing id in
+  `Paging.params["id"]`; the current call then creates no new saved file.
+  When `Result.save` is set, the new saved id replaces any carried id.
 
 ## 6. Files, config, and secrets
 

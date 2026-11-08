@@ -1932,3 +1932,40 @@ class TestFitBeforeSave:
             assert sdk._STORE_ID_RE.fullmatch(standin)
             assert len(real) == len(standin)
             assert envelope_mod.measure(real) == envelope_mod.measure(standin)
+
+    @pytest.mark.parametrize("items", [None, 5])
+    def test_too_big_with_absent_paging_lists_saves_nothing(
+        self, tmp_path, items
+    ):
+        # Gate 2: paging declared, but no declared list is present as a
+        # list: the generic too-large failure, and nothing saved.
+        data = {"note": "n" * 100000}
+        if items is not None:
+            data["items"] = items
+        command = sdk.Command(
+            name="get",
+            handler="get",
+            description="Page demo readings.",
+            optional={
+                "section": sdk.Param("string", "Which list to continue."),
+                "offset": sdk.Param("integer", "Where to continue."),
+                "id": sdk.Param("string", "Saved result id."),
+            },
+            fields=(
+                sdk.Field("data.note", "string"),
+                sdk.Field("data.items", "integer", nullable=True),
+            ),
+        )
+        module_cls = self.make_module(
+            command, data,
+            sdk.Paging(command="get", lists=("items",)),
+            save="snapshot",
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get", {}, tmp_path
+        )
+        failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "the result is too large for the output limit"
+        )
+        assert stored_files(tmp_path) == []

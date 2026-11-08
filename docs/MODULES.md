@@ -229,7 +229,7 @@ command to exist in the module registry (or the core command table for
 core commands) and declare `section` (string), `offset` (integer), and
 `id` (string), in either `required` or `optional`. The replay must carry a
 non-empty string `id`: the saved id, or `Paging.params["id"]` when a paging
-command pages its own output without saving again. Otherwise it fails
+command pages its own output with `save` unset. Otherwise it fails
 with `upstream_unexpected`, "the module's paging cannot fetch the rest of
 this result". Authors must ensure the handler can fetch the rest and
 accepts all replay params; the runner does not check other parameters or
