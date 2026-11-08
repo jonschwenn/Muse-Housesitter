@@ -23,6 +23,16 @@ Never include output or screenshots from a real house. -->
 - [ ] 2. Independent agent review: findings and dispositions below
 - [ ] 3. Threat and privacy review (if required): checklist results below
 - [ ] 4. Spec-vs-code review: false or unverifiable claims below
+- Deep review:
+  <!-- Applies to a new module; changes to http allow-lists, secrets,
+  identifiers, envelope, storage, drop-ins, install, CI, or ci-guard. For
+  those changes, gates 2–3 using the author's model family is a strong
+  reason to run it. Same-family review alone does not put low-risk changes
+  in scope. Use exactly one form:
+  Deep review: ran (<model>, <effort>), N findings
+  Deep review: skipped: <reason>
+  Out-of-scope PRs delete the line. See docs/REVIEW.md,
+  "Optional: deep red-team review". -->
 - [ ] 5. Jon's sign-off
 
 ### Findings
