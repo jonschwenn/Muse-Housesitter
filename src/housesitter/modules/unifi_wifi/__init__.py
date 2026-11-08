@@ -559,7 +559,9 @@ def _read_stat(session: Any, path: str) -> list:
 def _logout(session: Any, path: str, ctx: sdk.Context) -> None:
     """Attempt logout; a failure is logged and never replaces the result."""
     try:
-        session.post(path)
+        response = session.post(path)
+        if response.status != 200:
+            ctx.log.info("UniFi logout failed")
     except Exception:
         ctx.log.info("UniFi logout failed")
     finally:

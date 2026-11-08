@@ -161,6 +161,9 @@ it (AGENTS rule 2). SKILL.md explains how.
   `*_setting` field.
   Numbers larger than `2**53` in absolute value, and numeric strings longer
   than 32 characters after trimming surrounding whitespace, become `null`.
+  A numeric string's limit is checked on its exact decimal value, before
+  conversion. A fractional string so close to a whole number that it would
+  round to one (e.g. `"100.000000000000001"`) also becomes `null`.
 - During collection, AP and wireless client records that could not be read
   or had no valid colon-separated MAC address are left out, with a counted
   warning. MACs are normalised to lowercase.

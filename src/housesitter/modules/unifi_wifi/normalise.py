@@ -11,6 +11,7 @@ must be verified on a live controller (#16).
 
 from __future__ import annotations
 
+import decimal
 import ipaddress
 import math
 import re
@@ -74,10 +75,25 @@ def _to_number(value: Any) -> Any:
         text = value.strip()
         if len(text) > _MAX_NUMERIC_LEN:
             return None
+        # Range-check the exact decimal value before float rounding, so
+        # "9007199254740993" or "100.000000000000001" cannot round into
+        # range (red-team 1).
         try:
-            num = float(text)
-        except ValueError:
+            exact = decimal.Decimal(text)
+        except decimal.InvalidOperation:
             return None
+        # copy_abs() and comparisons are exact and ignore the Decimal
+        # context, so huge exponents ("1e1000000") cannot raise Overflow.
+        if not exact.is_finite() or exact.copy_abs() > _MAX_MAGNITUDE:
+            return None
+        if exact == exact.to_integral_value():
+            num = int(exact)
+        else:
+            num = float(exact)
+            if num.is_integer():
+                # A fractional value that rounds to a whole float would
+                # pass the integer and percent checks as if it were whole.
+                return None
     else:
         return None
     if isinstance(num, float) and not math.isfinite(num):
@@ -207,7 +223,8 @@ def _radio_record(table: Any, stats_by_name: Any) -> Any:
         "tx_power_dbm": _to_int(stats.get("tx_power")),
         "tx_power_mode": (
             table.get("tx_power_mode")
-            if table.get("tx_power_mode") in _TX_POWER_MODES
+            if isinstance(table.get("tx_power_mode"), str)
+            and table.get("tx_power_mode") in _TX_POWER_MODES
             else None
         ),
         "channel_utilization_pct": _pct(stats.get("cu_total")),
@@ -271,7 +288,7 @@ def normalise_aps(devices: Any) -> tuple:
         if not isinstance(uplink, dict):
             uplink = {}
         uplink_type = uplink.get("type")
-        if uplink_type not in _UPLINK_TYPES:
+        if not isinstance(uplink_type, str) or uplink_type not in _UPLINK_TYPES:
             uplink_type = None
         name = record.get("name")
         if not isinstance(name, str) or not name:

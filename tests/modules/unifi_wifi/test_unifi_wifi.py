@@ -1416,3 +1416,85 @@ def test_get_nulls_out_of_range_cumulative_retry_in_saved_file():
         assert data["clients"][1]["tx_retry_pct_cumulative"] == 12.5
     finally:
         home.close()
+
+
+def test_non_string_enum_values_become_null_instead_of_failing():
+    # Red-team 1: a dict or list where an enum string belongs raised
+    # TypeError (unhashable) and killed the whole snapshot.
+    routes = typical_routes("unifi_os")
+    dev = json.loads(fixture_bytes("unifi_os_device.json"))
+    dev["data"][0]["radio_table"][0]["tx_power_mode"] = {}
+    dev["data"][0]["uplink"] = {"type": []}
+    routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
+        status=200, body=json.dumps(dev).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    ap = by_id(outcome.envelope["data"]["aps"])[dev["data"][0]["mac"].lower()]
+    assert ap["uplink_type"] is None
+    modes = {r["band"]: r["tx_power_mode"] for r in ap["radios"]}
+    assert modes == {"2.4GHz": None, "5GHz": "high", "6GHz": "auto"}
+
+
+def test_numeric_strings_are_range_checked_before_rounding():
+    # Red-team 1: "9007199254740993" rounded to 2**53 and passed the
+    # magnitude check; "100.000000000000001" rounded to 100 and passed
+    # the percent range. Both must become null.
+    routes = typical_routes("unifi_os")
+    sta = json.loads(fixture_bytes("unifi_os_sta.json"))
+    sta["data"][0]["uptime"] = "9007199254740993"
+    sta["data"][0]["satisfaction"] = "100.000000000000001"
+    sta["data"][1]["uptime"] = "3600"
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200, body=json.dumps(sta).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    clients = by_id(outcome.envelope["data"]["clients"])
+    victim = clients[sta["data"][0]["mac"].lower()]
+    assert victim["connected_s"] is None
+    assert victim["satisfaction_pct"] is None
+    assert clients[sta["data"][1]["mac"].lower()]["connected_s"] == 3600
+
+
+def test_logout_http_error_status_is_logged(caplog):
+    # Red-team 1 nit: a logout answered with HTTP 500 was silently
+    # ignored; spec §5 says a failed logout is logged with fixed text.
+    routes = typical_routes("unifi_os")
+    routes[("POST", "/api/auth/logout")] = Canned(status=500, body=b"{}")
+    with caplog.at_level("INFO", logger="housesitter"):
+        outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    assert any(r.getMessage() == "UniFi logout failed" for r in caplog.records)
+
+
+def test_ordinary_decimal_strings_still_read():
+    # Guard for the red-team 1 fix: exact range checks must not null
+    # ordinary decimal strings that floats cannot represent exactly.
+    routes = typical_routes("unifi_os")
+    sta = json.loads(fixture_bytes("unifi_os_sta.json"))
+    sta["data"][0]["tx_rate"] = "866700.1"
+    sta["data"][0]["signal"] = "-61"
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200, body=json.dumps(sta).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    victim = by_id(outcome.envelope["data"]["clients"])[
+        sta["data"][0]["mac"].lower()]
+    assert victim["tx_rate_mbps"] == 866700.1 / 1000
+    assert victim["signal_dbm"] == -61
+
+
+def test_huge_exponent_numeric_strings_become_null():
+    # B1: "1e1000000" overflowed the Decimal context in abs() and killed
+    # the whole snapshot; it must become null like any huge number.
+    routes = typical_routes("unifi_os")
+    sta = json.loads(fixture_bytes("unifi_os_sta.json"))
+    sta["data"][0]["uptime"] = "1e1000000"
+    sta["data"][1]["uptime"] = "-1e1000000"
+    sta["data"][2]["uptime"] = "1e-1000000"
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200, body=json.dumps(sta).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    clients = by_id(outcome.envelope["data"]["clients"])
+    for index in range(3):
+        assert clients[sta["data"][index]["mac"].lower()]["connected_s"] is None
