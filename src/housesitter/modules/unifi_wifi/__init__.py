@@ -15,7 +15,16 @@ from housesitter import sdk
 from housesitter.modules.unifi_wifi import normalise
 
 _SITE_PATTERN = r"[A-Za-z0-9_-]{1,64}"
-_BASE_URL_PATTERN = r"https://[^/\s?#@]+(:[0-9]{1,5})?/?"
+# Port 1..65535 with no leading zeros (a bare host has no colon, so an
+# out-of-range port can never hide inside the host part; bracketed IPv6
+# literals keep working).
+_PORT_PATTERN = (
+    r"(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|"
+    r"[1-5][0-9]{4}|[1-9][0-9]{0,3})"
+)
+_BASE_URL_PATTERN = (
+    r"https://([^/\s?#@:\[]+|\[[^\]/\s?#@]+\])(:" + _PORT_PATTERN + r")?/?"
+)
 
 _SITE_PREFIX_OS = "/proxy/network/api/s/%s"
 _SITE_PREFIX_CLASSIC = "/api/s/%s"
@@ -276,7 +285,16 @@ class UniFiWifi(sdk.Module):
         )
 
     def get(self, ctx: sdk.Context, params: dict) -> sdk.Result:
-        """Load a saved snapshot, whole or one list section from offset."""
+        """Load a saved snapshot, whole or one list section from offset.
+
+        Saved files are re-validated with the collection rules before
+        anything is returned: a locally edited file can smuggle control
+        characters into plain-string fields the runner does not
+        sanitise. Paging offsets index the saved lists, so any unreadable
+        or id-less record fails the whole ``get`` as damaged instead of
+        being dropped (which would shift the offsets). The whole snapshot
+        recomputes its summary from the re-validated records.
+        """
         try:
             saved = ctx.store.load(params["id"])
         except Exception as exc:
@@ -302,11 +320,12 @@ class UniFiWifi(sdk.Module):
             raise sdk.CommandError(
                 "upstream_unexpected", "Cannot load that saved snapshot."
             )
-        source = saved.get("source")
-        if not isinstance(source, dict):
+        try:
+            source = normalise.revalidate_source(saved.get("source"))
+        except ValueError as exc:
             raise sdk.CommandError(
-                "upstream_unexpected", "Cannot load that saved snapshot."
-            )
+                "upstream_unexpected", str(exc)
+            ) from None
         collected_at = _parse_collected_at(saved.get("collected_at"))
         if collected_at is None:
             raise sdk.CommandError(
@@ -317,6 +336,10 @@ class UniFiWifi(sdk.Module):
             raise sdk.CommandError(
                 "upstream_unexpected", "Cannot load that saved snapshot."
             )
+        if not normalise.saved_ids_intact(aps, clients):
+            raise sdk.CommandError(
+                "upstream_unexpected", normalise.DAMAGED_SNAPSHOT
+            )
         section = params.get("section")
         offset = params.get("offset", 0)
         if section is None:
@@ -325,18 +348,24 @@ class UniFiWifi(sdk.Module):
                     "bad_params",
                     "An offset without a section has no list to skip.",
                 )
+            clean_aps, ap_warnings = normalise.revalidate_aps(aps)
+            clean_clients, client_warnings = normalise.revalidate_clients(
+                clients, clean_aps
+            )
+            clean_summary = normalise.build_summary(
+                clean_aps, clean_clients
+            )
             page = {
-                "summary": summary,
-                "aps": aps,
-                "clients": list(clients),
+                "summary": clean_summary,
+                "aps": clean_aps,
+                "clients": clean_clients,
             }
             compact = {
-                "summary": summary,
-                "aps": aps,
+                "summary": clean_summary,
+                "aps": clean_aps,
                 "clients": [
                     normalise.compact_client(item)
-                    for item in clients
-                    if isinstance(item, dict)
+                    for item in clean_clients
                 ],
             }
             return sdk.Result(
@@ -348,10 +377,15 @@ class UniFiWifi(sdk.Module):
                     lists=("clients",),
                     params={"id": params["id"]},
                 ),
+                warnings=list(ap_warnings) + list(client_warnings),
                 label=label,
                 collected_at=collected_at,
             )
-        items = aps if section == "aps" else clients
+        clean_aps, _ = normalise.revalidate_aps(aps)
+        clean_clients, _ = normalise.revalidate_clients(
+            clients, clean_aps
+        )
+        items = clean_aps if section == "aps" else clean_clients
         page_items = list(items[offset:])
         out: dict[str, Any] = {section: page_items}
         compact_out: dict[str, Any] | None = None
@@ -360,7 +394,6 @@ class UniFiWifi(sdk.Module):
                 "clients": [
                     normalise.compact_client(item)
                     for item in page_items
-                    if isinstance(item, dict)
                 ]
             }
         return sdk.Result(

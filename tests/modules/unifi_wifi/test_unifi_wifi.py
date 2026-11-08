@@ -485,7 +485,8 @@ def test_edge_cases():
     # duplicate mac: first wins; missing mac skipped
     assert clients["02:00:00:00:03:01"]["ip"] == "192.0.2.61"
     assert outcome.envelope["warnings"] == [
-        "1 client record had no valid MAC address and was left out",
+        "1 client record could not be read or had no valid MAC "
+        "address and was left out",
         "1 duplicate client MAC address was left out",
     ]
 
@@ -558,7 +559,8 @@ def test_hostile_output_sanitised_and_truncated():
     # switch excluded, no-mac record skipped with a warning
     assert set(aps) == {"02:00:00:00:00:31"}
     assert (
-        "1 AP record had no valid MAC address and was left out"
+        "1 AP record could not be read or had no valid MAC address "
+        "and was left out"
         in info["saved_obj"]["warnings"]
     )
     # every returned untrusted string is sanitised and capped
@@ -902,6 +904,119 @@ def test_get_large_paging_chain_returns_every_client_once():
         home.close()
 
 
+def _tamper_saved(home, saved_id):
+    path = (
+        Path(home.home) / ".local" / "share" / "housesitter"
+        / "unifi_wifi" / (saved_id + ".json")
+    )
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    return saved, path
+
+
+def test_get_with_damaged_ids_fails_instead_of_shifting_offsets():
+    # Regression (F1): a locally edited saved file with an invalid AP or
+    # client id must fail a section get as damaged rather than drop
+    # records (which would shift paging offsets).
+    home = SavedHome(typical_routes("unifi_os"))
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        saved, path = _tamper_saved(home, snap.envelope["saved"])
+        saved["data"]["aps"].append({"id": "not-a-mac", "name": "Ghost"})
+        saved["data"]["clients"].append({"id": "also-bad", "band": "5GHz"})
+        path.write_text(json.dumps(saved), encoding="utf-8")
+        for params in (
+            {"id": snap.envelope["saved"], "section": "clients", "offset": 0},
+            {"id": snap.envelope["saved"], "section": "aps", "offset": 0},
+        ):
+            page = home.run("housesitter.unifi_wifi.get", params)
+            assert page.exit_code == 1, params
+            assert page.envelope["error"]["code"] == "upstream_unexpected"
+            assert page.envelope["error"]["message"] == (
+                "That saved snapshot is damaged.")
+        # The whole snapshot (no section) fails the same way: it can be
+        # truncated too, and its more.offset indexes the saved list.
+        full = home.run(
+            "housesitter.unifi_wifi.get", {"id": snap.envelope["saved"]})
+        assert full.exit_code == 1
+        assert full.envelope["error"]["message"] == (
+            "That saved snapshot is damaged.")
+    finally:
+        home.close()
+
+
+def test_get_revalidates_saved_fields_and_recomputes_summary():
+    # Regression (F1): control characters smuggled into a saved file must
+    # not reach plain-string fields the runner does not sanitise, a bad
+    # site must fail as damaged, and the whole-snapshot summary must be
+    # recomputed from the re-validated records.
+    home = SavedHome(typical_routes("unifi_os"))
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        saved_id = snap.envelope["saved"]
+        saved, path = _tamper_saved(home, saved_id)
+        n_aps = len(saved["data"]["aps"])
+        n_clients = len(saved["data"]["clients"])
+        saved["data"]["aps"][0]["radios"][0]["band"] = "2.4GHz\u0007"
+        saved["data"]["aps"][0]["radios"][0]["channel_setting"] = "auto\u202e"
+        saved["data"]["aps"][0]["model"] = "U7-Pro!!"
+        saved["data"]["clients"][0]["band"] = "5GHz\x1b[31m"
+        saved["data"]["clients"][0]["wifi_standard"] = "ax\x00"
+        saved["data"]["summary"]["ap_count"] = 999
+        saved["data"]["summary"]["clients_by_band"] = []
+        saved["source"]["site"] = "default\u0000"
+        path.write_text(json.dumps(saved), encoding="utf-8")
+        bad = home.run("housesitter.unifi_wifi.get", {"id": saved_id})
+        assert bad.exit_code == 1
+        assert bad.envelope["error"]["code"] == "upstream_unexpected"
+        assert bad.envelope["error"]["message"] == (
+            "That saved snapshot is damaged.")
+        # a valid site lets the whole snapshot through, re-validated
+        saved["source"]["site"] = "default"
+        path.write_text(json.dumps(saved), encoding="utf-8")
+        full = home.run("housesitter.unifi_wifi.get", {"id": saved_id})
+        assert full.exit_code == 0
+        data = full.envelope["data"]
+        assert data["summary"]["ap_count"] == n_aps
+        assert data["summary"]["client_count"] == n_clients
+        assert data["summary"]["clients_by_band"] == [
+            {"band": "2.4GHz", "count": 4},
+            {"band": "5GHz", "count": 5},
+            {"band": "6GHz", "count": 2},
+            {"band": "unknown", "count": 1},
+        ]
+        first_ap = data["aps"][0]
+        assert first_ap["radios"][0]["band"] == "unknown"
+        assert first_ap["radios"][0]["channel_setting"] is None
+        assert first_ap["model"] is None
+        assert data["clients"][0]["band"] == "unknown"
+        assert data["clients"][0]["wifi_standard"] is None
+        assert full.envelope["source"]["site"] == "default"
+        assert "\u0007" not in json.dumps(full.envelope)
+        assert "\u202e" not in json.dumps(full.envelope)
+    finally:
+        home.close()
+
+
+def test_base_url_port_must_be_valid():
+    # Regression (F3): an out-of-range port used to pass config validation
+    # and fail later as upstream_unexpected. It must be config_invalid.
+    for bad_port in ("0", "00", "080", "65536", "99999", "100000"):
+        outcome, _ = run_case(
+            typical_routes("unifi_os"),
+            config={"base_url": f"https://192.0.2.1:{bad_port}"},
+        )
+        assert outcome.exit_code == 1, bad_port
+        assert outcome.envelope["error"]["code"] == "config_invalid", bad_port
+    for good_port in ("1", "80", "443", "8443", "65535"):
+        outcome, _ = run_case(
+            typical_routes("unifi_os"),
+            config={"base_url": f"https://192.0.2.1:{good_port}"},
+        )
+        assert outcome.exit_code == 0, good_port
+
+
 def test_identifiers_none_removes_ids():
     home = SavedHome(typical_routes("unifi_os"), identifiers="none")
     try:
@@ -1009,6 +1124,164 @@ def test_client_ip_with_ipv6_scope_text_is_dropped():
     assert by_id[sta["data"][0]["mac"].lower()]["ip"] is None
     assert by_id[sta["data"][1]["mac"].lower()]["ip"] == "2001:db8::10"
     assert "Ignore previous" not in json.dumps(outcome.envelope)
+
+
+def test_duplicate_ap_mac_keeps_first_and_warns():
+    # Regression (F2): duplicate AP MACs must keep the first record and
+    # count the rest; client ap_name must come from the kept AP.
+    routes = typical_routes("unifi_os")
+    dev = json.loads(fixture_bytes("unifi_os_device.json"))
+    dupe = dict(dev["data"][0])
+    dupe["name"] = "Zulu Living Room"
+    dev["data"] = [dev["data"][0], dupe] + dev["data"][1:]
+    routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
+        status=200, body=json.dumps(dev).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    aps = {item["id"]: item for item in outcome.envelope["data"]["aps"]}
+    assert aps[AP1]["name"] == "Living Room"
+    assert outcome.envelope["warnings"] == [
+        "1 duplicate AP MAC address was left out"
+    ]
+    clients = {c["id"]: c for c in outcome.envelope["data"]["clients"]}
+    assert clients["02:00:00:00:01:02"]["ap_name"] == "Living Room"
+
+
+def test_huge_numbers_become_null_instead_of_killing_snapshot():
+    # Regression (F4): a 400-digit tx_rate hit OverflowError on /1000 and
+    # killed the whole snapshot. Huge values must normalise to null.
+    routes = typical_routes("unifi_os")
+    sta = json.loads(fixture_bytes("unifi_os_sta.json"))
+    sta["data"][0]["tx_rate"] = 10**400
+    sta["data"][0]["uptime"] = 10**400
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200, body=json.dumps(sta).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    clients = {c["id"]: c for c in outcome.envelope["data"]["clients"]}
+    victim = clients[sta["data"][0]["mac"].lower()]
+    assert victim["tx_rate_mbps"] is None
+    assert victim["connected_s"] is None
+    # everything else about the record is intact
+    assert victim["rx_rate_mbps"] == sta["data"][0]["rx_rate"] / 1000
+    assert victim["signal_dbm"] == sta["data"][0]["signal"]
+
+
+def test_uppercase_macs_are_lowercased_and_still_join():
+    # F7: uppercase MACs (device, sta, and ap_mac) normalise to
+    # lowercase and the client still joins its AP.
+    routes = typical_routes("unifi_os")
+    dev = json.loads(fixture_bytes("unifi_os_device.json"))
+    sta = json.loads(fixture_bytes("unifi_os_sta.json"))
+    dev["data"][0]["mac"] = "02:00:00:00:AB:CD"
+    sta["data"][0]["mac"] = "02:00:00:01:AB:CD"
+    sta["data"][0]["ap_mac"] = "02:00:00:00:AB:CD"
+    routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
+        status=200, body=json.dumps(dev).encode("utf-8"))
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200, body=json.dumps(sta).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    data = outcome.envelope["data"]
+    assert by_id(data["aps"])["02:00:00:00:ab:cd"]["name"] == "Living Room"
+    client = by_id(data["clients"])["02:00:00:01:ab:cd"]
+    assert client["ap_id"] == "02:00:00:00:ab:cd"
+    assert client["ap_name"] == "Living Room"
+    for ap in data["aps"]:
+        assert ap["id"] == ap["id"].lower()
+    for item in data["clients"]:
+        assert item["id"] == item["id"].lower()
+        if item["ap_id"] is not None:
+            assert item["ap_id"] == item["ap_id"].lower()
+
+
+def test_null_names_sort_after_named_ones():
+    # F7: a null AP name and a null client name sort after named ones.
+    routes = typical_routes("unifi_os")
+    dev = json.loads(fixture_bytes("unifi_os_device.json"))
+    sta = json.loads(fixture_bytes("unifi_os_sta.json"))
+    del dev["data"][2]["name"]
+    phone = next(
+        item for item in sta["data"]
+        if item["mac"] == "02:00:00:00:01:02")
+    phone["name"] = None
+    phone["hostname"] = None
+    routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
+        status=200, body=json.dumps(dev).encode("utf-8"))
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200, body=json.dumps(sta).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    data = outcome.envelope["data"]
+    assert [item["id"] for item in data["aps"]] == [AP1, AP2, AP3]
+    assert by_id(data["aps"])[AP3]["name"] is None
+    group = [item for item in data["clients"] if item["ap_id"] == AP1]
+    assert group
+    assert group[-1]["id"] == "02:00:00:00:01:02"
+    assert group[-1]["name"] is None
+    assert all(item["name"] is not None for item in group[:-1])
+
+
+def test_check_logs_out_when_sysinfo_fails():
+    # F7: check() still logs out when the sysinfo read fails (and raises).
+    from housesitter.core.context import ModuleContext
+    from housesitter.core.store import FileStore
+
+    routes = typical_routes("unifi_os")
+    routes[("GET", "/proxy/network/api/s/default/stat/sysinfo")] = Canned(
+        status=500, body=b"x")
+    home = SavedHome(routes)
+    try:
+        module = UniFiWifi()
+        ctx = ModuleContext(
+            module,
+            {
+                "base_url": f"https://192.0.2.1:{home.server.port}",
+                "site": "default",
+                "flavor": "unifi_os",
+                "auth": {
+                    "username": "housesitter-readonly",
+                    "password_secret": "unifi_password",
+                },
+                "tls": {},
+                "request_timeout_s": 15,
+            },
+            secrets_dir=str(
+                Path(home.home) / ".config" / "housesitter" / "secrets"),
+            deadline_monotonic=time.monotonic() + 60.0,
+            store=FileStore("unifi_wifi", env={"HOME": home.home}),
+            client_factory=home.factory,
+        )
+        try:
+            module.check(ctx)
+        except Exception as exc:
+            assert getattr(exc, "code", None) == "upstream_unexpected"
+        else:
+            raise AssertionError("check succeeded despite sysinfo 500")
+        assert len(logout_requests({"requests": home.server.requests})) == 1
+    finally:
+        home.close()
+
+
+def test_get_offset_past_end_returns_empty_page():
+    # F7: an offset past the end of a section is an empty page, not an
+    # error: truncated false and more null.
+    home = SavedHome(typical_routes("unifi_os"))
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        saved_id = snap.envelope["saved"]
+        for section in ("clients", "aps"):
+            page = home.run(
+                "housesitter.unifi_wifi.get",
+                {"id": saved_id, "section": section, "offset": 100},
+            )
+            assert page.exit_code == 0
+            assert page.envelope["data"] == {section: []}
+            assert page.envelope["truncated"] is False
+            assert page.envelope["more"] is None
+    finally:
+        home.close()
 
 
 def test_tls_failure_names_the_tls_options(tmp_path):

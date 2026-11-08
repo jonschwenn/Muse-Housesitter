@@ -37,6 +37,14 @@ _WIFI_STANDARD = {
 
 _TX_POWER_MODES = frozenset({"auto", "high", "medium", "low", "custom"})
 _UPLINK_TYPES = frozenset({"wire", "wireless"})
+_WIFI_STANDARD_VALUES = frozenset(_WIFI_STANDARD.values())
+
+_SITE_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+_SOURCE_KIND = "unifi"
+_SOURCE_FLAVORS = frozenset({"unifi_os", "classic"})
+
+#: Fixed reason for a saved snapshot that fails re-validation.
+DAMAGED_SNAPSHOT = "That saved snapshot is damaged."
 
 _COMPACT_DROP = frozenset({
     "noise_dbm", "idle_s", "vendor", "wifi_standard_raw", "guest", "ip",
@@ -44,20 +52,34 @@ _COMPACT_DROP = frozenset({
 })
 
 
+_MAX_MAGNITUDE = 2**53
+_MAX_NUMERIC_LEN = 32
+
+
 def _to_number(value: Any) -> Any:
-    """An int/float (never bool, always finite) or numeric string, else None."""
+    """An int/float (never bool, always finite) or numeric string, else None.
+
+    Values past 2**53 (or numeric strings longer than 32 characters)
+    are untrusted-upstream noise the radio math cannot use exactly
+    (huge ints even raise OverflowError on division), so they are None.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         num = value
     elif isinstance(value, str):
+        text = value.strip()
+        if len(text) > _MAX_NUMERIC_LEN:
+            return None
         try:
-            num = float(value.strip())
+            num = float(text)
         except ValueError:
             return None
     else:
         return None
     if isinstance(num, float) and not math.isfinite(num):
+        return None
+    if abs(num) > _MAX_MAGNITUDE:
         return None
     return num
 
@@ -193,12 +215,15 @@ def normalise_aps(devices: Any) -> tuple:
 
     Only ``type == "uap"`` records with a valid MAC are kept. Records
     are skipped (and counted in a fixed-text warning) when they have no
-    valid MAC. ``online`` is literally ``state == 1``: a missing state
+    valid MAC; duplicate MACs keep the first record (counted).
+    ``online`` is literally ``state == 1``: a missing state
     means offline.
     """
     warnings: list[str] = []
     aps: list[dict] = []
     skipped = 0
+    duplicates = 0
+    seen: set[str] = set()
     records = devices if isinstance(devices, list) else []
     for record in records:
         if not isinstance(record, dict):
@@ -210,6 +235,10 @@ def normalise_aps(devices: Any) -> tuple:
         if ap_id is None:
             skipped += 1
             continue
+        if ap_id in seen:
+            duplicates += 1
+            continue
+        seen.add(ap_id)
         stats_by_name: dict[str, Any] = {}
         stats_list = record.get("radio_table_stats")
         if isinstance(stats_list, list):
@@ -251,12 +280,21 @@ def normalise_aps(devices: Any) -> tuple:
         })
     if skipped == 1:
         warnings.append(
-            "1 AP record had no valid MAC address and was left out"
+            "1 AP record could not be read or had no valid MAC address "
+            "and was left out"
         )
     elif skipped > 1:
         warnings.append(
-            f"{skipped} AP records had no valid MAC address "
-            "and were left out"
+            f"{skipped} AP records could not be read or had no valid "
+            "MAC address and were left out"
+        )
+    if duplicates == 1:
+        warnings.append(
+            "1 duplicate AP MAC address was left out"
+        )
+    elif duplicates > 1:
+        warnings.append(
+            f"{duplicates} duplicate AP MAC addresses were left out"
         )
     aps.sort(key=lambda item: (item["name"] is None, item["name"] or "",
                                item["id"]))
@@ -349,7 +387,7 @@ def normalise_clients(stations: Any, aps: Any) -> tuple:
 
     Wired records are excluded. Records without a valid MAC are
     skipped (counted); duplicate MACs keep the first record (counted).
-    Clients sort by AP name, then name, then id, with nulls first.
+    Clients sort by AP name, then name, then id, with nulls last.
     """
     warnings: list[str] = []
     aps_by_id = {item["id"]: item for item in aps}
@@ -375,12 +413,13 @@ def normalise_clients(stations: Any, aps: Any) -> tuple:
         clients.append(_client_record(record, aps_by_id))
     if skipped == 1:
         warnings.append(
-            "1 client record had no valid MAC address and was left out"
+            "1 client record could not be read or had no valid MAC "
+            "address and was left out"
         )
     elif skipped > 1:
         warnings.append(
-            f"{skipped} client records had no valid MAC address "
-            "and were left out"
+            f"{skipped} client records could not be read or had no "
+            "valid MAC address and were left out"
         )
     if duplicates == 1:
         warnings.append(
@@ -445,4 +484,222 @@ def build_summary(aps: Any, clients: Any) -> Any:
         "clients_by_band": by_band,
         "clients_by_ap": by_ap,
         "clients_by_ssid": by_ssid,
+    }
+
+
+def _revalidate_band(value: Any) -> str:
+    """A known band, else ``"unknown"`` (never trust the saved text)."""
+    if isinstance(value, str) and value in _BANDS:
+        return value
+    return "unknown"
+
+
+def _revalidate_radio(item: Any) -> Any:
+    """One saved radio, re-checked field by field, or None when unreadable."""
+    if not isinstance(item, dict):
+        return None
+    tx_power_mode = item.get("tx_power_mode")
+    if not isinstance(tx_power_mode, str) or tx_power_mode not in _TX_POWER_MODES:
+        tx_power_mode = None
+    return {
+        "band": _revalidate_band(item.get("band")),
+        "channel": _to_int(item.get("channel")),
+        "channel_setting": _strict_word(
+            item.get("channel_setting"), _CHANNEL_SETTING_RE
+        ),
+        "width_mhz": _to_int(item.get("width_mhz")),
+        "tx_power_dbm": _to_int(item.get("tx_power_dbm")),
+        "tx_power_mode": tx_power_mode,
+        "channel_utilization_pct": _pct(item.get("channel_utilization_pct")),
+        "self_rx_pct": _pct(item.get("self_rx_pct")),
+        "self_tx_pct": _pct(item.get("self_tx_pct")),
+        "client_count": _to_int(item.get("client_count")),
+        "satisfaction_pct": _pct(item.get("satisfaction_pct")),
+        "tx_retry_pct_cumulative": _to_number(
+            item.get("tx_retry_pct_cumulative")
+        ),
+    }
+
+
+def _revalidate_ap(item: Any) -> Any:
+    """One saved AP, re-checked with the collection rules, or None."""
+    if not isinstance(item, dict):
+        return None
+    ap_id = _normalise_mac(item.get("id"))
+    if ap_id is None:
+        return None
+    name = item.get("name")
+    uplink_type = item.get("uplink_type")
+    if not isinstance(uplink_type, str) or uplink_type not in _UPLINK_TYPES:
+        uplink_type = None
+    radios: list[dict] = []
+    saved_radios = item.get("radios")
+    if isinstance(saved_radios, list):
+        for entry in saved_radios:
+            radio = _revalidate_radio(entry)
+            if radio is not None:
+                radios.append(radio)
+    return {
+        "id": ap_id,
+        "name": name if isinstance(name, str) else None,
+        "model": _strict_word(item.get("model"), _MODEL_RE),
+        "firmware": _strict_word(item.get("firmware"), _MODEL_RE),
+        "online": item.get("online") is True,
+        "uptime_s": _to_int(item.get("uptime_s")),
+        "client_count": _to_int(item.get("client_count")),
+        "satisfaction_pct": _pct(item.get("satisfaction_pct")),
+        "uplink_type": uplink_type,
+        "uplink_speed_mbps": _to_int(item.get("uplink_speed_mbps")),
+        "radios": radios,
+    }
+
+
+def _revalidate_client(item: Any, aps_by_id: Any) -> Any:
+    """One saved client, re-checked with the collection rules, or None."""
+    if not isinstance(item, dict):
+        return None
+    client_id = _normalise_mac(item.get("id"))
+    if client_id is None:
+        return None
+    ap_id = _normalise_mac(item.get("ap_id"))
+    if ap_id not in aps_by_id:
+        ap_id = None
+    ap_name = aps_by_id[ap_id]["name"] if ap_id is not None else None
+    wifi_standard = item.get("wifi_standard")
+    if (
+        not isinstance(wifi_standard, str)
+        or wifi_standard not in _WIFI_STANDARD_VALUES
+    ):
+        wifi_standard = None
+    guest = item.get("guest")
+    if not isinstance(guest, bool):
+        guest = None
+    name = item.get("name")
+    vendor = item.get("vendor")
+    ssid = item.get("ssid")
+    return {
+        "id": client_id,
+        "ip": _normalise_ip(item.get("ip")),
+        "name": name if isinstance(name, str) else None,
+        "vendor": vendor if isinstance(vendor, str) else None,
+        "private_mac": bool(int(client_id.split(":")[0], 16) & 0x02),
+        "ssid": ssid if isinstance(ssid, str) else None,
+        "ap_id": ap_id,
+        "ap_name": ap_name,
+        "band": _revalidate_band(item.get("band")),
+        "channel": _to_int(item.get("channel")),
+        "wifi_standard": wifi_standard,
+        "wifi_standard_raw": _strict_word(
+            item.get("wifi_standard_raw"), _WIFI_RAW_RE
+        ),
+        "signal_dbm": _to_int(item.get("signal_dbm")),
+        "noise_dbm": _to_int(item.get("noise_dbm")),
+        "tx_rate_mbps": _to_number(item.get("tx_rate_mbps")),
+        "rx_rate_mbps": _to_number(item.get("rx_rate_mbps")),
+        "satisfaction_pct": _pct(item.get("satisfaction_pct")),
+        "tx_retry_pct_cumulative": _to_number(
+            item.get("tx_retry_pct_cumulative")
+        ),
+        "tx_retry_pct_recent": _pct(item.get("tx_retry_pct_recent")),
+        "connected_s": _to_int(item.get("connected_s")),
+        "idle_s": _to_int(item.get("idle_s")),
+        "guest": guest,
+    }
+
+
+def saved_ids_intact(aps: Any, clients: Any) -> bool:
+    """Every saved AP and client is a dict with a valid MAC id.
+
+    A section page slices the saved lists by offset, so any unreadable
+    or id-less record means the offsets cannot be trusted.
+    """
+    for records in (aps, clients):
+        if not isinstance(records, list):
+            return False
+        for item in records:
+            if not isinstance(item, dict):
+                return False
+            if _normalise_mac(item.get("id")) is None:
+                return False
+    return True
+
+
+def revalidate_aps(aps: Any) -> tuple:
+    """Re-check saved APs to ``(aps, skipped)``; bad records are dropped.
+
+    ``get`` checks :func:`saved_ids_intact` first and fails a damaged
+    file, so in practice nothing is dropped here; the drop is a backstop.
+    """
+    warnings: list[str] = []
+    clean: list[dict] = []
+    skipped = 0
+    records = aps if isinstance(aps, list) else []
+    for item in records:
+        ap = _revalidate_ap(item)
+        if ap is None:
+            skipped += 1
+        else:
+            clean.append(ap)
+    if skipped == 1:
+        warnings.append(
+            "1 AP record could not be read or had no valid MAC address "
+            "and was left out"
+        )
+    elif skipped > 1:
+        warnings.append(
+            f"{skipped} AP records could not be read or had no valid "
+            "MAC address and were left out"
+        )
+    return clean, warnings
+
+
+def revalidate_clients(clients: Any, aps: Any) -> tuple:
+    """Re-check saved clients to ``(clients, skipped)``; bad ones dropped.
+
+    ``aps`` are the already re-validated APs, so the join matches
+    collection. As for APs, ``get`` fails damaged files before this runs.
+    """
+    warnings: list[str] = []
+    aps_by_id = {item["id"]: item for item in aps}
+    clean: list[dict] = []
+    skipped = 0
+    records = clients if isinstance(clients, list) else []
+    for item in records:
+        client = _revalidate_client(item, aps_by_id)
+        if client is None:
+            skipped += 1
+        else:
+            clean.append(client)
+    if skipped == 1:
+        warnings.append(
+            "1 client record could not be read or had no valid MAC "
+            "address and was left out"
+        )
+    elif skipped > 1:
+        warnings.append(
+            f"{skipped} client records could not be read or had no "
+            "valid MAC address and were left out"
+        )
+    return clean, warnings
+
+
+def revalidate_source(source: Any) -> Any:
+    """Re-check a saved source block, or raise ValueError when damaged."""
+    if not isinstance(source, dict):
+        raise ValueError(DAMAGED_SNAPSHOT)
+    if source.get("kind") != _SOURCE_KIND:
+        raise ValueError(DAMAGED_SNAPSHOT)
+    flavor = source.get("flavor")
+    if not isinstance(flavor, str) or flavor not in _SOURCE_FLAVORS:
+        raise ValueError(DAMAGED_SNAPSHOT)
+    site = source.get("site")
+    if not isinstance(site, str) or _SITE_RE.fullmatch(site) is None:
+        raise ValueError(DAMAGED_SNAPSHOT)
+    return {
+        "kind": _SOURCE_KIND,
+        "flavor": flavor,
+        "controller_version": _strict_word(
+            source.get("controller_version"), _MODEL_RE
+        ),
+        "site": site,
     }
