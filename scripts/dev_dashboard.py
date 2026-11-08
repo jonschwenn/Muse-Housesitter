@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Serve the dashboard front end against fixture data, for development.
 
-Not the real server: that will be `housesitter serve` (docs/DASHBOARD.md).
-This one serves static files from a web directory and answers
-`GET /api/dashboard` with a fixture from tests/fixtures/dashboard/.
+Not the real server: for real use run `housesitter serve`
+(docs/DASHBOARD.md), which serves the installed web files and answers
+`GET /api/dashboard` from saved snapshots. This one serves static files
+from a web directory and answers `GET /api/dashboard` with a fixture
+from tests/fixtures/dashboard/.
 
     python scripts/dev_dashboard.py                  # web/, typical fixture, port 8080
     python scripts/dev_dashboard.py --fixture large

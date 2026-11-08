@@ -1,6 +1,6 @@
 # Dashboard
 
-Status: **contract defined; front end built; server Planned.** This document is
+Status: **contract defined; front end and server built.** This document is
 the handoff between the backend (the server and the data it serves) and the
 front end (the pages in `web/`). Each side builds against it without waiting
 for the other.
@@ -22,13 +22,13 @@ presentation, and is fine. Muse's own analysis can appear in the
 ## 2. Pieces
 
 ```
-browser ── GET / , /eink.html, /*.js, /*.css ──▶ housesitter serve (Planned)
+browser ── GET / , /eink.html, /*.js, /*.css ──▶ housesitter serve
         ── GET /api/dashboard ──────────────────▶   reads saved results only
                                                     never contacts UniFi
                                                     never writes anything
 ```
 
-- **Server (backend, Planned):** `housesitter serve`, a stdlib HTTP server.
+- **Server (backend):** `housesitter serve`, a stdlib HTTP server.
   It answers GET and HEAD only, serves `web/` and `/api/dashboard`, binds to
   the address and port in config, and sends the headers in §5.
 - **Dev server (exists):** `scripts/dev_dashboard.py` serves `web/` and
@@ -38,14 +38,14 @@ browser ── GET / , /eink.html, /*.js, /*.css ──▶ housesitter serve (Pl
   `scripts/make_dashboard_fixtures.py`, never by hand.
 - **Front end (exists):** `web/index.html`, `web/eink.html`,
   `web/dashboard.js`, `web/dashboard.css`, and `web/eink.css`, with design
-  notes in `web/DESIGN.md`. No build step or external assets. Until
-  `housesitter serve` exists, view it with `scripts/dev_dashboard.py`
-  against the fixtures.
+  notes in `web/DESIGN.md`. No build step or external assets. Use
+  `housesitter serve` for real saved results and `scripts/dev_dashboard.py`
+  for front-end work against fixtures.
 
 ## 3. Page contract (front end)
 
 - **Files:** `web/index.html` (the dashboard), `web/eink.html` (the e-ink
-  view), and any CSS, JS, fonts, or SVG next to them. Both pages live at the
+  view), and the CSS, JS, and SVG next to them. Both pages live at the
   web root, because the data URL below is relative.
 - **No build step:** no npm, bundlers, frameworks loaded from a CDN, web
   fonts from the internet, or third-party code. What is in `web/` is what
@@ -81,8 +81,8 @@ browser ── GET / , /eink.html, /*.js, /*.css ──▶ housesitter serve (Pl
   |---------|-------|
   | `typical` | A normal house with 60 snapshots (so `recent` holds 50 of them), and the before/after speaker story in `previous` and `latest`. |
   | `empty` | The module has never run (`status: never`, `unifi_wifi: null`). |
-  | `error` | The last attempt failed. The last good data is still shown, with the error. |
-  | `failed` | Every attempt has failed, so there is no data (`status: error`, `unifi_wifi: null`). |
+  | `error` | **Planned:** the last attempt failed; last good data is still shown. |
+  | `failed` | No readable data (`status: error`, `unifi_wifi: null`); failed-attempt reporting is **Planned**. |
   | `large` | 8 APs, one of them offline (no radio stats), and 600 clients. |
   | `hostile` | Markup, script, CSS, URL, and prototype-key injection in every text field, including in `previous`. |
   | `edge` | Every nullable field is `null` somewhere (in `previous` too), a client whose band is `unknown`, a client with no AP, an AP without radio stats, and controller counts that disagree with the client list. |
@@ -144,6 +144,14 @@ Schema id `housesitter.dashboard/1`. A breaking change bumps the version and
 updates this document, `tests/test_dashboard_contract.py`, and
 `scripts/make_dashboard_fixtures.py` in the same PR.
 
+With `housesitter.identifiers: "none"`, every identifier field keeps its
+key with a `null` value: client `id`, `ip`, and `ap_id`, AP `id`, and
+`summary.clients_by_ap[].ap_id`. The key sets stay exactly as below, but
+three rules in §4.4 don't hold: client ids aren't unique, a client's
+`ap_id` is `null` even when `ap_name` names its AP, and `clients_by_ap`
+can't be matched to clients by `ap_id`. Pages can't match clients or APs
+between `previous` and `latest` in this mode (D24).
+
 Conventions:
 - Times are ISO 8601 UTC (`2026-11-06T15:00:00Z`).
 - Unknown values are `null`.
@@ -159,9 +167,9 @@ Conventions:
 | `generated_at` | string | When the server built this response. |
 | `housesitter_version` | string | |
 | `house_label` | string\|null | Owner-chosen name from config. **Untrusted.** |
-| `modules` | list | One entry per enabled module (§4.3). |
+| `modules` | list | One entry per supported enabled module (v1: `unifi_wifi`, §4.3). |
 | `muse_note` | object\|null | **Planned:** Muse's latest written summary (§4.2). |
-| `unifi_wifi` | object\|null | `null` if the module is disabled or has no saved snapshot (§4.4). |
+| `unifi_wifi` | object\|null | `null` if the module is disabled or has no readable saved snapshot (§4.4). |
 
 ### 4.2 Muse note (Planned)
 
@@ -184,10 +192,17 @@ How Muse writes it (a command that writes only Housesitter's own data) is
 | `id` | string | e.g. `unifi_wifi` |
 | `title` | string | e.g. "UniFi WiFi radio metrics" |
 | `version` | string | |
-| `status` | string | `ok` (last attempt succeeded), `error` (last attempt failed), `never` (never run). |
-| `last_success_at` | string\|null | |
-| `last_attempt_at` | string\|null | |
+| `status` | string | `ok` (a readable snapshot exists), `never` (no saved snapshots), `error` (saved snapshots exist but none are readable). |
+| `last_success_at` | string\|null | Latest readable snapshot's `collected_at`, or `null`. |
+| `last_attempt_at` | string\|null | Equals `last_success_at` in v1. |
 | `last_error` | object\|null | `{code, message}`. `code` is one of the stable error codes in ARCHITECTURE §4. `message` is plain text. |
+
+In v1, failed collection attempts are not recorded. Reporting their status
+and `last_error` is **Planned**, requiring collector attempt recording in a
+follow-up issue (D23). If saved snapshots exist but none are readable,
+`last_error` is `{code: "upstream_unexpected", message: "Saved snapshots could
+not be read."}`, both timestamps are `null`, and `unifi_wifi` is `null`.
+Otherwise `last_error` is `null`.
 
 ### 4.4 UniFi WiFi
 
@@ -200,8 +215,8 @@ How Muse writes it (a command that writes only Housesitter's own data) is
 | `previous` | object\|null | The one before it, in full, so the page can show changes. |
 
 These always hold (tested in `tests/test_dashboard_contract.py`):
-- `unifi_wifi` is `null` exactly when there is no saved snapshot (status
-  `never`, or `error` with no earlier success), or when the module is
+- `unifi_wifi` is `null` exactly when there is no readable saved snapshot (status
+  `never`, or `error` with no readable data), or when the module is
   disabled. Otherwise `latest` is set.
 - `recent` is strictly newest first, and `recent[0]` is `latest`.
 - `previous` is set exactly when `total ≥ 2`, and it is `recent[1]`.
@@ -238,9 +253,50 @@ The `edge` fixture breaks both of these on purpose.
 `summary`, `aps`, and `clients`. `source`, `summary`, `aps[]`,
 `aps[].radios[]`, and `clients[]` are **exactly** the objects defined in
 [`docs/modules/unifi_wifi.md`](modules/unifi_wifi.md) §4, with the same
-fields, units, and meanings. Identifiers are returned as they are (D2).
+fields, units, and meanings. The default identifier policy is `full` (D2).
 
-## 5. Server behaviour (Planned)
+The view reads only saved `unifi_wifi` snapshots, through the module's own
+`get` validation and the same output policy as `invoke`: sanitising text,
+applying the identifier setting, and checking declared fields. Its Context
+cannot reach the network. Unreadable, damaged, and old-schema files are
+skipped, with a stderr line naming the snapshot id. Results are cached in
+memory per saved file; nothing is written. `recent` holds the newest 50
+readable snapshots; `total` counts readable snapshots after deduplication.
+When files share a `collected_at`, only the newest file is shown and counted.
+If config or the store becomes unusable, the API returns 503 with
+`{"error": "dashboard data unavailable"}`.
+
+## 5. Server behaviour
+
+`housesitter serve` has no flags. It runs in the foreground; Ctrl-C stops
+it with exit 0. It is a CLI subcommand only: no Muse command or drop-in is
+generated. Starting at boot with a systemd unit is **Planned**, covered by
+a separate install-and-setup issue.
+
+All settings in `housesitter.dashboard` are optional and validated by
+`housesitter config-check`:
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `bind` | string | `"127.0.0.1"` | IPv4 or IPv6 literal to listen on; `0.0.0.0` and `::` are allowed. |
+| `port` | integer | `8080` | Listening port, 1–65535. |
+| `allowed_hosts` | list of strings | `[]` | Up to 32 hostnames or IP literals accepted by the Host check. Use bare IPv6 literals in config. |
+| `house_label` | string or null | `null` | Owner-chosen label shown on the page, at most 64 characters; treated as untrusted text. |
+
+`bind`, `port`, and `allowed_hosts` are read at startup; restart to change
+them. `house_label` and the rest of config, including identifiers and enabled
+modules, are re-read on every `/api/dashboard` request.
+
+Startup prints `serving the dashboard on http://<bind>:<port>/ (read-only)`
+(with brackets around IPv6). A non-loopback bind also prints a reminder
+that anyone who can reach the port sees device names, MACs, and IPs.
+Startup errors print one stderr line and exit 2: invalid config, missing
+web files, address unavailable, port in use, or permission denied (ports
+below 1024 need privileges). For example:
+
+```text
+housesitter: serve: cannot bind 127.0.0.1:8080: address already in use; stop the other server or change housesitter.dashboard.port
+```
 
 - GET and HEAD only. Any other method returns 405.
 - Never contacts an upstream system, never triggers collection, never
@@ -256,8 +312,15 @@ fields, units, and meanings. Identifiers are returned as they are (D2).
   `housesitter.dashboard.allowed_hosts` gets 421. Without this check, a
   malicious website could use DNS rebinding to read the dashboard, even one
   bound to `127.0.0.1`, through a browser on the Pi or the owner's laptop.
-- No directory listings, and no files or directories whose names start
-  with `.`. Both return 404.
+  Ports are ignored in the comparison, and IPv6 matches with or without
+  brackets. Missing or duplicate Host headers also get 421.
+- Static files are read into memory at startup; restart to pick up changes.
+  Only regular, non-dot `.html`, `.css`, `.js`, `.svg`, `.png`, and `.ico`
+  files directly in `web/` are served. `/` maps to `index.html`. Everything
+  else gets 404, including `DESIGN.md`, symlinks, dotfiles, directories, and
+  paths containing `%`, `..`, a backslash, or NUL. No directory listings.
+  `web/` stays at the repo root and ships as package data in `housesitter.web`,
+  so `serve` works from a pip install.
 - No login in v1, because it is read-only. **Anyone who can reach the port
   sees everything on the dashboard, including MACs and IPs.** The README must
   say so.
@@ -267,9 +330,14 @@ fields, units, and meanings. Identifiers are returned as they are (D2).
   style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self';
   object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors
   'none'; require-trusted-types-for 'script'`.
-  `scripts/dev_dashboard.py` sends the same headers and does the same Host,
-  listing, and dotfile checks.
-- Runs as the SDK's run-as account, read-only on the data directory.
+  Also sends `Referrer-Policy: no-referrer`, including on errors. Error
+  bodies are short fixed text.
+  `scripts/dev_dashboard.py` sends the same CSP, `Cache-Control`, and
+  `X-Content-Type-Options`, and does the same Host, listing, and dotfile checks.
+- The owner runs it as the SDK's run-as account, with read-only access to
+  the data directory. The server never writes regardless of permissions.
+- Request logs go to stderr, with control characters escaped, URL userinfo
+  removed, and lines capped at 500 characters.
 
 ## 6. Evidence
 

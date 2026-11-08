@@ -14,7 +14,9 @@ requires-python = ">=3.9"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest==8.4.2", "ruff==0.17.4"]
+# setuptools and wheel let the packaging test build the wheel offline
+# (--no-build-isolation), so the default test run needs no network.
+dev = ["pytest==8.4.2", "ruff==0.17.4", "setuptools==80.9.0", "wheel==0.45.1"]
 # Dev/CI-only screenshot tooling for scripts/ui_evidence.py. Never a runtime
 # dependency (AGENTS.md rule 4): nothing under src/ may import it.
 ui = ["playwright==1.60.0"]
@@ -22,8 +24,21 @@ ui = ["playwright==1.60.0"]
 [project.scripts]
 housesitter = "housesitter.core.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools.package-dir]
+"" = "src"
+"housesitter.web" = "web"
+
+[tool.setuptools]
+packages = [
+  "housesitter",
+  "housesitter.core",
+  "housesitter.modules",
+  "housesitter.modules.unifi_wifi",
+  "housesitter.web",
+]
+
+[tool.setuptools.package-data]
+"housesitter.web" = ["*.html", "*.css", "*.js", "*.svg", "*.png", "*.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -689,6 +689,95 @@ def _final_warnings(items: list) -> list:
     return seen
 
 
+@dataclass
+class PreparedOutput:
+    """A handler result after steps 5 and 6 of the pipeline: the sanitised
+    label, the formatted collected-at stamp, the final warnings, the
+    projected data, source, and compact mappings, and the sanitised
+    pre-projection data and source (kept for the saved file, which holds
+    full values before projection)."""
+
+    label: str | None
+    collected_at: str
+    warnings: list
+    data: dict
+    source: dict
+    compact: dict | None
+    full_data: dict
+    full_source: dict
+
+
+def prepare_output(
+    result: sdk.Result,
+    command: sdk.Command,
+    *,
+    identifiers: str = "full",
+    extra_warnings: Any = (),
+    default_now: datetime,
+) -> PreparedOutput:
+    """Apply steps 5 and 6 to one handler result (ARCHITECTURE §3.4).
+
+    Sanitise the label and declared untrusted fields, combine handler and
+    context warnings, then apply the identifier policy, drop undeclared
+    keys, and check declared types in data, source, and compact data.
+    Shared by ``run_command`` and the dashboard server, so saved snapshots
+    shown on the dashboard pass exactly the checks ``invoke`` applies.
+
+    Raises :class:`_FieldMismatch` (carrying the field path) on a type or
+    projection mismatch, and :class:`ValueError` when the collected-at
+    stamp cannot be formatted. Any other exception from sanitising also
+    propagates: callers map every failure to their own error.
+    """
+    label = result.label if isinstance(result.label, str) else None
+    if label is not None:
+        label = envelope.sanitize_label(label) or None
+    collected_at = result.collected_at or default_now
+    collected_str = _format_collected(collected_at)
+    warnings = _final_warnings(list(result.warnings) + list(extra_warnings))
+
+    data_fields = [item for item in command.fields if item.path.startswith("data.")]
+    source_fields = [
+        item for item in command.fields if item.path.startswith("source.")
+    ]
+    clean_data = sanitize_mapping(result.data, data_fields)
+    clean_source = sanitize_mapping(result.source, source_fields)
+    clean_compact = (
+        sanitize_mapping(result.compact, data_fields)
+        if result.compact is not None
+        else None
+    )
+
+    strip = identifiers == "none"
+    data_tree = _build_tree(data_fields)
+    source_tree = _build_tree(source_fields)
+    try:
+        out_data = _project_node(data_tree, clean_data, "data", strip)
+        out_source = _project_node(source_tree, clean_source, "source", strip)
+        out_compact = (
+            _project_node(data_tree, clean_compact, "data", strip)
+            if clean_compact is not None
+            else None
+        )
+    except _FieldMismatch as exc:
+        raise _FieldMismatch(
+            f"module output does not match its declared fields ({exc.path})"
+        ) from None
+    if out_data is _ABSENT:  # pragma: no cover - root is never identifier-marked
+        out_data = {}
+    if out_source is _ABSENT:  # pragma: no cover - root is never identifier-marked
+        out_source = {}
+    return PreparedOutput(
+        label=label,
+        collected_at=collected_str,
+        warnings=warnings,
+        data=out_data,
+        source=out_source,
+        compact=out_compact,
+        full_data=clean_data,
+        full_source=clean_source,
+    )
+
+
 def run_command(
     full_name: str,
     raw: bytes | str | dict | None = None,
@@ -847,58 +936,32 @@ def run_command(
             pass
         logger.removeHandler(handler_obj)
 
-    label = result.label if isinstance(result.label, str) else None
-    if label is not None:
-        label = envelope.sanitize_label(label) or None
-    collected_at = result.collected_at or collected_default
-    try:
-        collected_str = _format_collected(collected_at)
-    except Exception:
-        return _fail(module_id, "upstream_unexpected", _FAILED_REASON)
-    warnings = _final_warnings(list(result.warnings) + list(ctx.warnings))
-
-    data_fields = [item for item in command.fields if item.path.startswith("data.")]
-    source_fields = [
-        item for item in command.fields if item.path.startswith("source.")
-    ]
-    try:
-        clean_data = sanitize_mapping(result.data, data_fields)
-        clean_source = sanitize_mapping(result.source, source_fields)
-        clean_compact = (
-            sanitize_mapping(result.compact, data_fields)
-            if result.compact is not None
-            else None
-        )
-    except Exception:
-        return _fail(module_id, "upstream_unexpected", _FAILED_REASON)
-
     if is_core:
         schema_name = f"housesitter.{command.name}/{command.schema_version}"
     else:
         schema_name = (
             f"housesitter.{module_id}.{command.name}/{command.schema_version}"
         )
-    strip = config.identifiers == "none"
-    data_tree = _build_tree(data_fields)
-    source_tree = _build_tree(source_fields)
     try:
-        out_data = _project_node(data_tree, clean_data, "data", strip)
-        out_source = _project_node(source_tree, clean_source, "source", strip)
-        out_compact = (
-            _project_node(data_tree, clean_compact, "data", strip)
-            if clean_compact is not None
-            else None
+        prepared = prepare_output(
+            result,
+            command,
+            identifiers=config.identifiers,
+            extra_warnings=ctx.warnings,
+            default_now=collected_default,
         )
     except _FieldMismatch as exc:
-        return _fail(
-            module_id,
-            "upstream_unexpected",
-            f"module output does not match its declared fields ({exc.path})",
-        )
-    if out_data is _ABSENT:  # pragma: no cover - root is never identifier-marked
-        out_data = {}
-    if out_source is _ABSENT:  # pragma: no cover - root is never identifier-marked
-        out_source = {}
+        return _fail(module_id, "upstream_unexpected", str(exc))
+    except Exception:
+        return _fail(module_id, "upstream_unexpected", _FAILED_REASON)
+    label = prepared.label
+    collected_str = prepared.collected_at
+    warnings = prepared.warnings
+    out_data = prepared.data
+    out_source = prepared.source
+    out_compact = prepared.compact
+    clean_data = prepared.full_data
+    clean_source = prepared.full_source
 
     module_version = __version__ if is_core else instance.version
     # Fit against a stand-in saved id of exactly the real id's length:

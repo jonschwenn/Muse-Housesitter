@@ -19,7 +19,7 @@ recommendations, and you decide what to change.
 
 > **Status: early.** The core runs commands: runner, store, drop-ins, and
 > CLI (`invoke`, `list`, `describe`, `doctor`, `dropins`, `install-commands`,
-> `config-check`). The conformance suite exists; no installed data module
+> `config-check`, `serve`). The conformance suite exists; no installed data module
 > yet. See [the architecture](docs/ARCHITECTURE.md) and
 > [the first module's spec](docs/modules/unifi_wifi.md).
 
@@ -41,13 +41,37 @@ New data sources are added as modules. See [`docs/MODULES.md`](docs/MODULES.md).
 
 ## Dashboard
 
-**Planned.** A read-only dashboard in your browser, served by Housesitter on
-the Pi. It shows what Muse last collected, and may later drive an e-ink
-display. By default it listens on `127.0.0.1:8080`, so only the Pi itself can
-see it. To view it from other devices, set a LAN address in the config. It
-is read-only and has no login, so **anyone who can reach that address can
-see your device names, MACs, and IPs.** Choose an address only trusted
-devices can reach. See [`docs/DASHBOARD.md`](docs/DASHBOARD.md).
+Run the read-only dashboard on the Pi with `housesitter serve`. It shows
+what Muse last collected. In `~/.config/housesitter/config.json`, add a
+`dashboard` section inside `housesitter` (keep your existing settings):
+
+```json
+{
+  "housesitter": {
+    "dashboard": {
+      "bind": "127.0.0.1",
+      "port": 8080,
+      "allowed_hosts": []
+    }
+  }
+}
+```
+
+Run `housesitter config-check`, then `housesitter serve`, and open
+`http://127.0.0.1:8080/` on the Pi. The default `127.0.0.1` is reachable
+only from the Pi itself. To view it from other devices, set `bind` to the
+Pi's LAN address and list every name or IP used in the browser in
+`allowed_hosts`; for example, `bind: "192.0.2.10"` and
+`allowed_hosts: ["192.0.2.10", "housesitter-example"]`. Restart the server
+after changing those settings or the port. If Muse's earlier demo page
+still uses port 8080, stop it or choose another port.
+
+There is no login. **Anyone who can reach the port sees everything on the
+dashboard, including device names, MACs, and IPs.** Choose an address only
+trusted devices can reach. The server runs in the foreground; Ctrl-C stops
+it. It has no flags and no Muse drop-in command. Starting it at boot with a
+systemd unit is **Planned**, in a separate install-and-setup issue. See
+[`docs/DASHBOARD.md`](docs/DASHBOARD.md) for settings and server behaviour.
 
 ## Principles
 

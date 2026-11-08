@@ -434,3 +434,37 @@ handoff's "license not chosen; don't publish."
   doc-only PRs); leaving it informal (then it never gets considered).
 - **Status:** a two-way door: how we work for now, reversible if it proves
   too heavy or too light. Revisit with a new entry that supersedes this one.
+
+### D23. Dashboard server config, saved-data status, and packaging (2026-11-08, Jon)
+- **Decision:** `housesitter serve` uses the optional `housesitter.dashboard`
+  section: `bind` (IP-literal string, default `"127.0.0.1"`), `port` (integer
+  1–65535, default `8080`), `allowed_hosts` (up to 32 hostnames or IPs,
+  default `[]`), and `house_label` (string up to 64 characters or null,
+  default `null`). DASHBOARD §5 defines their meaning and reload behaviour.
+  The server accepts GET and HEAD, clarifying D14's GET-only wording.
+  V1 status comes from saved snapshots only: `ok` when readable data exists,
+  `never` when no snapshots exist, and `error` when saved snapshots exist but
+  none are readable. `last_attempt_at` equals `last_success_at`. Recording
+  collection attempts and reporting their failures is **Planned** for a
+  follow-up issue. `web/` stays at the repo root and ships as
+  `housesitter.web` package data through setuptools' `package-dir` mapping.
+- **Why:** saved results are enough for the read-only server without changing
+  collection. Shipping the existing web directory makes pip installs usable
+  while preserving the fixture evidence pipeline.
+- **Rejected:** moving `web/` to `src/housesitter/web/`, which would break the
+  base-vs-head evidence pipeline and `ci-guard`; adding attempt recording to
+  the runner in this change.
+
+### D24. Hidden identifiers stay as null fields on the dashboard (2026-11-08, Jon)
+- **Decision:** with `housesitter.identifiers: "none"`, the dashboard view
+  keeps every identifier key (client `id`, `ip`, `ap_id`; AP `id`;
+  `summary.clients_by_ap[].ap_id`) with a `null` value. `invoke` output
+  still leaves the keys out. DASHBOARD §4 lists the contract rules that
+  don't hold in this mode.
+- **Why:** the dashboard contract pins exact key sets, and the page reads
+  those fields. Nulls keep the shape while showing no MACs or IPs. The cost
+  is that pages can't match clients or APs between snapshots in this mode.
+- **Rejected:** ignoring the setting on the dashboard (it would show MACs
+  on a page anyone on the network can open, against the owner's choice);
+  making the keys optional with a new contract version (more front-end work
+  for a rarely used mode).
