@@ -35,6 +35,8 @@ SPEC.loader.exec_module(ci_guard)
         "scripts/ui_evidence.py",
         "scripts/publish_evidence.py",
         "scripts/ci_guard.py",
+        "scripts/test_results.py",
+        "tests/test_test_results.py",
         "pyproject.toml",
         "conftest.py",
         "tests/conftest.py",

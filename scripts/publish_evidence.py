@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -40,12 +41,36 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pr_evidence  # noqa: E402  (main's code: this script runs from main only)
+import test_results  # noqa: E402  (main's code: validates PR-produced XML)
 import ui_evidence  # noqa: E402
 
 # The artifact's evidence.md is PR-produced text. Read it only as text, and
 # refuse absurd sizes before the comment budget trims it: a giant file here
 # is either a broken builder or an attempt to slow the publisher.
 EVIDENCE_MAX_BYTES = 1_000_000
+
+# Test results (issue #11, decision D21 option A): the CI run's JUnit files
+# and jobs JSON are PR-produced too, but a bad test-results file degrades
+# only the Tests line, never the whole publish. Bad UI artifacts keep their
+# existing behaviour (refuse the whole publish).
+TEST_RESULTS_DIR_RE = re.compile(r"test-results-(3\.x|3\.\d{1,2})")
+MAX_TEST_RESULT_DIRS = 4
+JOBS_MAX_BYTES = 200_000
+MAX_JOBS = 100
+JOB_NAME_RE = re.compile(r"test \((3\.x|3\.\d{1,2})\)")
+JOB_CONCLUSIONS = frozenset(
+    {
+        "success",
+        "failure",
+        "cancelled",
+        "skipped",
+        "neutral",
+        "timed_out",
+        "action_required",
+        "stale",
+    }
+)
+TEST_HEADING = "## Before / after evidence"
 
 
 class PublishError(Exception):
@@ -86,7 +111,197 @@ def has_manifest(ui_dir: Path) -> bool:
     return manifest.is_file() and not manifest.is_symlink()
 
 
-def render_comment(artifact: Path, repo: str, pr: int, head_sha: str) -> str:
+def load_json_docs(path: Path, cap: int) -> list | None:
+    """Read one JSON document, or several concatenated ones (``gh api
+    --paginate`` prints one response body per page). Returns None when the
+    file is missing, oversized, undecodable, or unparseable: the caller
+    degrades the Tests line instead of refusing the publish."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size > cap:
+        return None
+    try:
+        raw = path.read_bytes().decode("utf-8")
+    except (OSError, ValueError):
+        return None
+    try:
+        return [json.loads(raw)]
+    except RecursionError:
+        return None
+    except ValueError:
+        pass
+    docs = []
+    decoder = json.JSONDecoder()
+    index = 0
+    try:
+        while index < len(raw):
+            while index < len(raw) and raw[index].isspace():
+                index += 1
+            if index >= len(raw):
+                break
+            doc, end = decoder.raw_decode(raw, index)
+            docs.append(doc)
+            index = end
+    except (ValueError, RecursionError):
+        return None
+    return docs or None
+
+
+def validate_jobs(docs: list | None) -> list[dict] | None:
+    """Keep the CI test jobs from a jobs-API response, or None when the data
+    is missing or invalid. Merges concatenated pages; refuses truncated
+    listings, oversized ones, bad shapes, and conclusions outside the fixed
+    set. Jobs whose names are not CI test jobs are ignored."""
+    if not docs:
+        return None
+    merged: list = []
+    totals: list[int] = []
+    for doc in docs:
+        if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), list):
+            return None
+        items = doc["jobs"]
+        if len(items) > MAX_JOBS:
+            return None
+        merged.extend(items)
+        if isinstance(doc.get("total_count"), int):
+            totals.append(doc["total_count"])
+    if len(merged) > MAX_JOBS:
+        return None
+    if totals and max(totals) > len(merged):
+        # The listing is truncated: a test job could be hiding off-page.
+        return None
+    kept: dict[str, str] = {}
+    for job in merged:
+        if not isinstance(job, dict) or not isinstance(job.get("name"), str):
+            return None
+        match = JOB_NAME_RE.fullmatch(job["name"])
+        if match is None:
+            continue
+        if job.get("conclusion") not in JOB_CONCLUSIONS:
+            return None
+        version = match.group(1)
+        if version in kept:
+            # A PR controls its own ci.yml, so it could add a same-named
+            # job; the worst conclusion wins so a failure can never be
+            # masked, whichever order the jobs API lists them in.
+            kept[version] = test_results.worst_conclusion(
+                [kept[version], job["conclusion"]]
+            )
+        else:
+            kept[version] = job["conclusion"]
+    return [{"version": version, "conclusion": conclusion} for version, conclusion in kept.items()]
+
+
+def load_test_results(root: Path | None) -> dict:
+    """Read per-version JUnit files from a hostile directory. Returns a map
+    of short version to parsed result or the string ``"invalid"``; anything
+    unexpected (missing directory, stray entries, symlinks, too many
+    versions) degrades to missing/invalid entries, never an exception."""
+    results: dict = {}
+    if root is None:
+        return results
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return results
+    matching = [e for e in entries if TEST_RESULTS_DIR_RE.fullmatch(e.name)]
+    if len(matching) != len(entries) or len(matching) > MAX_TEST_RESULT_DIRS:
+        return results
+    for entry in matching:
+        version = TEST_RESULTS_DIR_RE.fullmatch(entry.name).group(1)  # type: ignore[union-attr]
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            children = list(entry.iterdir())
+        except OSError:
+            results[version] = "invalid"
+            continue
+        if (
+            len(children) != 1
+            or children[0].name != "junit.xml"
+            or children[0].is_symlink()
+            or not children[0].is_file()
+        ):
+            results[version] = "invalid"
+            continue
+        try:
+            # Size first: never read a huge PR-produced file into memory.
+            if children[0].stat().st_size > test_results.MAX_JUNIT_BYTES:
+                results[version] = "invalid"
+                continue
+            data = children[0].read_bytes()
+        except OSError:
+            results[version] = "invalid"
+            continue
+        try:
+            results[version] = test_results.parse_junit(data)
+        except ValueError:
+            results[version] = "invalid"
+    return results
+
+
+def insert_test_line(text: str, line: str) -> str:
+    """Insert the Tests line right after the evidence heading (or after the
+    marker when the heading is absent), so the comment still publishes."""
+    lines = text.split("\n")
+    for index, value in enumerate(lines):
+        if value == TEST_HEADING:
+            lines.insert(index + 1, line)
+            break
+    else:
+        lines.insert(1, line)
+    return "\n".join(lines)
+
+
+# Fixed short Tests line used only when even the shrunk line would push a
+# near-cap comment over budget. Test data must never break the publish
+# (decision D21 option A), so the line degrades instead of refusing it.
+TEST_LINE_FALLBACK = "**Tests:** results not shown (comment size limit)."
+
+
+def _test_inputs(
+    test_results_dir: str | None, jobs_json: str | None
+) -> tuple[list[dict] | None, dict]:
+    """Validated jobs plus per-version results for the Tests line."""
+    jobs = None
+    if jobs_json is not None:
+        jobs = validate_jobs(load_json_docs(Path(jobs_json), JOBS_MAX_BYTES))
+    results = load_test_results(
+        Path(test_results_dir) if test_results_dir is not None else None
+    )
+    return jobs, results
+
+
+def fit_test_line(evidence_text: str, test_line: str, brief_line: str) -> str:
+    """Insert the Tests line, shrinking it when the comment is over budget.
+
+    Drops the failing names first (counts and verdicts stay), then falls
+    back to a fixed short line, and leaves the line out entirely when even
+    that doesn't fit. Only evidence that is already over budget on its own
+    is refused by the caller; test data never refuses.
+    """
+    text = insert_test_line(evidence_text, test_line)
+    if len(text.encode()) <= pr_evidence.MAX_COMMENT_BYTES:
+        return text
+    text = insert_test_line(evidence_text, brief_line)
+    if len(text.encode()) <= pr_evidence.MAX_COMMENT_BYTES:
+        return text
+    text = insert_test_line(evidence_text, TEST_LINE_FALLBACK)
+    if len(text.encode()) <= pr_evidence.MAX_COMMENT_BYTES:
+        return text
+    return evidence_text
+
+
+def render_comment(
+    artifact: Path,
+    repo: str,
+    pr: int,
+    head_sha: str,
+    test_results_dir: str | None = None,
+    jobs_json: str | None = None,
+) -> str:
     """Validate the artifact and build the final comment text.
 
     Raises PublishError when anything is invalid (fail closed: the caller
@@ -95,6 +310,18 @@ def render_comment(artifact: Path, repo: str, pr: int, head_sha: str) -> str:
     """
     text = read_text_capped(artifact / "evidence.md", EVIDENCE_MAX_BYTES, "evidence.md")
     check_evidence_text(text)
+    # Test data must never break the publish (decision D21 option A): after
+    # inserting the Tests line, shrink it (drop names, then a fixed short
+    # line) when the comment would go over budget. Only evidence that is
+    # already over budget on its own refuses above.
+    evidence_only = text
+    if test_results_dir is not None or jobs_json is not None:
+        jobs, results = _test_inputs(test_results_dir, jobs_json)
+        text = fit_test_line(
+            text,
+            test_results.render_comment_line(jobs, results),
+            test_results.render_comment_line(jobs, results, include_names=False),
+        )
     ui_dir = artifact / "ui_out"
     manifest_path = ui_dir / ui_evidence.MANIFEST_NAME
     if os.path.lexists(manifest_path) and not has_manifest(ui_dir):
@@ -123,12 +350,23 @@ def render_comment(artifact: Path, repo: str, pr: int, head_sha: str) -> str:
     if manifest is None:
         return text
     _, _, failures = pr_evidence.render_ui_section(manifest, repo, pr, head_sha)
-    body = pr_evidence.append_ui_section(text, ui_dir, repo=repo, pr=pr, head_sha=head_sha)
-    if failures and "Web UI checks failed" not in body:
-        lines = body.split("\n")
-        lines.insert(1, failure_notice(failures))
-        lines.insert(2, "")
-        body = "\n".join(lines)
+
+    def with_ui(base: str) -> str:
+        body = pr_evidence.append_ui_section(
+            base, ui_dir, repo=repo, pr=pr, head_sha=head_sha
+        )
+        if failures and "Web UI checks failed" not in body:
+            lines = body.split("\n")
+            lines.insert(1, failure_notice(failures))
+            lines.insert(2, "")
+            body = "\n".join(lines)
+        return body
+
+    body = with_ui(text)
+    if text != evidence_only and len(body.encode()) > pr_evidence.MAX_COMMENT_BYTES:
+        # The Tests line is what tipped it over: drop it rather than let
+        # test data refuse the publish (D21 option A).
+        body = with_ui(evidence_only)
     check_evidence_text(body)
     return body
 
@@ -197,7 +435,14 @@ def cmd_render(args: argparse.Namespace) -> int:
     artifact = Path(args.artifact_dir)
     out = Path(args.out_dir)
     try:
-        body = render_comment(artifact, args.repo, args.pr, args.head_sha)
+        body = render_comment(
+            artifact,
+            args.repo,
+            args.pr,
+            args.head_sha,
+            test_results_dir=args.test_results_dir,
+            jobs_json=args.jobs_json,
+        )
     except PublishError as exc:
         print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
         return 1
@@ -244,6 +489,16 @@ def main(argv: list[str] | None = None) -> int:
     render.add_argument("--repo", required=True, help="owner/name of the GitHub repo")
     render.add_argument("--pr", required=True, type=int, help="pull request number")
     render.add_argument("--head-sha", required=True, help="head commit SHA, 40 hex")
+    render.add_argument(
+        "--test-results-dir",
+        default=None,
+        help="directory of test-results-* JUnit downloads (optional)",
+    )
+    render.add_argument(
+        "--jobs-json",
+        default=None,
+        help="jobs-API response file for the run attempt (optional)",
+    )
     render.set_defaults(func=cmd_render)
     subst = sub.add_parser("substitute", help="pin the placeholder to the push SHA")
     subst.add_argument("--comment", required=True)

@@ -43,6 +43,9 @@ after the PR. Merged branches clean themselves up.
      artifacts, `contents: write` only on the push job,
      `pull-requests: write` only on the comment job; `ci-guard.yml`:
      `contents: read` and `pull-requests: read`).
+     The publisher's `build` job uses its existing `actions: read` to
+     download the test-results artifacts and read job conclusions from the
+     API; no permission was widened.
 
 Click **Save** in each section.
 

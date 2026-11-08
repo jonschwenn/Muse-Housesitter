@@ -19,6 +19,8 @@ build/
 out/
 coverage/
 *.egg-info/
+# CI test-job output (uploaded as the test-results artifact, never committed)
+junit.xml
 
 # Logs
 *.log

@@ -270,13 +270,15 @@ handoff's "license not chosen; don't publish."
   `tests/test_hygiene.py` (the repo-hygiene scan);
   `tests/conformance/**` (the module conformance suite);
   `tests/test_pr_evidence.py`, `tests/test_ui_evidence.py`,
-  `tests/test_publish_evidence.py`, `tests/test_ci_guard.py` (the tests
-  that pin the builders, validators, publisher, and guard);
+  `tests/test_publish_evidence.py`, `tests/test_test_results.py`,
+  `tests/test_ci_guard.py` (the tests that pin the builders, validators,
+  publisher, test-results parser and renderers, and guard);
   `tests/evidence/**` (the scenario list — removing a scenario hides a
   regression the same way editing the builder does);
   `scripts/pr_evidence.py`, `scripts/ui_evidence.py`,
-  `scripts/publish_evidence.py`, `scripts/ci_guard.py` (evidence builders,
-  validators, privileged publisher, guard);
+  `scripts/publish_evidence.py`, `scripts/test_results.py`,
+  `scripts/ci_guard.py` (evidence builders, validators, privileged publisher,
+  test-results parser and renderers, guard);
   `pyproject.toml` (pytest/ruff config, dependency pins, entry points); and
   anywhere in the tree, `conftest.py`, `pytest.ini`, `setup.cfg`,
   `tox.ini`, `ruff.toml`, `.ruff.toml`, `sitecustomize.py`,
@@ -305,9 +307,9 @@ handoff's "license not chosen; don't publish."
     (verified: honored in test modules). Two things close this for the
     protected suites:
     - CI re-runs the protected suites (hygiene, conformance, evidence,
-      publisher, guard tests) in a separate pytest process that collects
-      only those files ("Protected suites, in isolation" in `ci.yml`), so
-      no unprotected test module is ever imported alongside them.
+      publisher, test-results, guard tests) in a separate pytest process
+      that collects only those files ("Protected suites, in isolation" in
+      `ci.yml`), so no unprotected test module is ever imported alongside them.
     - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` in CI kills the entry-point
       variant, and `pyproject.toml` (protected) pins the installed
       distributions, so no new entry-point plugin can arrive that way.
@@ -386,3 +388,30 @@ handoff's "license not chosen; don't publish."
   together. Upstream credits remain in `ATTRIBUTION.md`.
 - **Rejected:** rewriting the personal introduction or placing affiliation
   notes before it.
+
+### D21. Test results in the PR comment; bad test data degrades only its line (2026-11-07, Jon)
+- **Decision:** each CI `test` job writes a results table to its job summary
+  and uploads pytest's JUnit XML as `test-results-<matrix python>`. Main's
+  publisher adds a one-line `**Tests:**` summary under the evidence comment
+  heading. Pass/fail comes from the run attempt's GitHub API job
+  conclusions; for duplicate jobs reporting the same Python version, the
+  worst conclusion wins regardless of job order. Only `failure` and
+  `timed_out` show as failed; other non-success conclusions show as
+  `job <conclusion>`. Counts and failing names come from validated
+  PR-produced XML and remain author-attested, like the text diffs. Failure
+  messages and tracebacks are never published.
+- **Bad data (option A):** a missing or invalid results file, or unusable
+  job data, degrades only the Tests line: `results unavailable`,
+  `no test jobs found`, or `no valid results file`. To fit the comment size
+  budget, failing names are dropped first (counts and verdicts stay), then
+  a fixed short line is used, and if even that doesn't fit, the line is left
+  out. Test data never blocks the publish. The rest
+  of the evidence comment still publishes. Invalid UI artifacts still
+  refuse the whole publish.
+- **Why:** the test summary is a one-line add-on whose pass/fail already
+  comes from the trusted API. Refusing everything for bad test data would
+  hide the screenshots and diffs a reviewer needs.
+- **Rejected:**
+  - Refusing the whole publish on bad test data, like the UI artifact.
+  - Taking pass/fail from the XML instead of the API: PR-produced counts
+    cannot establish whether the test job passed.
