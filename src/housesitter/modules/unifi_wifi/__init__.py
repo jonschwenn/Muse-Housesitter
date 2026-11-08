@@ -253,7 +253,7 @@ class UniFiWifi(sdk.Module):
         clients, client_warnings = normalise.normalise_clients(
             stations, aps
         )
-        summary = normalise.build_summary(aps, clients)
+        summary, summary_warnings = normalise.build_summary(aps, clients)
         data = {"summary": summary, "aps": aps, "clients": clients}
         compact = {
             "summary": summary,
@@ -279,7 +279,11 @@ class UniFiWifi(sdk.Module):
             source=source,
             compact=compact,
             paging=sdk.Paging(command="get", lists=("clients",)),
-            warnings=list(ap_warnings) + list(client_warnings),
+            warnings=(
+                list(ap_warnings)
+                + list(client_warnings)
+                + list(summary_warnings)
+            ),
             label=params.get("label"),
             save="snapshot",
         )
@@ -340,6 +344,16 @@ class UniFiWifi(sdk.Module):
             raise sdk.CommandError(
                 "upstream_unexpected", normalise.DAMAGED_SNAPSHOT
             )
+        if not normalise.saved_radios_intact(aps):
+            raise sdk.CommandError(
+                "upstream_unexpected", normalise.DAMAGED_SNAPSHOT
+            )
+        try:
+            restated, ssid_omitted = normalise.restated_warnings(saved)
+        except ValueError as exc:
+            raise sdk.CommandError(
+                "upstream_unexpected", str(exc)
+            ) from None
         section = params.get("section")
         offset = params.get("offset", 0)
         if section is None:
@@ -352,9 +366,21 @@ class UniFiWifi(sdk.Module):
             clean_clients, client_warnings = normalise.revalidate_clients(
                 clients, clean_aps
             )
-            clean_summary = normalise.build_summary(
+            clean_summary, _ = normalise.build_summary(
                 clean_aps, clean_clients
             )
+            try:
+                clean_summary["clients_by_ssid"] = (
+                    normalise.validated_ssid_groups(
+                        summary.get("clients_by_ssid"),
+                        clean_clients,
+                        ssid_omitted,
+                    )
+                )
+            except ValueError as exc:
+                raise sdk.CommandError(
+                    "upstream_unexpected", str(exc)
+                ) from None
             page = {
                 "summary": clean_summary,
                 "aps": clean_aps,
@@ -377,13 +403,15 @@ class UniFiWifi(sdk.Module):
                     lists=("clients",),
                     params={"id": params["id"]},
                 ),
-                warnings=list(ap_warnings) + list(client_warnings),
+                warnings=_combined_warnings(
+                    restated, ap_warnings, client_warnings
+                ),
                 label=label,
                 collected_at=collected_at,
             )
-        clean_aps, _ = normalise.revalidate_aps(aps)
-        clean_clients, _ = normalise.revalidate_clients(
-            clients, clean_aps
+        clean_aps, section_ap_warnings = normalise.revalidate_aps(aps)
+        clean_clients, section_client_warnings = (
+            normalise.revalidate_clients(clients, clean_aps)
         )
         items = clean_aps if section == "aps" else clean_clients
         page_items = list(items[offset:])
@@ -406,9 +434,24 @@ class UniFiWifi(sdk.Module):
                 params={"id": params["id"]},
                 start={section: offset},
             ),
+            warnings=_combined_warnings(
+                restated, section_ap_warnings, section_client_warnings
+            ),
             label=label,
             collected_at=collected_at,
         )
+
+
+def _combined_warnings(
+    restated: Any, ap_warnings: Any, client_warnings: Any
+) -> list:
+    """Saved-order-first warnings: restated saved text, then any fresh
+    re-validation findings, de-duplicated (D3)."""
+    combined = list(restated)
+    for warning in list(ap_warnings) + list(client_warnings):
+        if warning not in combined:
+            combined.append(warning)
+    return combined
 
 
 def _stat_path(flavor: str, ctx: sdk.Context, endpoint: str) -> str:
