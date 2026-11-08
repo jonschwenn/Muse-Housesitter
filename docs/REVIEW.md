@@ -76,6 +76,34 @@ PR #1 predates the tooling and has no evidence.
   write token belongs to this workflow, not to the PR. When the artifact is
   invalid or the run is stale or ambiguous, it publishes nothing: no push,
   no comment.
+- Each CI `test` job runs pytest with `--junitxml`, writes a results table
+  to its job summary page, and uploads `test-results-<matrix python>`.
+  The publisher downloads the XML and reads the run attempt's test-job
+  conclusions from the GitHub API. Main's `scripts/publish_evidence.py
+  render` adds a one-line `**Tests:**` summary under the evidence heading,
+  including failing names when space permits.
+  - Verdicts come from the API. For duplicate jobs reporting the same
+    Python version, the worst conclusion wins regardless of job order.
+    Only `failure` and `timed_out` show as failed; other non-success
+    conclusions show as `job <conclusion>` (for example, `job cancelled`).
+  - Counts and names from PR-produced XML are **author-attested**, like
+    the text diffs. Main's `scripts/test_results.py` accepts only UTF-8,
+    strips a UTF-8 byte-order mark, and rejects other encodings before
+    parsing. It caps XML size and element count, rejects `DOCTYPE` and
+    `ENTITY`, validates counts and suite versions, and allows only
+    length-capped names with a fixed set of characters. If failures +
+    errors + skipped exceed tests, the file is invalid for the comment
+    line; the CI job summary table still renders those counts as a
+    convenience view. At most 20 failing names appear; others are counted
+    but not shown. Failure messages and tracebacks are never published.
+  - Jon's option A (D21): missing or invalid results or unusable job data
+    degrade only the Tests line: `results unavailable`, `no test jobs
+    found`, or `no valid results file`. To fit the comment size budget,
+    failing names are dropped first (counts and verdicts stay), then a
+    fixed short line is used, and if even that doesn't fit, the line is
+    left out. Test data never blocks the publish or hides
+    the screenshots and diffs reviewers need. Invalid UI artifacts still
+    refuse the whole publish.
 - Trust model (the fine print that makes the above honest). The `CI`
   workflow runs on `pull_request`, so its file comes from the PR: a PR that
   edits `ci.yml` controls that run's jobs, including what the artifact
@@ -236,6 +264,8 @@ PR #1 predates the tooling and has no evidence.
 
 - ruff, and the full test suite on Python 3.9 and the newest Python.
 - The conformance suite and the hygiene scan.
+- Test results appear on each `test` job's summary page and in the evidence
+  comment's `**Tests:**` line (see Evidence above).
 - Automated checks are three workflows. `.github/workflows/ci.yml` ends in
   `ci-ok`, which passes only if `test` and `evidence` both passed or were
   skipped on purpose. `.github/workflows/ci-guard.yml` reports `ci-guard`
