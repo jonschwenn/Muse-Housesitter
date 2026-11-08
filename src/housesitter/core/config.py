@@ -6,6 +6,7 @@ live here: only names that point at files under the secrets directory.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -20,7 +21,7 @@ from housesitter import sdk
 MAX_CONFIG_BYTES = 1024 * 1024
 
 _TOP_KEYS = frozenset({"housesitter", "modules"})
-_CORE_KEYS = frozenset({"identifiers", "retention"})
+_CORE_KEYS = frozenset({"identifiers", "retention", "dashboard"})
 _RESERVED_KEYS = frozenset({"enabled", "retention"})
 
 
@@ -108,6 +109,108 @@ def _check_retention(value: Any, key: str) -> int:
     return value
 
 
+# Dashboard server settings (docs/DASHBOARD.md §5). All optional; the
+# defaults bind the read-only server to loopback only.
+_DASHBOARD_KEYS = frozenset({"bind", "port", "allowed_hosts", "house_label"})
+
+# A strict hostname: labels of letters, digits, and hyphens, dots between
+# them, no leading or trailing hyphen or dot, at most 253 characters.
+# Anything else must be an IP literal (checked with ipaddress).
+_HOSTNAME_RE = re.compile(
+    r"(?=.{1,253}\Z)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\Z"
+)
+
+_MAX_ALLOWED_HOSTS = 32
+_MAX_HOUSE_LABEL_LEN = 64
+
+
+@dataclass(frozen=True)
+class DashboardConfig:
+    """The ``housesitter.dashboard`` section: bind, port, Host allow-list,
+    and the owner-chosen house label shown on the dashboard."""
+
+    bind: str = "127.0.0.1"
+    port: int = 8080
+    allowed_hosts: tuple = ()
+    house_label: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "allowed_hosts", tuple(self.allowed_hosts)
+        )
+
+
+def _validate_dashboard(section: Any, key: str = "housesitter.dashboard",
+                        ) -> DashboardConfig:
+    """Check the dashboard section, applying defaults. Errors name the key
+    and the rule, never the offending value."""
+    if section is None:
+        return DashboardConfig()
+    if not isinstance(section, dict):
+        raise ConfigError(key, "section must be an object")
+    for name in section:
+        if name not in _DASHBOARD_KEYS:
+            raise ConfigError(f"{key}.{name}", "unknown setting")
+    bind = section.get("bind", "127.0.0.1")
+    if not isinstance(bind, str):
+        raise ConfigError(f"{key}.bind", "bind must be an IP address literal")
+    try:
+        ipaddress.ip_address(bind)
+    except ValueError:
+        raise ConfigError(
+            f"{key}.bind", "bind must be an IP address literal"
+        ) from None
+    port = section.get("port", 8080)
+    if (
+        isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 1 <= port <= 65535
+    ):
+        raise ConfigError(
+            f"{key}.port", "port must be an integer 1..65535"
+        )
+    allowed = section.get("allowed_hosts", [])
+    if (
+        isinstance(allowed, (str, bytes))
+        or not isinstance(allowed, (list, tuple))
+        or len(allowed) > _MAX_ALLOWED_HOSTS
+    ):
+        raise ConfigError(
+            f"{key}.allowed_hosts",
+            "allowed_hosts must be a list of at most 32 hostnames",
+        )
+    for entry in allowed:
+        if not isinstance(entry, str):
+            raise ConfigError(
+                f"{key}.allowed_hosts",
+                "allowed_hosts must be a list of at most 32 hostnames",
+            )
+        try:
+            ipaddress.ip_address(entry)
+        except ValueError:
+            if _HOSTNAME_RE.fullmatch(entry) is None:
+                raise ConfigError(
+                    f"{key}.allowed_hosts",
+                    "allowed_hosts must be a list of at most 32 hostnames",
+                ) from None
+    house_label = section.get("house_label", None)
+    if house_label is not None and (
+        not isinstance(house_label, str)
+        or len(house_label) > _MAX_HOUSE_LABEL_LEN
+    ):
+        raise ConfigError(
+            f"{key}.house_label",
+            "house_label must be a string of at most 64 characters",
+        )
+    return DashboardConfig(
+        bind=bind,
+        port=port,
+        allowed_hosts=tuple(entry.lower() for entry in allowed),
+        house_label=house_label,
+    )
+
+
 @dataclass(frozen=True)
 class ModuleConfig:
     """One module's validated section: enabled, retention, settings."""
@@ -128,6 +231,7 @@ class Config:
     secrets_dir: Path = field(default_factory=lambda: config_path().parent / "secrets")
     identifiers: str = "full"
     retention: int = 500
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     modules: Mapping[str, ModuleConfig] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -196,6 +300,7 @@ def load_config(
     retention = _check_retention(
         core.get("retention", 500), "housesitter.retention"
     )
+    dashboard = _validate_dashboard(core.get("dashboard"))
 
     raw_modules = top.get("modules", {})
     if not isinstance(raw_modules, dict):
@@ -235,5 +340,6 @@ def load_config(
         secrets_dir=secrets_dir,
         identifiers=identifiers,
         retention=retention,
+        dashboard=dashboard,
         modules=modules,
     )

@@ -76,6 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("config-check", help="Validate the config file and exit.")
+
+    # No flags: bind, port, and hosts come from housesitter.dashboard in
+    # config. Not a Muse command: no drop-in is generated for it.
+    sub.add_parser("serve", help="Serve the read-only dashboard.")
     return parser
 
 
@@ -379,6 +383,11 @@ def main(
         if line is not None:
             err.write(line + "\n")
         return code
+
+    if args.subcommand == "serve":
+        from housesitter.core import serve as _serve
+
+        return _serve.serve_command(registry, env_map, out, err)
 
     parser.error(f"unknown subcommand {args.subcommand}")
     return 2
