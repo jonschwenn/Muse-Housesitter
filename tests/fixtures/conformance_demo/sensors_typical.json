@@ -1,0 +1,44 @@
+{
+  "api_version": "1.2.3",
+  "hub": "demo",
+  "sensors": [
+    {
+      "id": "02:00:00:00:00:01",
+      "name": "Living Room",
+      "ip": "192.0.2.11",
+      "ssid": "home-example",
+      "temperature_c": 21.5,
+      "humidity_pct": 45,
+      "online": true,
+      "x_passphrase": "PLANTED-SECRET-typical-1",
+      "wifi_key": "PLANTED-SECRET-typical-2"
+    },
+    {
+      "id": "02:00:00:00:00:02",
+      "name": "Kitchen",
+      "ip": "192.0.2.12",
+      "ssid": "home-example",
+      "temperature_c": null,
+      "humidity_pct": 50,
+      "online": true
+    },
+    {
+      "id": "00:00:5e:00:53:01",
+      "name": "Attic",
+      "ip": "198.51.100.23",
+      "ssid": "iot-example",
+      "temperature_c": 19.0,
+      "humidity_pct": null,
+      "online": false
+    },
+    {
+      "id": "02:00:00:00:00:03",
+      "name": "Basement",
+      "ip": "203.0.113.44",
+      "ssid": "iot-example",
+      "humidity_pct": 55,
+      "online": true,
+      "x_authkey": "PLANTED-SECRET-typical-3"
+    }
+  ]
+}

@@ -646,6 +646,7 @@ def run_command(
     commands_dir: str | os.PathLike[str] | None = None,
     monotonic: Callable[[], float] | None = None,
     log_stream: Any = None,
+    client_factory: Callable[..., Any] | None = None,
 ) -> Outcome:
     """Run one command and return its outcome (envelope plus exit code)."""
     clock = monotonic or time.monotonic
@@ -732,6 +733,7 @@ def run_command(
             deadline_monotonic=deadline_monotonic,
             now=now,
             store=data_store,
+            client_factory=client_factory,
         )
     except Exception:
         return _fail(module_id, "upstream_unexpected", _FAILED_REASON)

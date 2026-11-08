@@ -1,0 +1,220 @@
+{
+  "config": {
+    "base_url": "http://127.0.0.1:{port}",
+    "auth": {
+      "username": "housesitter-example",
+      "password_secret": "sensor_password"
+    },
+    "tls": {}
+  },
+  "secrets": {
+    "sensor_password": "PLANTED-SECRET-demo-password-9"
+  },
+  "spec": "tests/conformance/demo_module/SPEC.md",
+  "cases": [
+    {
+      "name": "snapshot-typical",
+      "fixture": "typical",
+      "command": "snapshot",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/api/v1/sensors-example",
+          "status": 200,
+          "body_file": "sensors_typical.json"
+        }
+      ],
+      "expect": "ok"
+    },
+    {
+      "name": "snapshot-empty",
+      "fixture": "empty",
+      "command": "snapshot",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/api/v1/sensors-example",
+          "status": 200,
+          "body_file": "sensors_empty.json"
+        }
+      ],
+      "expect": "ok"
+    },
+    {
+      "name": "snapshot-error",
+      "fixture": "error",
+      "command": "snapshot",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/api/v1/sensors-example",
+          "status": 500,
+          "body_file": "sensors_error.json"
+        }
+      ],
+      "expect": {
+        "error": "upstream_unexpected"
+      }
+    },
+    {
+      "name": "snapshot-large",
+      "fixture": "large",
+      "command": "snapshot",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/api/v1/sensors-example",
+          "status": 200,
+          "body_file": "sensors_large.json"
+        }
+      ],
+      "expect": "truncated"
+    },
+    {
+      "name": "snapshot-hostile",
+      "fixture": "hostile",
+      "command": "snapshot",
+      "params": {},
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/api/v1/sensors-example",
+          "status": 200,
+          "body_file": "sensors_hostile.json"
+        }
+      ],
+      "expect": "truncated"
+    },
+    {
+      "name": "status-typical",
+      "fixture": "typical",
+      "command": "status",
+      "params": {},
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/api/login",
+          "status": 200,
+          "body_file": "login_ok.json"
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/status-example",
+          "status": 200,
+          "body_file": "status_typical.json"
+        },
+        {
+          "method": "POST",
+          "path": "/api/logout",
+          "status": 200,
+          "body_file": "login_ok.json"
+        }
+      ],
+      "expect": "ok"
+    },
+    {
+      "name": "status-hostile",
+      "fixture": "hostile",
+      "command": "status",
+      "params": {},
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/api/login",
+          "status": 200,
+          "body_file": "login_ok.json"
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/status-example",
+          "status": 200,
+          "body_file": "status_hostile.json"
+        },
+        {
+          "method": "POST",
+          "path": "/api/logout",
+          "status": 200,
+          "body_file": "login_ok.json"
+        }
+      ],
+      "expect": "ok"
+    },
+    {
+      "name": "status-logout-401",
+      "fixture": "error",
+      "command": "status",
+      "params": {},
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/api/login",
+          "status": 200,
+          "body_file": "login_ok.json"
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/status-example",
+          "status": 200,
+          "body_file": "status_typical.json"
+        },
+        {
+          "method": "POST",
+          "path": "/api/logout",
+          "status": 401,
+          "body": "{\"error\": \"PLANTED-SECRET-logout-1\"}"
+        }
+      ],
+      "expect": "ok"
+    },
+    {
+      "name": "status-error",
+      "fixture": "error",
+      "command": "status",
+      "params": {},
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/api/login",
+          "status": 200,
+          "body_file": "login_ok.json"
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/status-example",
+          "status": 500,
+          "body_file": "status_error.json"
+        },
+        {
+          "method": "POST",
+          "path": "/api/logout",
+          "status": 200,
+          "body_file": "login_ok.json"
+        }
+      ],
+      "expect": {
+        "error": "upstream_unexpected"
+      }
+    },
+    {
+      "name": "status-login-401",
+      "fixture": "error",
+      "command": "status",
+      "params": {},
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/api/login",
+          "status": 401,
+          "body": "{\"error\": \"bad password\"}"
+        }
+      ],
+      "expect": {
+        "error": "upstream_auth"
+      }
+    }
+  ]
+}
