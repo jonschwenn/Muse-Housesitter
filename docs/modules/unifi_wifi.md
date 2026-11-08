@@ -1,7 +1,7 @@
 # Module spec: `unifi_wifi` — UniFi WiFi radio metrics
 
-Status: **proposed**, awaiting Jon's review before code.
-Schema: `housesitter.unifi_wifi.snapshot/1`
+Status: implemented on branch unifi-wifi-module (0.1.0); open questions in §7 await Jon.
+Schemas: `housesitter.unifi_wifi.snapshot/1` and `housesitter.unifi_wifi.get/1`
 
 ## 1. Purpose
 
@@ -51,17 +51,25 @@ Only** role, no remote/cloud access, and no SSO. The password lives in
 | Flavour | Default port | Login | Logout | Data prefix |
 |---------|-------------|-------|--------|-------------|
 | `unifi_os` (UDM, UCG, UX, Cloud Key Gen2+) | 443 | `POST /api/auth/login` | `POST /api/auth/logout` | `/proxy/network/api/s/<site>/` |
-| `classic` (self-hosted Network application) | 8443 | `POST /api/login` | `POST /api/logout` or `GET /logout` (U1) | `/api/s/<site>/` |
+| `classic` (self-hosted Network application) | 8443 | `POST /api/login` | `POST /api/logout` (U1) | `/api/s/<site>/` |
 
-- **Detection (`auto`):** a single `GET /`, without following redirects.
-  A 200 means `unifi_os`, and a 3xx means `classic`. This is the method the
-  community API client uses. Anything else is an `upstream_unexpected`
-  error. The detected flavour is reported in `source.flavor`. Set `flavor`
-  explicitly to skip this request.
-- **CSRF:** UniFi OS returns a token in `X-CSRF-Token` on login, and may
-  rotate it via `X-Updated-CSRF-Token`. The client keeps the latest token in
-  memory and sends it on **non-GET** requests (logout). Classic controllers
-  may also send one, and it is handled the same way.
+- **Detection (`auto`): Planned (needs a core change; pending Jon's decision).**
+  The module implements a single `GET /` probe without following redirects:
+  200 means `unifi_os`, 3xx means `classic`, and anything else is
+  `upstream_unexpected`. This upstream behaviour is unverified until Jon's
+  live check (U1, issue #16). The core HTTP client currently refuses the
+  bare root path `/`, so `flavor: "auto"` fails with `config_invalid`
+  ("set unifi_wifi.flavor to unifi_os or classic") before any request is
+  sent. Set `flavor` explicitly. The module never falls back to trying both
+  login paths, because that would send the password twice. See D-auto (§7).
+- **CSRF:** the core HTTP client, not the module, keeps cookies and CSRF
+  (cross-site request forgery) tokens in memory only. It accepts
+  `X-CSRF-Token` and `X-Updated-CSRF-Token`, keeps the latest token, and
+  sends it on **non-GET** requests (logout).
+- **Classic login and logout (U1):** a login response of 400 is treated as
+  bad credentials (`upstream_auth`). Classic logout uses `POST /api/logout`;
+  `GET /logout` remains on the allow-list but is unused. These upstream
+  behaviours are unverified until Jon's live check (issue #16).
 - **Logout** is always attempted after a successful login, including when a
   later step fails. If the process is killed (SDK timeout), logout cannot
   run, and the session expires on the controller.
@@ -74,7 +82,7 @@ Paths are `fullmatch`ed after normalisation. Query strings and `%`-escapes
 are refused, and redirects are never followed (ARCHITECTURE §3).
 
 ```
-GET   /                                  flavour detection only (status observed, body discarded)
+GET   /                                  flavour detection probe (currently blocked by core)
 POST  /api/auth/login                    POST  /api/login
 POST  /api/auth/logout                   POST  /api/logout      GET /logout
 GET   {prefix}stat/sysinfo               controller version
@@ -101,23 +109,34 @@ Choose one in config `tls`:
   recommended for self-signed consoles reached by IP. The pin is checked
   before any request bytes (including the login body) are sent.
 - `{"ca_file": "/path", "server_hostname": "unifi.local"}`: verify against
-  that CA. `server_hostname` is needed when `host` is an IP that isn't in
-  the certificate.
+  that CA. `server_hostname` is needed when the `base_url` host is an IP
+  that isn't in the certificate.
 - `{"insecure": true}`: no verification. Every envelope then carries a
   warning.
 
 There is no silent default to insecure. With no `tls` config, normal system
 verification applies. That fails on self-signed consoles with a clear
-`upstream_tls` error that lists the options and prints the certificate's
-fingerprint for pinning. The fingerprint is not a secret.
+`upstream_tls` error that names the three `tls` options above.
+**Planned (core):** print the certificate's fingerprint for pinning on a
+verification failure; the core currently does not print it. The fingerprint
+is not a secret.
 
 ## 3. Commands
+
+Commands are declared with the short names `snapshot` and `get`, under
+`housesitter.unifi_wifi.`. The runner names each envelope schema per command:
+`snapshot` returns `housesitter.unifi_wifi.snapshot/1`, and `get` returns
+`housesitter.unifi_wifi.get/1`. Both use the data fields in §4; `get` returns
+only `aps` or only `clients` when `section` is given.
 
 | Command | Params | Timeout | Does |
 |---------|--------|---------|------|
 | `housesitter.unifi_wifi.snapshot` | `label?: string` (≤ 200 chars) | 60 s | Logs in, reads sysinfo, devices, and clients, logs out. Saves the full snapshot. Returns it, compacted or paged if over budget. At most 6 requests, and each request's timeout is the smaller of `request_timeout_s` and the time left before the deadline. |
-| `housesitter.unifi_wifi.list` | `offset?: integer` (default 0), `limit?: integer` (default 20, max 100) | 10 s | Lists **all** saved snapshots, newest first and paged: `id`, `collected_at`, `label`, `ap_count`, `client_count`, plus `total`. No network. |
-| `housesitter.unifi_wifi.get` | `id: string`, `section?: string` (`aps` or `clients`), `offset?: integer` (default 0), `limit?: integer` (default 100, max 200) | 10 s | Returns a saved snapshot, or one section of it, paged, with the identifier policy re-applied. No network. `id` must match the store's naming pattern and exist in this module's store, or the result is `not_found`. If the page is over budget, `more` points at the next page. |
+| `housesitter.unifi_wifi.list` | `offset?: integer` (default 0), `limit?: integer` (default 20, max 100) | 10 s (proposed) | **Not built — pending Jon's decision (Q1/Q2, §7)**. Proposed: lists **all** saved snapshots, newest first and paged: `id`, `collected_at`, `label`, `ap_count`, `client_count`, plus `total`. No network. |
+| `housesitter.unifi_wifi.get` | `id: string` (required), `section?: string` (`aps` or `clients`), `offset?: integer` (min 0, default 0); `limit?: integer` (default 100, max 200): **Not built — pending Jon's decision (Q1/Q2, §7)** | 10 s | Returns a saved snapshot, or one section of it, paged, with the identifier policy re-applied. No network. `id` must match the store's naming pattern and exist in this module's store, or the result is `not_found`. If the page is over budget, `more` points at the next page. |
+
+`get` rejects a positive `offset` without `section` as `bad_params`. Paging
+is by size budget only; there is no implemented `limit` parameter.
 
 There is no `compare` command. Comparing snapshots is analysis, so Muse does
 it (AGENTS rule 2). SKILL.md explains how.
@@ -127,7 +146,10 @@ it (AGENTS rule 2). SKILL.md explains how.
 ### 4.0 Conventions
 
 - Rates are in Mbps. UniFi reports kbps, so the module divides by 1000.
-- Signal and power values are in dBm. Percentages are 0–100.
+- Signal and power values are in dBm (decibels relative to one milliwatt).
+  Percentages are 0–100; out-of-range upstream percentages become `null`.
+  Upstream percentage fields accept only integral values; the cumulative
+  retry percentage is calculated separately and is currently unrounded.
 - Unknown values are `null`.
 - **Band** is `"2.4GHz"`, `"5GHz"`, `"6GHz"`, or `"unknown"`, from UniFi's
   `radio`: `ng`→2.4, `na`→5, `6e`→6.
@@ -137,10 +159,27 @@ it (AGENTS rule 2). SKILL.md explains how.
   (e.g. `channel: "auto"`). The module parses numbers it can, and anything
   else becomes `null`. For radio settings, the raw word is kept in a
   `*_setting` field.
+- AP and wireless client records without a valid colon-separated MAC address
+  are left out, with a counted warning. MACs are normalised to lowercase.
+- Controller strings that are not user-chosen are restricted: `model`,
+  `firmware`, and `controller_version` match `[A-Za-z0-9._+-]{1,64}`;
+  `wifi_standard_raw` matches `[A-Za-z0-9._-]{1,16}`. `channel_setting`
+  keeps a parsed integer as text, or a word matching `[A-Za-z0-9]{1,16}`.
+  `tx_power_mode` and `uplink_type` use the value lists below. Other values
+  become `null`.
+
+`data`
+
+| Field | Type | Unit | Source | Meaning |
+|-------|------|------|--------|---------|
+| `aps` | list | — | `stat/device` | Access points (§4.1). |
+| `clients` | list | — | `stat/sta` | Wireless clients (§4.2). |
+| `summary` | object | — | derived from `aps` and `clients` | Counts and groupings (§4.3). |
 
 ### 4.1 APs
 
-Only devices with `type == "uap"` are included.
+Only devices with `type == "uap"` are included. `online` is a non-null
+boolean from parsed `state == 1`; missing `state` reads as offline (Q3, §7).
 
 `data.aps[]`
 
@@ -177,7 +216,11 @@ Only devices with `type == "uap"` are included.
 
 ### 4.2 Clients
 
-Only records with `is_wired` false are included.
+Records with `is_wired` exactly true are excluded; a missing flag is treated
+as wireless (unverified upstream assumption: U1, issue #16). Duplicate
+client MACs keep the first record, with a counted warning. A client's
+`ap_id` is an AP in `aps` or `null`; when it is `null`, `ap_name` is `null`
+too.
 
 `data.clients[]`
 
@@ -209,8 +252,8 @@ Only records with `is_wired` false are included.
 The upstream field names above come from community API documentation
 (Art-of-WiFi UniFi-API-client) and an independent review. Their presence,
 encodings, and units **must be verified against one live controller of each
-available flavour** before the schema is frozen (U1). Fields that turn out
-to be missing stay in the schema as `null`.
+available flavour** before the schema is frozen (U1, issue #16; Jon's live
+check). Fields that turn out to be missing stay in the schema as `null`.
 
 ### 4.3 Summary
 
@@ -228,16 +271,40 @@ keyed by untrusted names (ARCHITECTURE §7).
 | `clients_by_ap` | list | — | derived | `[{ap_id, ap_name, count}]`. `ap_id` is an **identifier** and `ap_name` is **untrusted**. |
 | `clients_by_ssid` | list | — | derived | `[{ssid, count}]`. `ssid` is **untrusted**. A null SSID is its own entry. |
 
+`data.summary.clients_by_band[]`
+
+| Field | Type | Unit | Source | Meaning |
+|-------|------|------|--------|---------|
+| `band` | string | — | `clients[].band` | Every band in fixed order: `2.4GHz`, `5GHz`, `6GHz`, `unknown`. |
+| `count` | int | — | derived | Clients on this band, including zero counts. |
+
+`data.summary.clients_by_ap[]`
+
+| Field | Type | Unit | Source | Meaning |
+|-------|------|------|--------|---------|
+| `ap_id` | string | — | `clients[].ap_id` | AP identity. **Identifier.** Groups sorted by `ap_id`; clients with null `ap_id` are excluded. |
+| `ap_name` | string\|null | — | `clients[].ap_name` | AP name. **Untrusted.** |
+| `count` | int | — | derived | Clients on this AP; only APs with clients have entries. |
+
+`data.summary.clients_by_ssid[]`
+
+| Field | Type | Unit | Source | Meaning |
+|-------|------|------|--------|---------|
+| `ssid` | string\|null | — | `clients[].ssid` | Network name. **Untrusted.** Sorted by SSID, with a null group last if any clients have a null SSID. |
+| `count` | int | — | derived | Clients on this SSID. |
+
 ### 4.4 Order, compact form, paging
 
 - `aps` are ordered by `name`, then `id`. `clients` are ordered by
   `ap_name`, then `name`, then `id`. The order is deterministic and doesn't
-  rank anything.
+  rank anything. Null names sort last at each name comparison.
 - Compact form drops these client fields: `noise_dbm`, `idle_s`, `vendor`,
   `wifi_standard_raw`, `guest`, `ip`, `tx_retry_pct_recent`.
 - If the result is still over budget, `clients` is truncated and `more`
   points at `get` with `section: "clients"` and the next `offset`.
-- `summary` and `aps` are always returned in full.
+- Whole-snapshot output keeps `summary` and `aps` in full. Section-only
+  `get` returns just that list, from `offset`; the runner pages it if needed.
+- When `truncated` is true, call `more.command` with `more.params` exactly.
 
 ### 4.5 Source
 
@@ -257,22 +324,34 @@ keyed by untrusted names (ARCHITECTURE §7).
 ```json
 "unifi_wifi": {
   "enabled": true,
-  "host": "192.0.2.1",
-  "port": null,
+  "base_url": "https://192.0.2.1",
   "site": "default",
-  "flavor": "auto",
+  "flavor": "unifi_os",
   "auth": { "username": "housesitter-readonly", "password_secret": "unifi_password" },
   "tls": { "fingerprint_sha256": "AB:CD:..." },
   "request_timeout_s": 15
 }
 ```
 
-`port: null` means the flavour's default port.
+`base_url` is required: `https://host` or `https://host:port`, HTTPS only,
+with no path (an optional trailing `/` is accepted). There is no inferred
+flavour-specific port; include the controller's port in the URL if needed.
+This replaces the earlier `host` + `port` keys; pending Jon's decision
+(C1): the conformance harness binds clients from `base_url`, and one URL
+also settles which port `auto` would probe.
 
-`doctor`'s check for this module: config valid, secret readable with mode
-600, TLS reachable with a matching fingerprint, login and logout succeed,
-and the site exists. It never reads client data. It makes one login per
-run, never in a loop.
+`site` defaults to `default` and matches `[A-Za-z0-9_-]{1,64}`. `flavor`
+defaults to `auto` (`unifi_os` or `classic` must currently be set explicitly;
+§2.2). `auth` requires a username and a `password_secret` naming the secret
+file, never the password itself. `tls` uses the core options in §2.4.
+`request_timeout_s` is a number from 1 to 60 seconds, default 15.
+
+`doctor` calls `check()`: connect and log in, read this site's `stat/sysinfo`,
+then attempt logout in `finally`. It returns `login ok`, `site ok`, and
+`logout ok` after a successful read; the last message means logout was
+attempted, not confirmed. Logout failures are logged with fixed text and
+never replace the result. It never reads devices or clients or saves a
+snapshot. Core config, secret, and TLS checks apply to the connection.
 
 ## 6. Tests
 
@@ -286,12 +365,15 @@ run, never in a loop.
 The tests check:
 
 - Field-by-field normalisation for both flavours.
-- `auto` flavour detection (200, 3xx, other).
-- No redirect is followed, and the TLS pin is checked before the login body is sent.
+- `auto` fails before any request because the core refuses `/`; explicit
+  flavours skip the probe. **Planned:** end-to-end `auto` detection tests
+  (200, 3xx, other) after a core change and Jon's decision (D-auto).
+- Core HTTP tests check that no redirect is followed and that the TLS pin
+  is checked before the login body is sent.
 - The size budget is measured with the SDK formula on non-ASCII-heavy names.
 - CSRF handling, and that logout is called on every failure path.
-- Each error code: bad password, connection refused, TLS mismatch, non-JSON
-  body, and a slow controller hitting the deadline.
+- Module tests cover bad credentials, non-JSON responses, and request
+  timeouts; core HTTP tests cover connection refusal and TLS mismatch.
 - The allow-list: calls to `rest/wlanconf`, `stat/device-basic`, `stat/sta?x=1`, and `%2e%2e` paths all raise `NotAllowed`, and site validation rejects `../`.
 - `get` rejects ids outside the store's naming pattern, and ids that do not exist.
 - All of the conformance suite.
@@ -313,3 +395,19 @@ The tests check:
   the newer Integration API, which has different paths and schema. The
   `auth` config object is shaped so that `{"api_key_secret": "..."}` can be
   added without breaking existing config.
+- **Q1.** `get.limit` conflicts with the runner's budget-only paging:
+  each follow-up page must return every remaining item after `offset`; a
+  100-item cap would end the chain early with items left. Proposal: drop
+  `limit`; paging is by size budget only. Pending Jon's decision.
+- **Q2.** `list`'s output list key is unnamed. Proposal:
+  `data.snapshots[]` (`id`, `collected_at`, `label`, `ap_count`, `client_count`)
+  plus `data.total`. Pending Jon's decision; `list` is not built.
+- **Q3.** `aps[].online` is a non-null bool from `state == 1`, so a missing
+  `state` reads as offline. Proposal: allow null when `state` is missing.
+  Pending Jon's decision.
+- **Q4.** `tx_retry_pct_cumulative` precision is unspecified and currently
+  unrounded. Proposal: round to 1 decimal. Pending Jon's decision.
+- **C1.** Config uses `base_url` instead of `host` + `port` (§5).
+  Pending Jon's decision.
+- **D-auto.** Automatic flavour detection needs a core change (§2.2).
+  **Planned**, pending Jon's decision.
