@@ -19,6 +19,9 @@ from typing import Any
 _MAC_RE = re.compile(r"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}\Z")
 _MODEL_RE = re.compile(r"[A-Za-z0-9._+-]{1,64}\Z")
 _CHANNEL_SETTING_RE = re.compile(r"[A-Za-z0-9]{1,16}\Z")
+# What collection can store: the strict word above, or the decimal string
+# of a numeric upstream channel (which may be negative).
+_SAVED_CHANNEL_SETTING_RE = re.compile(r"(-?[0-9]{1,16}|[A-Za-z0-9]{1,16})\Z")
 _WIFI_RAW_RE = re.compile(r"[A-Za-z0-9._-]{1,16}\Z")
 
 _BANDS = ("2.4GHz", "5GHz", "6GHz", "unknown")
@@ -505,7 +508,7 @@ def _revalidate_radio(item: Any) -> Any:
         "band": _revalidate_band(item.get("band")),
         "channel": _to_int(item.get("channel")),
         "channel_setting": _strict_word(
-            item.get("channel_setting"), _CHANNEL_SETTING_RE
+            item.get("channel_setting"), _SAVED_CHANNEL_SETTING_RE
         ),
         "width_mhz": _to_int(item.get("width_mhz")),
         "tx_power_dbm": _to_int(item.get("tx_power_dbm")),

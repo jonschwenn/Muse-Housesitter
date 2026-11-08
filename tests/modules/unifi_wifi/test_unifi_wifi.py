@@ -1337,3 +1337,29 @@ def test_tls_failure_names_the_tls_options(tmp_path):
     else:  # pragma: no cover - the call must fail
         raise AssertionError("snapshot succeeded despite a TLS failure")
     assert len(sent) == 1
+
+
+def test_get_keeps_numeric_channel_setting_from_collection():
+    # Regression: collection turns a numeric channel (even negative) into
+    # its decimal string; get's re-validation must accept what collection
+    # produced, so a saved snapshot reads back unchanged.
+    routes = typical_routes("unifi_os")
+    device = json.loads(fixture_bytes("unifi_os_device.json"))
+    for record in device["data"]:
+        for radio in record.get("radio_table", []) or []:
+            radio["channel"] = -1
+    routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
+        status=200, body=json.dumps(device).encode("utf-8"))
+    home = SavedHome(routes)
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        settings = [r["channel_setting"] for ap in snap.envelope["data"]["aps"]
+                    for r in ap["radios"]]
+        assert settings and set(settings) == {"-1"}
+        got = home.run("housesitter.unifi_wifi.get",
+                       {"id": snap.envelope["saved"], "section": "aps"})
+        assert got.exit_code == 0
+        assert got.envelope["data"]["aps"] == snap.envelope["data"]["aps"]
+    finally:
+        home.close()
