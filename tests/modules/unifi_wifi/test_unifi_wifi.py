@@ -480,8 +480,6 @@ def test_edge_cases():
         {"band": "6GHz", "count": 0},
         {"band": "unknown", "count": 1},
     ]
-    # null SSID sorts last in the grouping
-    assert data["summary"]["clients_by_ssid"][-1]["ssid"] is None or True
     # duplicate mac: first wins; missing mac skipped
     assert clients["02:00:00:00:03:01"]["ip"] == "192.0.2.61"
     assert outcome.envelope["warnings"] == [
@@ -1361,5 +1359,60 @@ def test_get_keeps_numeric_channel_setting_from_collection():
                        {"id": snap.envelope["saved"], "section": "aps"})
         assert got.exit_code == 0
         assert got.envelope["data"]["aps"] == snap.envelope["data"]["aps"]
+    finally:
+        home.close()
+
+
+def test_missing_ssid_is_its_own_group_listed_last():
+    # Review 2 N1: a wireless client without essid forms a {ssid: null}
+    # group, listed after the named SSIDs (spec §4.3).
+    routes = typical_routes("unifi_os")
+    sta = json.loads(fixture_bytes("unifi_os_sta.json"))
+    wireless = [r for r in sta["data"] if not r.get("is_wired")]
+    del wireless[0]["essid"]
+    wireless[1]["essid"] = 7
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200, body=json.dumps(sta).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    groups = outcome.envelope["data"]["summary"]["clients_by_ssid"]
+    assert groups[-1] == {"ssid": None, "count": 2}
+    assert all(g["ssid"] is not None for g in groups[:-1])
+    assert sum(g["count"] for g in groups) == 12
+
+
+def test_logout_failure_never_replaces_the_result():
+    # Review 2 N3: a failed logout is logged, and the snapshot still
+    # succeeds; check() still reports its findings.
+    routes = typical_routes("unifi_os")
+    routes[("POST", "/api/auth/logout")] = Canned(status=500, body=b"{}")
+    outcome, info = run_case(routes)
+    assert outcome.exit_code == 0
+    assert len(outcome.envelope["data"]["clients"]) == 12
+    assert len(logout_requests(info)) == 1
+    routes[("POST", "/api/auth/logout")] = Canned(status=401, body=b"{}")
+    outcome, info = run_case(routes)
+    assert outcome.exit_code == 0
+    assert len(logout_requests(info)) == 1
+
+
+def test_get_nulls_out_of_range_cumulative_retry_in_saved_file():
+    # Review 2 N2: re-validation applies the 0-100 percent range to the
+    # cumulative retry figures too.
+    home = SavedHome(typical_routes("unifi_os"))
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        saved_id = snap.envelope["saved"]
+        saved, path = _tamper_saved(home, saved_id)
+        saved["data"]["aps"][0]["radios"][0]["tx_retry_pct_cumulative"] = 500
+        saved["data"]["clients"][0]["tx_retry_pct_cumulative"] = -5
+        saved["data"]["clients"][1]["tx_retry_pct_cumulative"] = 12.5
+        path.write_text(json.dumps(saved), encoding="utf-8")
+        got = home.run("housesitter.unifi_wifi.get", {"id": saved_id})
+        assert got.exit_code == 0
+        data = got.envelope["data"]
+        assert data["aps"][0]["radios"][0]["tx_retry_pct_cumulative"] is None
+        assert data["clients"][0]["tx_retry_pct_cumulative"] is None
+        assert data["clients"][1]["tx_retry_pct_cumulative"] == 12.5
     finally:
         home.close()

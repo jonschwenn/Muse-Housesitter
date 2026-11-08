@@ -107,6 +107,14 @@ def _pct(value: Any) -> Any:
     return num
 
 
+def _pct_number(value: Any) -> Any:
+    """A 0..100 percent that may be fractional (saved derived figures)."""
+    num = _to_number(value)
+    if num is None or num < 0 or num > 100:
+        return None
+    return num
+
+
 def _strict_word(value: Any, pattern: Any) -> Any:
     """A strictly-validated non-untrusted string, else None."""
     if isinstance(value, str) and pattern.fullmatch(value) is not None:
@@ -518,7 +526,7 @@ def _revalidate_radio(item: Any) -> Any:
         "self_tx_pct": _pct(item.get("self_tx_pct")),
         "client_count": _to_int(item.get("client_count")),
         "satisfaction_pct": _pct(item.get("satisfaction_pct")),
-        "tx_retry_pct_cumulative": _to_number(
+        "tx_retry_pct_cumulative": _pct_number(
             item.get("tx_retry_pct_cumulative")
         ),
     }
@@ -600,7 +608,7 @@ def _revalidate_client(item: Any, aps_by_id: Any) -> Any:
         "tx_rate_mbps": _to_number(item.get("tx_rate_mbps")),
         "rx_rate_mbps": _to_number(item.get("rx_rate_mbps")),
         "satisfaction_pct": _pct(item.get("satisfaction_pct")),
-        "tx_retry_pct_cumulative": _to_number(
+        "tx_retry_pct_cumulative": _pct_number(
             item.get("tx_retry_pct_cumulative")
         ),
         "tx_retry_pct_recent": _pct(item.get("tx_retry_pct_recent")),
