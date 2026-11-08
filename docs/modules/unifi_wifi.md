@@ -159,8 +159,11 @@ it (AGENTS rule 2). SKILL.md explains how.
   (e.g. `channel: "auto"`). The module parses numbers it can, and anything
   else becomes `null`. For radio settings, the raw word is kept in a
   `*_setting` field.
-- AP and wireless client records without a valid colon-separated MAC address
-  are left out, with a counted warning. MACs are normalised to lowercase.
+  Numbers larger than `2**53` in absolute value, and numeric strings longer
+  than 32 characters after trimming surrounding whitespace, become `null`.
+- During collection, AP and wireless client records that could not be read
+  or had no valid colon-separated MAC address are left out, with a counted
+  warning. MACs are normalised to lowercase.
 - Controller strings that are not user-chosen are restricted: `model`,
   `firmware`, and `controller_version` match `[A-Za-z0-9._+-]{1,64}`;
   `wifi_standard_raw` matches `[A-Za-z0-9._-]{1,16}`. `channel_setting`
@@ -180,6 +183,7 @@ it (AGENTS rule 2). SKILL.md explains how.
 
 Only devices with `type == "uap"` are included. `online` is a non-null
 boolean from parsed `state == 1`; missing `state` reads as offline (Q3, §7).
+Duplicate AP MACs keep the first record, with a counted warning.
 
 `data.aps[]`
 
@@ -295,6 +299,14 @@ keyed by untrusted names (ARCHITECTURE §7).
 
 ### 4.4 Order, compact form, paging
 
+`get` re-validates saved records with the same rules used at collection.
+An AP or client record that cannot be read or has no valid MAC `id`, or a
+source with an invalid `kind`, `flavor`, or `site` (§4.5 and §5), fails the
+whole command with `upstream_unexpected`, "That saved snapshot is damaged."
+Records are not dropped, so paging offsets do not shift. Other invalid
+values in nullable fields become `null`; an invalid band becomes `"unknown"`.
+Whole-snapshot `get` recomputes `summary` from the re-validated records.
+
 - `aps` are ordered by `name`, then `id`. `clients` are ordered by
   `ap_name`, then `name`, then `id`. The order is deterministic and doesn't
   rank anything. Null names sort last at each name comparison.
@@ -336,6 +348,7 @@ keyed by untrusted names (ARCHITECTURE §7).
 `base_url` is required: `https://host` or `https://host:port`, HTTPS only,
 with no path (an optional trailing `/` is accepted). There is no inferred
 flavour-specific port; include the controller's port in the URL if needed.
+An explicit port must be 1–65535, with no leading zeros.
 This replaces the earlier `host` + `port` keys; pending Jon's decision
 (C1): the conformance harness binds clients from `base_url`, and one URL
 also settles which port `auto` would probe.
@@ -371,7 +384,9 @@ The tests check:
 - Core HTTP tests check that no redirect is followed and that the TLS pin
   is checked before the login body is sent.
 - The size budget is measured with the SDK formula on non-ASCII-heavy names.
-- CSRF handling, and that logout is called on every failure path.
+- Core HTTP tests check CSRF handling; module tests check logout after
+  sysinfo HTTP errors, non-JSON device responses, sta API errors, and a
+  sysinfo request timeout after login.
 - Module tests cover bad credentials, non-JSON responses, and request
   timeouts; core HTTP tests cover connection refusal and TLS mismatch.
 - The allow-list: calls to `rest/wlanconf`, `stat/device-basic`, `stat/sta?x=1`, and `%2e%2e` paths all raise `NotAllowed`, and site validation rejects `../`.

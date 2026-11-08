@@ -20,6 +20,7 @@ automatic detection is **Planned** and currently fails with `config_invalid`.
 
 Omit `section` to get the whole saved snapshot. A positive `offset` requires
 a section. There is no `limit` parameter; pages fit the output size budget.
+A damaged saved snapshot gives `upstream_unexpected`: "That saved snapshot is damaged."
 When `truncated` is true, call `more.command` with `more.params` exactly;
 repeat for each returned continuation until all pages have been read.
 `list` is not available yet. Snapshot and get envelopes use schemas
@@ -86,7 +87,8 @@ Unknown readings are `null`, not zero. Compact output omits client
 - Envelope `collected_at` records collection time and `label` is the
   owner's note. `source.kind` is `unifi`; `source.flavor`,
   `controller_version`, and `site` give controller context. Check `warnings`
-  for skipped invalid records or duplicate client MACs (the first is kept).
+  for records that could not be read or had no valid MAC address and were
+  left out, or duplicate AP or client MACs (the first record is kept).
 
 Use these reference ranges as labels, not verdicts or diagnoses:
 
