@@ -1,9 +1,9 @@
 # Architecture
 
 Status: the core API, registry, config, Context, HTTP client, secrets,
-store, runner, envelopes, drop-ins, and CLI are implemented. No installed
-data module is implemented yet. The conformance suite is implemented in
-`tests/conformance/`. The `housesitter conformance` CLI command is
+store, runner, envelopes, drop-ins, CLI, and read-only dashboard server are
+implemented. No installed data module is implemented yet. The conformance
+suite is implemented in `tests/conformance/`. The `housesitter conformance` CLI command is
 **Planned**. Module examples below illustrate the contract; they are not
 installed commands.
 
@@ -69,9 +69,11 @@ These come from the SDK's `commands.py`, `executor.py`, and README, as of
 
 | Component | Responsibility |
 |-----------|----------------|
-| `core/cli.py` | Implements `--version`, `invoke`, `list`, `describe`, `doctor`, `dropins`, `install-commands`, and `config-check` (§3.1). Keeps secrets out of the CLI's own output; conformance checks output captured during command execution (§4), but core protection is **Planned (#29)**. `conformance` is **Planned**. |
+| `core/cli.py` | Implements `--version`, `invoke`, `list`, `describe`, `doctor`, `dropins`, `install-commands`, `config-check`, and `serve` (§3.1). Keeps secrets out of the CLI's own output; conformance checks output captured during command execution (§4), but core protection is **Planned (#29)**. `conformance` is **Planned**. |
 | `core/registry.py` | Discovers built-in subpackages of `housesitter.modules`, each defining exactly one `Module` subclass with an id matching the package name. Third-party entry points in the `housesitter.modules` group must load a `Module` subclass whose id equals the entry-point name. Validates declarations (MODULES §3), records third-party status, sorts modules by id, and builds a read-only command table. The id `housesitter` is reserved for core commands. Duplicate ids or command names, invalid declarations, or any import/load failure stop the registry. |
-| `core/config.py` | Loads `~/.config/housesitter/config.json` (or `$HOUSESITTER_CONFIG`), capped at 1 MiB. A missing file means defaults (`identifiers="full"`, retention 500) with no modules enabled. Rejects unknown top-level/core keys, unknown modules, and unknown keys in enabled module sections; validates values and applies defaults using each module's `Setting` declarations. A present module section defaults to enabled; disabled sections check only `enabled` and `retention`, ignoring other keys and values. Returns read-only config; the secrets directory is `<config dir>/secrets`. Errors name the key or file and problem, never the offending value. |
+| `core/config.py` | Loads `~/.config/housesitter/config.json` (or `$HOUSESITTER_CONFIG`), capped at 1 MiB. A missing file means defaults (`identifiers="full"`, retention 500) with no modules enabled. Validates the optional `housesitter.dashboard` settings (DASHBOARD §5). Rejects unknown top-level/core keys, unknown modules, and unknown keys in enabled module sections; validates values and applies defaults using each module's `Setting` declarations. A present module section defaults to enabled; disabled sections check only `enabled` and `retention`, ignoring other keys and values. Returns read-only config; the secrets directory is `<config dir>/secrets`. Errors name the key or file and problem, never the offending value. |
+| `core/serve.py` | Serves packaged web files and the saved-data dashboard API, GET/HEAD only, with a Host check and security headers (DASHBOARD §5). Never collects or writes. |
+| `core/dashboard.py` | Builds the dashboard view from saved snapshots through module `get` validation and the runner output policy; caches results in memory, with upstream access refused (DASHBOARD §4). |
 | `core/context.py` | Implements `sdk.Context`: deeply read-only supplied config, secret reading, logging that redacts secrets read through the Context, UTC clock, remaining monotonic deadline, and allow-listed HTTP sessions. Passes the deadline on every request, maps 401/403 to `upstream_auth`, and records insecure-TLS warnings. The runner injects the module's real store; without one, using store methods raises `NotImplementedError`. |
 | `core/secrets.py` | Reads a named secret from the file the config points to. Refuses a file with any group or world permission bits, or not owned by the current user. Symlinks are refused (`O_NOFOLLOW`, plus `O_NONBLOCK` so a FIFO cannot hang the open); every check — regular file, mode bits, owner — runs on the open file descriptor, so there is no stat→open window. Files over 64 KiB are refused. Exactly one trailing `\n` or `\r\n` is stripped. Returns the value without logging it. |
 | `core/http.py` | The only network client, built on stdlib `http.client` and `ssl`. Each module gets one through `ctx.http(...)`, bound to one scheme, host, and port, and to the module's allow-list of `(method, path-regex)` pairs. Before any socket is opened, the path is normalised and **`fullmatch`ed**. Percent-escapes (`%`) and `..` segments are **always refused**, no matter what an entry's pattern would match; only a query string (`?...`) can be opted into, per entry, via `allow_query` (D15). Any other call raises `NotAllowed`, and its message never echoes the raw target. **Redirects are never followed**: a 3xx is **raised** as an `upstream_unexpected` error, with the numeric status kept on the error's `status` attribute so callers such as flavour detection can tell a redirect apart without reading headers (D15). Statuses that ask the caller to go elsewhere (301, 302, 303, 305, 307, 308) report `unexpected redirect (status N)`; other 3xx codes (300, 304) report `unexpected status (status N)`. TLS supports system verification, a CA file (with an optional `server_hostname` for IP hosts), or a pinned SHA-256 leaf fingerprint. The pin is checked right after the handshake, **before any request bytes are sent**. TLS options with the `http` scheme are rejected at construction. `insecure` must be explicit. Caller-supplied `Host` and `Content-Length` headers are refused. Cookies and CSRF tokens are kept in memory only. Bodies are capped at 8 MiB. `Content-Length` must be decimal and non-negative, with every repeated value agreeing; a body shorter than the framing promises is `upstream_unexpected`, never a short success. The deadline is a **total bound**: `ctx.deadline` arrives as `deadline_s`, and connect, handshake, send, headers, and body share it. Two lines of defence enforce it: every stage waits at most the smaller of its configured timeout and the time left, and a watchdog timer shuts the live socket down when the deadline passes, waking whatever `http.client` call is blocked inside a drip — per-call socket timeouts alone cannot bound one, because a single `read` loops `recv` internally. The watchdog holds a `dup` of the request's own socket, fires once, and is cancelled and joined before the request returns, so it can neither touch an unrelated socket nor leave a thread behind; a failure after it fired maps to `timeout`. |
@@ -88,6 +90,7 @@ These come from the SDK's `commands.py`, `executor.py`, and README, as of
 | `list [--json]` | Sorted commands, including disabled modules and core commands. Text is tab-separated name, status (`enabled`, `disabled`, or `core`), and first sentence of the description. `--json` returns an array of `{name, status, description}`. |
 | `describe` | Same as `invoke housesitter.describe` (§3.2). |
 | `doctor [--check]` | Same as `invoke housesitter.doctor`, with `{"check": true}` when requested (§3.2). |
+| `serve` | Runs the read-only dashboard in the foreground, with no flags or Muse drop-in. Ctrl-C exits 0; startup errors exit 2 (DASHBOARD §5). |
 | `config-check` | Loads and validates config. Prints `config ok: <path>`, then `<module id>: enabled` or `disabled` per module. Invalid config exits 1 with a `config_invalid` stderr line. |
 | `dropins --out DIR [--exec PATH]` | Writes each mode-644 JSON file through an unpredictable temporary file created with `O_EXCL`, then renames it over the destination; a destination symlink is replaced, not followed. Prints sorted filenames. Creates a missing output directory with mode 755. |
 | `dropins --print [--exec PATH]` | Prints one JSON object mapping filenames to content objects; writes no files. |
@@ -397,7 +400,11 @@ JSON is easy for Muse to read and edit (D3). Example:
 
 ```json
 {
-  "housesitter": { "identifiers": "full", "retention": 500 },
+  "housesitter": {
+    "identifiers": "full",
+    "retention": 500,
+    "dashboard": { "bind": "127.0.0.1", "port": 8080, "allowed_hosts": [], "house_label": null }
+  },
   "modules": {
     "unifi_wifi": {
       "enabled": true,
@@ -460,7 +467,7 @@ means that what goes into an envelope leaves the house.
 | Self-signed controller certificate. | Pin the SHA-256 fingerprint (preferred) or a CA file. `insecure: true` works, but adds a warning to every envelope. |
 | Tampered drop-in files. | The SDK refuses non-root-owned or writable files. `install-commands` writes root-owned 644 files and `doctor` checks them. |
 | Anyone who can reach the dashboard port sees device names, MACs, and IPs (D14). | Accepted for a personal tool, and stated in README. It binds to `127.0.0.1` by default, and the owner chooses a LAN address on purpose. |
-| A malicious website reads the dashboard through the owner's browser by DNS rebinding. | The dashboard server checks the `Host` header against an allow-list (DASHBOARD.md §5). |
+| A malicious website reads the dashboard through the owner's browser by DNS rebinding. | The dashboard server checks the `Host` header against the bind address, loopback names and addresses, and configured `allowed_hosts`; other hosts get 421 (DASHBOARD.md §5). |
 | Hostile device names reach the dashboard as HTML. | The page inserts text only, and a CSP with Trusted Types blocks inline script and string-to-HTML assignment. A hostile fixture tests every text field. |
 | Saved data on a lost SD card. | Out of scope for v1 (no encryption at rest). The data dir is 700, and retention bounds the volume. |
 
