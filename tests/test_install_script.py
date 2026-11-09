@@ -155,6 +155,83 @@ def test_install_dry_run_changes_nothing(lab):
     assert not (home / ".config").exists()
 
 
+def test_install_dry_run_shows_commands_dir_creation(lab):
+    root = lab["root"]
+    commands_d = root / "etc" / "musegadget" / "commands.d"
+    expected = (
+        f"would create: {commands_d} "
+        "(owner root, mode 755; install-commands creates it)"
+    )
+    missing = run_script("install", "--run-as", USER, "--dry-run")
+    assert missing.returncode == 0, missing.stderr
+    assert expected in missing.stdout
+    assert missing.stdout.index("would create: ") < missing.stdout.index(
+        "install-commands --exec"
+    )
+    commands_d.mkdir(parents=True)
+    present = run_script("install", "--run-as", USER, "--dry-run")
+    assert present.returncode == 0, present.stderr
+    assert "would create: " not in present.stdout
+    assert "install-commands --exec" in present.stdout
+
+
+@pytest.mark.parametrize("kind", ["symlink", "broken-symlink", "file"])
+@pytest.mark.parametrize("command", ["install", "upgrade"])
+def test_bad_commands_dir_refused_before_anything_installs(lab, kind, command):
+    root = lab["root"]
+    parent = root / "etc" / "musegadget"
+    parent.mkdir(parents=True)
+    path = parent / "commands.d"
+    if kind == "symlink":
+        real = root / "elsewhere.d"
+        real.mkdir()
+        path.symlink_to(real)
+    elif kind == "broken-symlink":
+        path.symlink_to(root / "nowhere.d")
+    else:
+        path.write_text("", encoding="utf-8")
+    if command == "upgrade":
+        (root / "opt" / "housesitter").mkdir(parents=True)
+        proc = run_script("upgrade", "--dry-run")
+    else:
+        proc = run_script("install", "--run-as", USER, "--dry-run")
+    assert proc.returncode != 0
+    assert f"{path} is not a real directory" in proc.stderr
+    assert "would run:" not in proc.stdout
+
+
+def _fake_sdk(root, source):
+    pkg = (root / "opt" / "musegadget" / "venv" / "lib" / "python3.11"
+           / "site-packages" / "musegadget")
+    pkg.mkdir(parents=True)
+    (pkg / "service.py").write_text(source, encoding="utf-8")
+
+
+def test_install_warns_when_sdk_missing(lab):
+    proc = run_script("install", "--run-as", USER, "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    assert "Muse SDK not found in" in proc.stderr
+
+
+def test_install_warns_when_sdk_predates_dropins(lab):
+    _fake_sdk(lab["root"], "BUILTINS = ('system.run', 'file.write')\n")
+    proc = run_script("install", "--run-as", USER, "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    assert "predates drop-in commands" in proc.stderr
+    assert "Muse SDK not found" not in proc.stderr
+
+
+def test_install_quiet_when_sdk_supports_dropins(lab):
+    _fake_sdk(
+        lab["root"],
+        'DEFAULT_COMMANDS_DIR = Path("/etc/musegadget/commands.d")\n',
+    )
+    proc = run_script("install", "--run-as", USER, "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    assert "Muse SDK not found" not in proc.stderr
+    assert "predates drop-in commands" not in proc.stderr
+
+
 def test_install_dry_run_restarts_musegadget_with_flag(lab):
     proc = run_script(
         "install", "--run-as", USER, "--dry-run", "--restart-musegadget"

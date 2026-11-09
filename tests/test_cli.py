@@ -377,13 +377,174 @@ class TestInstallCommands:
             assert argv[8].endswith(".json")
         assert calls[0][9] == str(dest / "housesitter.demo_sensor.probe.json")
 
+    def test_missing_dest_is_created_first(self, tmp_path):
+        dest = tmp_path / "commands.d"  # does not exist
+        calls = []
+
+        def fake_runner(argv, check=False):
+            calls.append(argv)
+
+        code, out, err = run_cli(
+            ["install-commands", "--exec", self.EXEC,
+             "--commands-dir", str(dest)],
+            tmp_path,
+            install_runner=fake_runner,
+        )
+        assert code == 0
+        assert err == ""
+        assert calls[0] == [
+            "sudo", "install", "-d", "-o", "root", "-g", "root",
+            "-m", "755", str(dest),
+        ]
+        assert len(calls) == 4  # the mkdir plus one install per file
+        for argv in calls[1:]:
+            assert argv[:8] == [
+                "sudo", "install", "-o", "root", "-g", "root", "-m", "644",
+            ]
+
+    def test_existing_dir_needs_no_mkdir(self, tmp_path):
+        dest = tmp_path / "commands.d"
+        dest.mkdir()
+        calls = []
+
+        def fake_runner(argv, check=False):
+            calls.append(argv)
+
+        code, out, err = run_cli(
+            ["install-commands", "--exec", self.EXEC,
+             "--commands-dir", str(dest)],
+            tmp_path,
+            install_runner=fake_runner,
+        )
+        assert code == 0
+        assert len(calls) == 3
+        assert all("-d" not in argv for argv in calls)
+
+    def test_dry_run_missing_dest(self, tmp_path):
+        dest = tmp_path / "commands.d"  # does not exist
+        calls = []
+
+        def fake_runner(argv, check=False):
+            calls.append(argv)
+
+        code, out, err = run_cli(
+            ["install-commands", "--dry-run", "--exec", self.EXEC,
+             "--commands-dir", str(dest)],
+            tmp_path,
+            install_runner=fake_runner,
+        )
+        assert code == 0
+        assert err == ""
+        assert calls == []
+        lines = out.splitlines()
+        assert lines[0] == f"would create {dest} (owner root, mode 755)"
+        assert lines[1].startswith("would install ")
+
+    def test_mkdir_failure_installs_nothing(self, tmp_path):
+        dest = tmp_path / "commands.d"  # does not exist
+        calls = []
+
+        def boom(argv, check=False):
+            calls.append(argv)
+            raise subprocess_mod.CalledProcessError(1, argv)
+
+        code, out, err = run_cli(
+            ["install-commands", "--exec", self.EXEC,
+             "--commands-dir", str(dest)],
+            tmp_path,
+            install_runner=boom,
+        )
+        assert code == 1
+        assert "config_invalid" in err
+        assert f"could not create {dest}" in err
+        assert len(calls) == 1  # only the mkdir ran; no file installs
+
+    def test_dest_file_is_rejected(self, tmp_path):
+        dest = tmp_path / "commands.d"
+        dest.write_text("not a directory\n")
+        calls = []
+
+        def fake_runner(argv, check=False):
+            calls.append(argv)
+
+        code, out, err = run_cli(
+            ["install-commands", "--exec", self.EXEC,
+             "--commands-dir", str(dest)],
+            tmp_path,
+            install_runner=fake_runner,
+        )
+        assert code == 1
+        assert f"{dest} is not a directory" in err
+        assert calls == []
+
+    def test_dest_symlink_is_rejected(self, tmp_path):
+        real = tmp_path / "real.d"
+        real.mkdir()
+        dest = tmp_path / "commands.d"
+        os.symlink(real, dest)
+        calls = []
+
+        def fake_runner(argv, check=False):
+            calls.append(argv)
+
+        code, out, err = run_cli(
+            ["install-commands", "--exec", self.EXEC,
+             "--commands-dir", str(dest)],
+            tmp_path,
+            install_runner=fake_runner,
+        )
+        assert code == 1
+        assert f"{dest} is not a directory" in err
+        assert calls == []
+
+    def test_dest_symlink_with_trailing_slash_is_rejected(self, tmp_path):
+        real = tmp_path / "real.d"
+        real.mkdir()
+        dest = tmp_path / "commands.d"
+        os.symlink(real, dest)
+        calls = []
+
+        def fake_runner(argv, check=False):
+            calls.append(argv)
+
+        code, out, err = run_cli(
+            ["install-commands", "--exec", self.EXEC,
+             "--commands-dir", str(dest) + "/"],
+            tmp_path,
+            install_runner=fake_runner,
+        )
+        assert code == 1
+        assert f"{dest} is not a directory" in err
+        assert calls == []
+
+    def test_dest_broken_symlink_is_rejected(self, tmp_path):
+        dest = tmp_path / "commands.d"
+        os.symlink(tmp_path / "nowhere.d", dest)
+        calls = []
+
+        def fake_runner(argv, check=False):
+            calls.append(argv)
+
+        code, out, err = run_cli(
+            ["install-commands", "--exec", self.EXEC,
+             "--commands-dir", str(dest)],
+            tmp_path,
+            install_runner=fake_runner,
+        )
+        assert code == 1
+        assert f"{dest} is not a directory" in err
+        assert calls == []
+
     def test_runner_failure(self, tmp_path):
+        dest = tmp_path / "commands.d"
+        dest.mkdir()
+
         def boom(argv, check=False):
             raise subprocess_mod.CalledProcessError(1, argv)
 
         code, out, err = run_cli(
             ["install-commands", "--exec", self.EXEC,
-             "--commands-dir", str(tmp_path / "commands.d")],
+             "--commands-dir", str(dest)],
             tmp_path,
             install_runner=boom,
         )

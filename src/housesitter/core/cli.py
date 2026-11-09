@@ -219,6 +219,31 @@ def cmd_install_commands(
         or (str(commands_dir) if commands_dir is not None else None)
         or DEFAULT_COMMANDS_DIR
     )
+    # normpath drops a trailing slash, which would make islink() miss a
+    # symlinked directory.
+    dest = os.path.normpath(dest)
+    run = runner if runner is not None else subprocess.run
+    # The SDK never creates this directory, so a fresh Pi has no dest
+    # yet. Create it root-owned and mode 755 like the SDK requires, and
+    # never follow or replace a symlink or file planted at its path.
+    if os.path.lexists(dest):
+        if os.path.islink(dest) or not os.path.isdir(dest):
+            return 1, _error_line(
+                "config_invalid", f"{dest} is not a directory"
+            )
+    elif args.dry_run:
+        out.write(f"would create {dest} (owner root, mode 755)\n")  # type: ignore[attr-defined]
+    else:
+        try:
+            run(
+                ["sudo", "install", "-d", "-o", "root", "-g", "root",
+                 "-m", "755", dest],
+                check=True,  # type: ignore[operator]
+            )
+        except Exception:
+            return 1, _error_line(
+                "config_invalid", f"could not create {dest}"
+            )
     tmpdir = tempfile.mkdtemp(prefix="housesitter-dropins-")
     try:
         names = _dropins.write_files(files, tmpdir)
@@ -232,7 +257,6 @@ def cmd_install_commands(
             if name.startswith("housesitter.") and name.endswith(".json")
             and name not in files
         )
-        run = runner if runner is not None else subprocess.run
         if not args.dry_run:
             for name in names:
                 argv = [
