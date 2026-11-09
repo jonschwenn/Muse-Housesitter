@@ -308,8 +308,10 @@ def typical_clients(aps, after: bool):
                -66, 52.0, 26.0, 89, 11.0),
         client(9, "Garage Door", "Example Openers", "iot-example", garage, "2.4GHz", "g",
                -71, 24.0, 12.0, 74, 18.9),
+        # Retries computed the way the module does (retries / (packets + retries)
+        # x 100), so the page sees a real long fraction: 14.285714285714285.
         client(10, "Doorbell", "Example Security", "iot-example", living, "2.4GHz", "n",
-               -68, 57.8, 28.9, 81, 14.3),
+               -68, 57.8, 28.9, 81, 100 / (600 + 100) * 100),
         client(11, "Office Printer", "Example Printing", "main-example", office, "5GHz", "ac",
                -55, 351.0, 292.5, 96, 3.1),
         client(12, None, None, "guest-example", living, "5GHz", "ax", -64, 576.5, 432.4, 92,
@@ -493,10 +495,17 @@ def edge_snapshot(sid, collected_at, previous: bool):
     for r in garage["radios"]:
         r.update({key: None for key in STAT_KEYS})
     aps[1]["satisfaction_pct"] = None
+    # Values just either side of a reference-range boundary, so the page's
+    # display rounding can't contradict the label (issue #41).
+    living_24, living_5 = aps[0]["radios"][0], aps[0]["radios"][1]
+    living_24.update({"channel_utilization_pct": 39.96, "tx_retry_pct_cumulative": 9.96})
+    living_5.update({"channel_utilization_pct": 70.04, "tx_retry_pct_cumulative": 20.04})
     clients = typical_clients(aps, not previous)
     for c in clients:
         if c["ap_id"] == garage["id"]:
             c["ap_name"] = None
+        if c["name"] == "Thermostat":
+            c["signal_dbm"] = -60.4
     odd = client(20, "Mystery Device", None, None, aps[0], "unknown", None, None, None, None,
                  None, None, private=True, connected=None)
     odd.update({"ip": None, "noise_dbm": None, "tx_retry_pct_recent": None, "idle_s": None,
