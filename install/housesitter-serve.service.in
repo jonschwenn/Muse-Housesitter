@@ -1,0 +1,83 @@
+# housesitter-serve.service — read-only Housesitter dashboard server.
+#
+# Installed by install/install.sh (rendered from this template: @RUN_AS@
+# and @RUN_AS_HOME@ are replaced with the validated account and home).
+# The service runs as the SDK run-as account, which owns the data
+# directory (mode 700). It is enabled and started by hand, after the
+# owner has configured Housesitter:
+#
+#   sudo systemctl enable --now housesitter-serve
+#
+# Every directive below exists in systemd 247 (Raspberry Pi OS Bullseye).
+# Ports below 1024 will not work here, and that is intended: binding low
+# ports needs extra privilege, which a read-only dashboard must not have.
+
+[Unit]
+Description=Housesitter read-only dashboard server
+Documentation=https://github.com/jonschwenn/Muse-Housesitter
+After=network.target
+
+[Service]
+Type=simple
+User=@RUN_AS@
+ExecStart=/opt/housesitter/bin/housesitter serve
+Restart=on-failure
+# Crash-only restarts: a failing server waits before it is tried again.
+RestartSec=5
+# Private file mask: anything the server creates (it should create
+# nothing) is owner-only.
+UMask=0077
+
+# Identity and privilege: no new privileges, ever. This also stops sudo
+# inside the service, so the server cannot escalate even if invoked oddly.
+NoNewPrivileges=yes
+# No special capabilities: the empty lists reset the defaults.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Filesystem: the whole OS tree is read-only except the API and /dev
+# shims below; the home tree is read-only so saved snapshots stay
+# readable but nothing there can change. The UniFi secret directory is
+# hidden entirely: the server never needs secrets (DASHBOARD §5).
+ProtectSystem=strict
+ProtectHome=read-only
+InaccessiblePaths=-@RUN_AS_HOME@/.config/housesitter/secrets
+# Private /tmp and /dev, and no access to kernel tunables, modules,
+# logs, or the control-group filesystem.
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+# Host identity and time: the server must not change them.
+ProtectClock=yes
+ProtectHostname=yes
+# Hide other processes and limit /proc to PIDs only.
+ProtectProc=invisible
+ProcSubset=pid
+
+# Kernel attack surface: no namespaces, realtime scheduling, SUID/SGID
+# creation, or personality changes; no writable-executable memory.
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Drop any System V IPC objects or POSIX message queues left behind on stop.
+RemoveIPC=yes
+MemoryDenyWriteExecute=yes
+
+# Syscalls: the stock service set minus privileged and resource-control
+# calls. Native architecture only, so 32-bit compat syscalls are refused.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Network: loopback and LAN TCP only. AF_UNIX is refused: the server
+# binds a TCP socket and talks to nothing else, so it needs no local
+# datagram or stream sockets of its own.
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

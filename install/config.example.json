@@ -1,0 +1,26 @@
+{
+  "housesitter": {
+    "identifiers": "full",
+    "retention": 500,
+    "dashboard": {
+      "bind": "127.0.0.1",
+      "port": 8080
+    }
+  },
+  "modules": {
+    "unifi_wifi": {
+      "enabled": true,
+      "base_url": "https://192.0.2.1",
+      "site": "default",
+      "flavor": "unifi_os",
+      "auth": {
+        "username": "housesitter-readonly",
+        "password_secret": "unifi_password"
+      },
+      "tls": {
+        "fingerprint_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "request_timeout_s": 15
+    }
+  }
+}

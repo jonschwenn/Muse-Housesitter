@@ -2,10 +2,10 @@
 
 Status: the core API, registry, config, Context, HTTP client, secrets,
 store, runner, envelopes, drop-ins, CLI, and read-only dashboard server are
-implemented. No installed data module is implemented yet. The conformance
+implemented, along with the built-in `unifi_wifi` data module. The conformance
 suite is implemented in `tests/conformance/`. The `housesitter conformance` CLI command is
-**Planned**. Module examples below illustrate the contract; they are not
-installed commands.
+**Planned**. The UniFi module exposes the snapshot and saved-result commands described
+in its module spec.
 
 ## 1. The kernel of purpose
 
@@ -393,7 +393,7 @@ Everything lives under the SDK's run-as account:
 | `~/.config/housesitter/secrets/` | 700 (checked by doctor) | Must be a non-symlink directory owned by the current account. The secret reader checks files, not the directory. |
 | `~/.local/share/housesitter/<module_id>/` | 700 | Saved results, 600 each. |
 | `/etc/musegadget/commands.d/housesitter.*.json` | root-owned, 644 | Generated drop-ins. |
-| `/opt/housesitter/` | root-owned | Install venv (**[OPEN, D4]**). |
+| `/opt/housesitter/` | root-owned | Install venv (D4). |
 
 The config is **JSON**, because Python 3.9 has no stdlib TOML reader and
 JSON is easy for Muse to read and edit (D3). Example:
@@ -409,11 +409,12 @@ JSON is easy for Muse to read and edit (D3). Example:
     "unifi_wifi": {
       "enabled": true,
       "retention": 1000,
-      "host": "192.0.2.1",
+      "base_url": "https://192.0.2.1",
       "site": "default",
-      "flavor": "auto",
+      "flavor": "unifi_os",
       "auth": { "username": "housesitter-readonly", "password_secret": "unifi_password" },
-      "tls": { "fingerprint_sha256": "AB:CD:…" }
+      "tls": { "fingerprint_sha256": "AB:CD:..." },
+      "request_timeout_s": 15
     }
   }
 }

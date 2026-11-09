@@ -278,8 +278,10 @@ If config or the store becomes unusable, the API returns 503 with
 
 `housesitter serve` has no flags. It runs in the foreground; Ctrl-C stops
 it with exit 0. It is a CLI subcommand only: no Muse command or drop-in is
-generated. Starting at boot with a systemd unit is **Planned**, covered by
-a separate install-and-setup issue.
+generated. The installer can install an optional hardened systemd unit with
+`--with-dashboard`. It runs as the SDK run-as account, read-only, without
+access to the secrets directory. It is not started during installation. See
+[README Setup](../README.md#setup) for installation and enabling it at boot.
 
 All settings in `housesitter.dashboard` are optional and validated by
 `housesitter config-check`:
