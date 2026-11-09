@@ -468,3 +468,24 @@ handoff's "license not chosen; don't publish."
   on a page anyone on the network can open, against the owner's choice);
   making the keys optional with a new contract version (more front-end work
   for a rarely used mode).
+
+### D25. Checkout installer and optional dashboard service (2026-11-08, proposed, pending Jon)
+- **Decision (proposed, pending Jon):** install from a git release tag using
+  the script in that checkout. Run it as the owner's sudo-capable account,
+  never root; use sudo for specific system steps. Provide `install`,
+  `upgrade`, and `uninstall`, each with `--dry-run`. Offer a hardened
+  systemd unit for `serve` through `--with-dashboard`, running as the SDK's
+  run-as account with read-only access and no access to the secrets directory.
+  Do everything inside that account's home as that account, never as root,
+  before installing anything system-wide. Build and install from a root-owned
+  copy of the checkout. Write the rendered unit straight to `sudo install`
+  from stdin, without a temporary file. Never call sudo in `--dry-run`.
+- **Why:** one reviewed checkout supplies both code and installation steps;
+  the owner can preview changes. The existing run-as account can read its
+  private saved data without widening directory permissions.
+- **Rejected:** `curl | bash` (no local review step); a root-run script
+  (unnecessarily broad privileges); pip from PyPI for now (release tags
+  keep code and installer together); a separate dashboard user (it cannot
+  read the mode 700 data directory); running home-directory steps as root
+  (a symlink planted by the run-as account could redirect a root write).
+  D11 remains open and unchanged.
