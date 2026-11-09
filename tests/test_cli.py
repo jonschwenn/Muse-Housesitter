@@ -360,7 +360,7 @@ class TestInstallCommands:
         dest.mkdir()
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -378,7 +378,7 @@ class TestInstallCommands:
         assert calls[0][9] == str(dest / "housesitter.demo_sensor.probe.json")
 
     def test_runner_failure(self, tmp_path):
-        def boom(argv, check=False):
+        def boom(argv, check=False, **kwargs):
             raise subprocess_mod.CalledProcessError(1, argv)
 
         code, out, err = run_cli(
@@ -403,7 +403,7 @@ class TestInstallCommands:
         dest.mkdir()
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -423,7 +423,7 @@ class TestInstallCommands:
         explicit.mkdir()
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(

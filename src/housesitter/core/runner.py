@@ -40,6 +40,13 @@ MAX_PARAMS_BYTES = 1024 * 1024
 # Warnings are capped at 20 entries; the overflow line names the rest.
 MAX_WARNINGS = 20
 
+# First warning when the stdio guard discarded handler output: count only,
+# never module or upstream text.
+_STRAY_WARNING = (
+    "The module wrote {} bytes to stdout or stderr outside its result; "
+    "Housesitter discarded them."
+)
+
 _TIMEOUT_REASON = "the command did not finish within its time limit"
 _FAILED_REASON = "the module failed unexpectedly"
 _TOO_BIG_REASON = "the result is too large for the output limit"
@@ -71,6 +78,10 @@ class Outcome:
     error_reason: str | None = None
     worker_alive: bool = False
     log_lines: list = field(default_factory=list)
+    # Bytes the stdio guard had discarded when the handler returned, or
+    # None on paths that never sampled it (failure/timeout). The CLI
+    # reuses this for its stderr log line so both counts agree.
+    stray_bytes: int | None = None
 
 
 def _fail(
@@ -713,6 +724,7 @@ def prepare_output(
     *,
     identifiers: str = "full",
     extra_warnings: Any = (),
+    leading_warnings: Any = (),
     default_now: datetime,
 ) -> PreparedOutput:
     """Apply steps 5 and 6 to one handler result (ARCHITECTURE §3.4).
@@ -733,7 +745,9 @@ def prepare_output(
         label = envelope.sanitize_label(label) or None
     collected_at = result.collected_at or default_now
     collected_str = _format_collected(collected_at)
-    warnings = _final_warnings(list(result.warnings) + list(extra_warnings))
+    warnings = _final_warnings(
+        list(leading_warnings) + list(result.warnings) + list(extra_warnings)
+    )
 
     data_fields = [item for item in command.fields if item.path.startswith("data.")]
     source_fields = [
@@ -791,10 +805,22 @@ def run_command(
     monotonic: Callable[[], float] | None = None,
     log_stream: Any = None,
     client_factory: Callable[..., Any] | None = None,
+    stray_output: Callable[[], int] | None = None,
 ) -> Outcome:
-    """Run one command and return its outcome (envelope plus exit code)."""
+    """Run one command and return its outcome (envelope plus exit code).
+
+    ``log_stream`` defaults to ``sys.stderr``. This module never imports
+    the stdio guard, so the default cannot reach the guard's reserved
+    real stream: callers running under a guard must pass that stream
+    explicitly as ``log_stream`` (the CLI always does for module
+    commands). Relying on the default under a guard would send logs
+    into the discarding sink.
+    """
     clock = monotonic or time.monotonic
     env_map = os.environ if env is None else env
+    # No guard import here by design (test_stdio pins that run_command
+    # installs no guard): under a guard, the caller passes the reserved
+    # real stderr explicitly; the default below is only for unguarded use.
     stream = log_stream if log_stream is not None else sys.stderr
     t_start = clock()
 
@@ -936,6 +962,23 @@ def run_command(
             pass
         logger.removeHandler(handler_obj)
 
+    # Stray output discarded by the stdio guard, counted right after the
+    # worker returned: first, so the warning cap can never drop it, and
+    # before size fitting, so it counts in the budget. Writes after the
+    # count is sampled are discarded without a warning (writes between
+    # handler return and the sample are counted).
+    stray_bytes = 0
+    if stray_output is not None:
+        try:
+            stray_bytes = int(stray_output())
+        except Exception:
+            stray_bytes = 0
+        if stray_bytes < 0:
+            stray_bytes = 0
+    stray_first = (
+        [_STRAY_WARNING.format(stray_bytes)] if stray_bytes else []
+    )
+
     if is_core:
         schema_name = f"housesitter.{command.name}/{command.schema_version}"
     else:
@@ -948,6 +991,7 @@ def run_command(
             command,
             identifiers=config.identifiers,
             extra_warnings=ctx.warnings,
+            leading_warnings=stray_first,
             default_now=collected_default,
         )
     except _FieldMismatch as exc:
@@ -1099,7 +1143,10 @@ def run_command(
         )
     if not fits:  # pragma: no cover - fit_once already verified the size
         return _fail(module_id, "upstream_unexpected", _TOO_BIG_REASON)
-    return Outcome(exit_code=0, envelope=final, log_lines=lines)
+    return Outcome(
+        exit_code=0, envelope=final, log_lines=lines,
+        stray_bytes=stray_bytes,
+    )
 
 
 def format_error_line(outcome: Outcome) -> str:
