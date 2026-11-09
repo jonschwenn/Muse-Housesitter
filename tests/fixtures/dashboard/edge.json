@@ -204,12 +204,12 @@
               "width_mhz": 20,
               "tx_power_dbm": 17,
               "tx_power_mode": "auto",
-              "channel_utilization_pct": 41,
+              "channel_utilization_pct": 39.96,
               "self_rx_pct": 8,
               "self_tx_pct": 6,
               "client_count": 1,
               "satisfaction_pct": 88,
-              "tx_retry_pct_cumulative": 9.8
+              "tx_retry_pct_cumulative": 9.96
             },
             {
               "band": "5GHz",
@@ -218,12 +218,12 @@
               "width_mhz": 80,
               "tx_power_dbm": 23,
               "tx_power_mode": "auto",
-              "channel_utilization_pct": 18,
+              "channel_utilization_pct": 70.04,
               "self_rx_pct": 6,
               "self_tx_pct": 9,
               "client_count": 4,
               "satisfaction_pct": 96,
-              "tx_retry_pct_cumulative": 4.1
+              "tx_retry_pct_cumulative": 20.04
             },
             {
               "band": "6GHz",
@@ -399,7 +399,7 @@
           "tx_rate_mbps": 57.8,
           "rx_rate_mbps": 28.9,
           "satisfaction_pct": 81,
-          "tx_retry_pct_cumulative": 14.3,
+          "tx_retry_pct_cumulative": 14.285714285714285,
           "tx_retry_pct_recent": 11.4,
           "connected_s": 86400,
           "idle_s": 4,
@@ -610,7 +610,7 @@
           "channel": 1,
           "wifi_standard": "n",
           "wifi_standard_raw": "ng",
-          "signal_dbm": -66,
+          "signal_dbm": -60.4,
           "noise_dbm": -95,
           "tx_rate_mbps": 52.0,
           "rx_rate_mbps": 26.0,
@@ -756,12 +756,12 @@
               "width_mhz": 20,
               "tx_power_dbm": 17,
               "tx_power_mode": "auto",
-              "channel_utilization_pct": 41,
+              "channel_utilization_pct": 39.96,
               "self_rx_pct": 8,
               "self_tx_pct": 6,
               "client_count": 3,
               "satisfaction_pct": 88,
-              "tx_retry_pct_cumulative": 9.8
+              "tx_retry_pct_cumulative": 9.96
             },
             {
               "band": "5GHz",
@@ -770,12 +770,12 @@
               "width_mhz": 80,
               "tx_power_dbm": 23,
               "tx_power_mode": "auto",
-              "channel_utilization_pct": 18,
+              "channel_utilization_pct": 70.04,
               "self_rx_pct": 6,
               "self_tx_pct": 9,
               "client_count": 2,
               "satisfaction_pct": 96,
-              "tx_retry_pct_cumulative": 4.1
+              "tx_retry_pct_cumulative": 20.04
             },
             {
               "band": "6GHz",
@@ -951,7 +951,7 @@
           "tx_rate_mbps": 57.8,
           "rx_rate_mbps": 28.9,
           "satisfaction_pct": 81,
-          "tx_retry_pct_cumulative": 14.3,
+          "tx_retry_pct_cumulative": 14.285714285714285,
           "tx_retry_pct_recent": 11.4,
           "connected_s": 86400,
           "idle_s": 4,
@@ -1162,7 +1162,7 @@
           "channel": 1,
           "wifi_standard": "n",
           "wifi_standard_raw": "ng",
-          "signal_dbm": -66,
+          "signal_dbm": -60.4,
           "noise_dbm": -95,
           "tx_rate_mbps": 52.0,
           "rx_rate_mbps": 26.0,

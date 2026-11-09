@@ -24,20 +24,11 @@ function add(parent, ...nodes) {
 // A reading is usable only if it is a finite number. Anything else (null, a
 // string, an object) shows as "Unknown", never as a reference label.
 const usable = (v) => typeof v === "number" && Number.isFinite(v);
-const num = (v, unit = "") => (usable(v) ? `${v}${unit ? " " + unit : ""}` : "Unknown");
-const signal = (v) =>
-  !usable(v)
-    ? "Unknown"
-    : v >= -60
-      ? "strong"
-      : v >= -70
-        ? "good"
-        : v >= -75
-          ? "weak"
-          : "very weak";
-const utilization = (v) =>
-  !usable(v) ? "Unknown" : v < 40 ? "light" : v <= 70 ? "busy" : "congested";
-const retry = (v) => (!usable(v) ? "Unknown" : v < 10 ? "normal" : v <= 20 ? "elevated" : "high");
+const F = HousesitterFormat;
+const num = (v, unit = "", fmt = F.whole) =>
+  usable(v) ? `${fmt(v)}${unit ? " " + unit : ""}` : "Unknown";
+// Channels, widths and durations retain their original display precision.
+const raw = (v) => (usable(v) ? String(v) : "Unknown");
 // Display name for a client or AP. Name and id can both be missing.
 const named = (x, fallback = "Unnamed device") => x.name || x.id || fallback;
 function time(v) {
@@ -80,11 +71,11 @@ function changes(w) {
   for (const c of old.values()) if (!current.has(c.id)) gone.push({ c, p: null, gone: true });
   return { moved, other, gone, old };
 }
-function metric(label, p, c, unit) {
+function metric(label, p, c, unit, fmt) {
   const n = el("div", null, "metric");
   add(n, el("small", label));
   const strong = el("strong");
-  add(strong, el("span", num(p), "before"), el("span", " → "), el("span", num(c, unit)));
+  add(strong, el("span", num(p, "", fmt), "before"), el("span", " → "), el("span", num(c, unit, fmt)));
   n.append(strong);
   return n;
 }
@@ -131,15 +122,15 @@ function changeRow(row) {
     n,
     add(
       el("div", null, "metrics"),
-      metric("Signal", p.signal_dbm, c.signal_dbm, "dBm"),
-      metric("Rate · AP → device", p.tx_rate_mbps, c.tx_rate_mbps, "Mbps"),
-      metric("Rate · device → AP", p.rx_rate_mbps, c.rx_rate_mbps, "Mbps"),
+      metric("Signal", p.signal_dbm, c.signal_dbm, "dBm", F.signalText),
+      metric("Rate · AP → device", p.tx_rate_mbps, c.tx_rate_mbps, "Mbps", F.mbps),
+      metric("Rate · device → AP", p.rx_rate_mbps, c.rx_rate_mbps, "Mbps", F.mbps),
     ),
   );
   n.append(
     el(
       "div",
-      `After signal: ${signal(c.signal_dbm)}${c.band === p.band ? " · Still on " + clean(c.band) : ""}`,
+      `After signal: ${F.signalLabel(c.signal_dbm)}${c.band === p.band ? " · Still on " + clean(c.band) : ""}`,
       "reference",
     ),
   );
@@ -250,7 +241,7 @@ function render(d) {
       [w.latest.summary.client_count, "current devices"],
       [w.latest.summary.ap_count, "access points"],
     ])
-      stats.append(add(el("div", null, "stat"), el("strong", value), el("span", label)));
+      stats.append(add(el("div", null, "stat"), el("strong", F.whole(value)), el("span", label)));
     frag.append(stats);
     const grid = el("div", null, "primary-grid");
     const left = el("div");
@@ -267,7 +258,7 @@ function render(d) {
     if (diff.other.length) {
       const details = el("details");
       details.append(
-        el("summary", `${diff.other.length} more devices with signal or rate changes`),
+        el("summary", `${F.whole(diff.other.length)} more devices with signal or rate changes`),
       );
       for (const r of diff.other) details.append(changeRow(r));
       changePanel.append(details);
@@ -288,7 +279,7 @@ function render(d) {
       return (
         p &&
         ((c.band === "2.4GHz" && p.band === c.band) ||
-          (signal(c.signal_dbm) === "very weak" && signal(p.signal_dbm) === "very weak"))
+          (F.signalLabel(c.signal_dbm) === "very weak" && F.signalLabel(p.signal_dbm) === "very weak"))
       );
     });
     for (const c of stable) {
@@ -296,7 +287,7 @@ function render(d) {
       add(
         n,
         el("strong", named(c)),
-        el("div", `${num(c.signal_dbm, "dBm")} · ${signal(c.signal_dbm)}`),
+        el("div", `${num(c.signal_dbm, "dBm", F.signalText)} · ${F.signalLabel(c.signal_dbm)}`),
         el(
           "div",
           diff.old.get(c.id).band === c.band
@@ -326,7 +317,7 @@ function render(d) {
     history.append(
       el(
         "p",
-        `${num(w.snapshots.total)} snapshots saved · showing ${w.snapshots.recent.length} most recent · newest first`,
+        `${num(w.snapshots.total)} snapshots saved · showing ${F.whole(w.snapshots.recent.length)} most recent · newest first`,
         "muted",
       ),
     );
@@ -339,7 +330,7 @@ function render(d) {
         li,
         el("div", time(s.collected_at), "time"),
         el("strong", s.label || "Unlabelled snapshot"),
-        el("p", `${s.client_count} devices · ${s.ap_count} APs`),
+        el("p", `${F.whole(s.client_count)} devices · ${F.whole(s.ap_count)} APs`),
       );
       list.append(li);
     }
@@ -378,18 +369,18 @@ function render(d) {
         const radio = el("div", null, "radio");
         add(
           radio,
-          el("strong", `${clean(r.band)} · channel ${num(r.channel)} · ${num(r.width_mhz, "MHz")}`),
+          el("strong", `${clean(r.band)} · channel ${num(r.channel, "", raw)} · ${num(r.width_mhz, "MHz", raw)}`),
           el(
             "div",
-            `Channel utilization ${num(r.channel_utilization_pct, "%")} · ${utilization(r.channel_utilization_pct)}`,
+            `Channel utilization ${num(r.channel_utilization_pct, "%", F.utilizationText)} · ${F.utilizationLabel(r.channel_utilization_pct)}`,
           ),
           el(
             "div",
-            `Cumulative retries ${num(r.tx_retry_pct_cumulative, "%")} · ${retry(r.tx_retry_pct_cumulative)}`,
+            `Cumulative retries ${num(r.tx_retry_pct_cumulative, "%", F.retryText)} · ${F.retryLabel(r.tx_retry_pct_cumulative)}`,
           ),
           el(
             "div",
-            `${num(r.client_count)} controller devices · Satisfaction ${num(r.satisfaction_pct, "%")}`,
+            `${num(r.client_count)} controller devices · Satisfaction ${num(r.satisfaction_pct, "%", F.pct)}`,
           ),
         );
         const more = el("div");
@@ -398,7 +389,7 @@ function render(d) {
           el("strong", "Radio details"),
           el(
             "p",
-            `Channel setting ${clean(r.channel_setting)} · Power ${num(r.tx_power_dbm, "dBm")} (${clean(r.tx_power_mode)}) · Self receive ${num(r.self_rx_pct, "%")} · Self transmit ${num(r.self_tx_pct, "%")}`,
+            `Channel setting ${clean(r.channel_setting)} · Power ${num(r.tx_power_dbm, "dBm", F.dbm)} (${clean(r.tx_power_mode)}) · Self receive ${num(r.self_rx_pct, "%", F.pct)} · Self transmit ${num(r.self_tx_pct, "%", F.pct)}`,
           ),
         );
         radio.append(more);
@@ -410,7 +401,7 @@ function render(d) {
         el("strong", "AP details"),
         el(
           "p",
-          `Firmware ${clean(ap.firmware)} · Uptime ${num(ap.uptime_s, "s")} · Uplink ${clean(ap.uplink_type)} ${num(ap.uplink_speed_mbps, "Mbps")} · Satisfaction ${num(ap.satisfaction_pct, "%")}`,
+          `Firmware ${clean(ap.firmware)} · Uptime ${num(ap.uptime_s, "s", raw)} · Uplink ${clean(ap.uplink_type)} ${num(ap.uplink_speed_mbps, "Mbps")} · Satisfaction ${num(ap.satisfaction_pct, "%", F.pct)}`,
         ),
       );
       card.append(more);
@@ -460,21 +451,21 @@ function render(d) {
 }
 function apClients(clients) {
   const list = el("div", null, "ap-clients");
-  list.append(el("h4", `${clients.length} devices in saved list`));
+  list.append(el("h4", `${F.whole(clients.length)} devices in saved list`));
   for (const c of clients) {
     const row = el("article", null, "ap-client");
     add(
       row,
       el("strong", named(c)),
-      el("div", `${clean(c.band)} · ${clean(c.ssid)} · Channel ${num(c.channel)}`),
-      el("div", `${num(c.signal_dbm, "dBm")} · ${signal(c.signal_dbm)}`),
+      el("div", `${clean(c.band)} · ${clean(c.ssid)} · Channel ${num(c.channel, "", raw)}`),
+      el("div", `${num(c.signal_dbm, "dBm", F.signalText)} · ${F.signalLabel(c.signal_dbm)}`),
       el(
         "div",
-        `AP → device ${num(c.tx_rate_mbps, "Mbps")} · Device → AP ${num(c.rx_rate_mbps, "Mbps")}`,
+        `AP → device ${num(c.tx_rate_mbps, "Mbps", F.mbps)} · Device → AP ${num(c.rx_rate_mbps, "Mbps", F.mbps)}`,
       ),
       el(
         "div",
-        `Cumulative retries ${num(c.tx_retry_pct_cumulative, "%")} · ${retry(c.tx_retry_pct_cumulative)}`,
+        `Cumulative retries ${num(c.tx_retry_pct_cumulative, "%", F.retryText)} · ${F.retryLabel(c.tx_retry_pct_cumulative)}`,
       ),
       el("small", c.id, "source"),
     );
@@ -556,22 +547,22 @@ function clientPanel(s) {
       row.append(
         add(el("td"), el("div", c.ap_name || c.ap_id || "AP unknown"), el("small", c.ssid)),
       );
-      row.append(add(el("td"), el("div", c.band), el("small", "Channel " + num(c.channel))));
+      row.append(add(el("td"), el("div", c.band), el("small", "Channel " + num(c.channel, "", raw))));
       row.append(
-        add(el("td"), el("strong", num(c.signal_dbm, "dBm")), el("small", signal(c.signal_dbm))),
+        add(el("td"), el("strong", num(c.signal_dbm, "dBm", F.signalText)), el("small", F.signalLabel(c.signal_dbm))),
       );
       row.append(
         add(
           el("td"),
-          el("div", "AP → device " + num(c.tx_rate_mbps, "Mbps")),
-          el("small", "Device → AP " + num(c.rx_rate_mbps, "Mbps")),
+          el("div", "AP → device " + num(c.tx_rate_mbps, "Mbps", F.mbps)),
+          el("small", "Device → AP " + num(c.rx_rate_mbps, "Mbps", F.mbps)),
         ),
       );
       row.append(
         add(
           el("td"),
-          el("div", `${num(c.tx_retry_pct_cumulative, "%")} · ${retry(c.tx_retry_pct_cumulative)}`),
-          el("small", "Satisfaction " + num(c.satisfaction_pct, "%")),
+          el("div", `${num(c.tx_retry_pct_cumulative, "%", F.retryText)} · ${F.retryLabel(c.tx_retry_pct_cumulative)}`),
+          el("small", "Satisfaction " + num(c.satisfaction_pct, "%", F.pct)),
         ),
       );
       const details = el("div");
@@ -580,7 +571,7 @@ function clientPanel(s) {
         el("strong", "Details"),
         el(
           "p",
-          `IP ${clean(c.ip)} · Vendor ${clean(c.vendor)} · WiFi ${clean(c.wifi_standard)} (raw ${clean(c.wifi_standard_raw)}) · Noise ${num(c.noise_dbm, "dBm")} · Recent retries ${num(c.tx_retry_pct_recent, "%")} · Connected ${num(c.connected_s, "s")} · Idle ${num(c.idle_s, "s")} · Guest ${c.guest == null ? "Unknown" : c.guest ? "Yes" : "No"}`,
+          `IP ${clean(c.ip)} · Vendor ${clean(c.vendor)} · WiFi ${clean(c.wifi_standard)} (raw ${clean(c.wifi_standard_raw)}) · Noise ${num(c.noise_dbm, "dBm", F.dbm)} · Recent retries ${num(c.tx_retry_pct_recent, "%", F.pct1)} · Connected ${num(c.connected_s, "s", raw)} · Idle ${num(c.idle_s, "s", raw)} · Guest ${c.guest == null ? "Unknown" : c.guest ? "Yes" : "No"}`,
         ),
       );
       row.append(add(el("td"), details));
@@ -608,7 +599,7 @@ function clientPanel(s) {
       back,
       el(
         "span",
-        `${rows.length ? page * 30 + 1 : 0}–${Math.min((page + 1) * 30, rows.length)} of ${rows.length}`,
+        `${F.whole(rows.length ? page * 30 + 1 : 0)}–${F.whole(Math.min((page + 1) * 30, rows.length))} of ${F.whole(rows.length)}`,
       ),
       next,
     );
@@ -710,7 +701,7 @@ function renderInkPage(frag, d, w, module) {
     frag.append(
       inkText(
         "p",
-        `${s.summary.client_count} devices · ${s.summary.ap_online_count} / ${s.summary.ap_count} APs online · Collected ${time(s.collected_at)}`,
+        `${F.whole(s.summary.client_count)} devices · ${F.whole(s.summary.ap_online_count)} / ${F.whole(s.summary.ap_count)} APs online · Collected ${time(s.collected_at)}`,
         "ink-counts",
       ),
     );
@@ -731,7 +722,7 @@ function renderInkPage(frag, d, w, module) {
         inkText("strong", named(a, "Unnamed access point")),
         el(
           "span",
-          `${a.online ? "Online" : "OFFLINE"} · ${s.clients.filter((c) => c.ap_id === a.id).length} devices`,
+          `${a.online ? "Online" : "OFFLINE"} · ${F.whole(s.clients.filter((c) => c.ap_id === a.id).length)} devices`,
         ),
       );
       aps.append(row);
@@ -746,10 +737,10 @@ function renderInkPage(frag, d, w, module) {
       add(
         row,
         inkText("strong", named(c)),
-        inkText("span", `${num(c.signal_dbm, "dBm")} · ${signal(c.signal_dbm)} · ${clean(c.band)}`),
+        inkText("span", `${num(c.signal_dbm, "dBm", F.signalText)} · ${F.signalLabel(c.signal_dbm)} · ${clean(c.band)}`),
         inkText(
           "span",
-          `AP → device ${num(c.tx_rate_mbps, "Mbps")} · Retries ${num(c.tx_retry_pct_cumulative, "%")}`,
+          `AP → device ${num(c.tx_rate_mbps, "Mbps", F.mbps)} · Retries ${num(c.tx_retry_pct_cumulative, "%", F.retryText)}`,
         ),
       );
       clients.append(row);
@@ -758,7 +749,7 @@ function renderInkPage(frag, d, w, module) {
     clients.append(
       el(
         "p",
-        `+ ${s.clients.length - selected.length} more devices${unplaced ? " · " + unplaced + " unknown AP" : ""}`,
+        `+ ${F.whole(s.clients.length - selected.length)} more devices${unplaced ? " · " + F.whole(unplaced) + " unknown AP" : ""}`,
       ),
     );
     add(grid, aps, clients);

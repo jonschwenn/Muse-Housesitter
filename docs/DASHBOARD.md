@@ -122,6 +122,14 @@ browser ── GET / , /eink.html, /*.js, /*.css ──▶ housesitter serve
   with its unit in
   [`docs/modules/unifi_wifi.md`](modules/unifi_wifi.md) §4. Show units on
   screen (dBm, Mbps, MHz, %).
+- **Display precision:** pages round for display only: one decimal for retry
+  percentages; whole numbers for other percentages unless fractional; whole
+  dBm; negotiated rates in whole Mbps once they round to 10 or more (so
+  9.96 shows "10"), and one decimal below; whole uplink Mbps and counts, with
+  no thousands separators. Channel, width, durations and times are unchanged.
+  Reference labels use the unrounded value. Near a range boundary the page
+  shows up to two more decimals so the number and label agree (for example,
+  9.96 % stays "9.96 %", normal). `/api/dashboard` is never rounded.
 - **Reference ranges (labels, not verdicts):** a page may label values only
   with these rules of thumb. The `unifi_wifi` SKILL.md (Planned) must give
   Muse the same ranges, so people and Muse read the numbers the same way.
