@@ -360,7 +360,7 @@ class TestInstallCommands:
         dest.mkdir()
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -381,7 +381,7 @@ class TestInstallCommands:
         dest = tmp_path / "commands.d"  # does not exist
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -407,7 +407,7 @@ class TestInstallCommands:
         dest.mkdir()
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -424,7 +424,7 @@ class TestInstallCommands:
         dest = tmp_path / "commands.d"  # does not exist
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -444,7 +444,7 @@ class TestInstallCommands:
         dest = tmp_path / "commands.d"  # does not exist
         calls = []
 
-        def boom(argv, check=False):
+        def boom(argv, check=False, **kwargs):
             calls.append(argv)
             raise subprocess_mod.CalledProcessError(1, argv)
 
@@ -464,7 +464,7 @@ class TestInstallCommands:
         dest.write_text("not a directory\n")
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -484,7 +484,7 @@ class TestInstallCommands:
         os.symlink(real, dest)
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -504,7 +504,7 @@ class TestInstallCommands:
         os.symlink(real, dest)
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -522,7 +522,7 @@ class TestInstallCommands:
         os.symlink(tmp_path / "nowhere.d", dest)
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -539,7 +539,7 @@ class TestInstallCommands:
         dest = tmp_path / "commands.d"
         dest.mkdir()
 
-        def boom(argv, check=False):
+        def boom(argv, check=False, **kwargs):
             raise subprocess_mod.CalledProcessError(1, argv)
 
         code, out, err = run_cli(
@@ -564,7 +564,7 @@ class TestInstallCommands:
         dest.mkdir()
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(
@@ -584,7 +584,7 @@ class TestInstallCommands:
         explicit.mkdir()
         calls = []
 
-        def fake_runner(argv, check=False):
+        def fake_runner(argv, check=False, **kwargs):
             calls.append(argv)
 
         code, out, err = run_cli(

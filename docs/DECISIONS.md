@@ -490,7 +490,80 @@ handoff's "license not chosen; don't publish."
   (a symlink planted by the run-as account could redirect a root write).
   D11 remains open and unchanged.
 
-### D26. Install from main until releases are tagged (2026-11-09, Jon)
+### D26. Guard standard output for the CLI process except `serve` (2026-11-08, Jon)
+- **Decision:** guard fds 1/2 and all four Python stdout/stderr streams
+  after argument parsing and before loading the registry. Route `serve`
+  before the guard: no SIGINT change, final-delivery watchdog, seal, or
+  `os._exit` (Jon, 2026-11-09). Its request logs reach real stderr
+  (systemd journal).
+  For guarded subcommands, discard stray output in a Linux memfd reopened
+  through `/proc/self/fd/<n>` for atomic shared position updates. Count
+  bytes from that offset without flushing or locking module streams;
+  report only the count. A daemon truncates the sink about every 100 ms,
+  clearing `O_APPEND` first. Each fd has one owner; the trim thread owns
+  its private duplicate. Flush original streams once at startup.
+  At production exit, stop trimming, flush and close core-owned real
+  streams and saved fds, close the core sink fd, and seal fds 1/2 to
+  `/dev/null`. Never flush, close, or replace module-reachable streams.
+  Call `os._exit(0)` only after success and complete delivery; otherwise
+  hard-exit 1. Failed flushes and escaping exceptions use fixed diagnostics
+  without exception text (ARCHITECTURE §4). For `invoke`/`describe`/`doctor`,
+  an escaping exception can emit a replacement error envelope only before
+  stdout's first attempted write; stderr lines do not mark stdout started.
+  Timeout also seals and hard-exits 1.
+  In production seal mode, best-effort set SIGINT to the OS default on the
+  main thread after guard startup: like SIGTERM, it ends by signal without
+  Python shutdown. A code-raised `KeyboardInterrupt` follows the exception
+  path. Injected-stream callers default to restore and normal return,
+  re-raising escaping exceptions; timeout still invokes the exit callback.
+  Start the best-effort five-second final-delivery watchdog just before
+  the first CLI stdout or stderr write, after sudo, file, network, and
+  handler work; also arm it on timeout delivery and unexpected failure.
+  If still alive when it fires, call `os._exit(1)`.
+  If guard startup fails, `invoke`/`describe`/`doctor` refuse without loading
+  the registry or running handlers, with `upstream_unexpected` and
+  "cannot protect command output". Production arms the watchdog before
+  delivery and calls `os._exit(1)`; in-process callers return 1. Other
+  subcommands except `serve` warn and continue unguarded with no watchdog
+  (Jon, 2026-11-08). Nested refusals discard output unless streams are
+  injected, avoiding a second JSON document; nested calls without an
+  explicit `seal=True` never arm the
+  watchdog, which would end the outer process mid-handler.
+  Missing or failed memfd creation or `/proc` reopen follows the same
+  refusal path, without a non-Linux fallback. Keep the guard in the CLI,
+  so direct runner calls still expose stray output to conformance tests.
+- **Why:** import-time and late-thread output would otherwise reach Muse.
+  A memfd avoids deliberately writing possible secrets to the SD card,
+  cannot fill like a pipe when a C writer holds the GIL, and permits
+  counting without a module-controlled flush. Sealing and hard exit avoid
+  module flushes, finalizers, and threads hanging interpreter shutdown.
+  Stdout tracking prevents replacement envelopes after partial delivery;
+  the SIGINT policy and watchdog bound shutdown and delivery failures.
+  `serve` has no Muse drop-in or JSON stdout consumer, runs no module
+  handlers, and logs for the owner. It is long-running, so the watchdog
+  would kill it.
+- **Rejected:** handler-only guards; Python-stream swaps without fd
+  redirection; logging redacted stray text; disk sinks; pipe/drain-thread
+  sinks; flushing module streams to count; `/dev/null` during collection
+  (no count); guarding in the runner (masks conformance failures); running
+  module commands unprotected after only a warning.
+- **Trade-offs:** import-time module output while `serve` loads the registry
+  reaches its console. A live stdout or stderr reader too slow to finish
+  delivery within five seconds is cut off with exit 1. Guarded module
+  `print()` debugging is gone; use `ctx.log` or conformance tests. This is
+  a guard rail, not a sandbox: modules can discover reserved real fds.
+  Fatal interpreter output on fd 2 is lost; module-buffered text is not
+  counted. Concurrent byte counts are exact except when append mode is
+  set after a trim; clearing `O_APPEND` narrows but cannot close that gap
+  (accepted by Jon, 2026-11-09). Memfd pages can be swapped. A GIL-holding
+  writer can delay trimming and the runner timeout response: memory and duration
+  can grow until it releases the GIL. Module threads and `atexit` hooks
+  cannot outlive the guarded process. Children inheriting fds 1/2 can keep
+  writing after exit without trimming; modules cannot spawn them under
+  the import lint, and core's `sudo install` children receive real fds.
+  Linux only: Jon confirmed there is no non-Linux target.
+
+### D27. Install from main until releases are tagged (2026-11-09, Jon)
 - **Decision:** the install guide clones `main` and upgrades with `git pull --ff-only`;
   there are no version tags yet. This narrows D25's "install from a git
   release tag" until the first release.
@@ -498,7 +571,7 @@ handoff's "license not chosen; don't publish."
   install.
 - **Rejected:** tagging v0.1.0 now; we are not making versions yet.
 
-### D27. README install is "tell Muse"; full guide in docs/INSTALL.md (2026-11-09, Jon)
+### D28. README install is "tell Muse"; full guide in docs/INSTALL.md (2026-11-09, Jon)
 - **Decision:** README lists requirements and one line to tell Muse;
   `docs/INSTALL.md` holds the guided-with-Muse steps and the manual steps.
   Muse does the unprivileged parts; the owner runs the one sudo command

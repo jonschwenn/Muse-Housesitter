@@ -315,10 +315,16 @@ Use this checklist. Every item gets *yes*, *no (finding)*, or *n/a (why)*.
 - [ ] The hostile fixture's planted secrets are asserted absent from output,
       saves, and captured logs. The suite scans Python streams and fds 1/2
       during command execution, plus records reaching `housesitter`
-      (including default `ctx.log`). Review covers import-time output,
-      threads outliving the command, other or non-propagating loggers
-      (including `ctx.log` with `propagate=False`), handlers writing
+      (including default `ctx.log`). Import-time output, threads outliving
+      the command, and buffered output after return are outside harness
+      capture; the production CLI guard discards them through standard
+      streams except for `serve` (ARCHITECTURE §4). Review covers deliberate
+      guard bypass through reserved fds (which a module could discover through
+      `/proc/self/fd`), guard startup failure, other or non-propagating
+      loggers (including `ctx.log` with `propagate=False`), handlers writing
       elsewhere, and leaks beyond exact-substring matching (MODULES §4).
+      The guard does not replace the rule that modules log only through
+      `ctx.log`; captured text is discarded, never logged.
 - [ ] Modules log only through `ctx.log`, as required by Context-only I/O
       (MODULES §3).
 - [ ] Auth cookies and tokens are kept in memory only, and logout is called.

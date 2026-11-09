@@ -69,7 +69,8 @@ These come from the SDK's `commands.py`, `executor.py`, and README, as of
 
 | Component | Responsibility |
 |-----------|----------------|
-| `core/cli.py` | Implements `--version`, `invoke`, `list`, `describe`, `doctor`, `dropins`, `install-commands`, `config-check`, and `serve` (§3.1). Keeps secrets out of the CLI's own output; conformance checks output captured during command execution (§4), but core protection is **Planned (#29)**. `conformance` is **Planned**. |
+| `core/cli.py` | Implements `--version`, `invoke`, `list`, `describe`, `doctor`, `dropins`, `install-commands`, `config-check`, and `serve` (§3.1). Keeps secrets out of the CLI's own output and routes `serve` before the guard and starts the process-wide output guard before loading the registry for other subcommands (§4). Writes CLI output through reserved real streams; nested module-command refusals discard output unless streams are injected. `conformance` is **Planned**. |
+| `core/stdio.py` | Redirects fds 1/2 and all four Python stdout/stderr streams to one anonymous in-memory file (Linux `os.memfd_create`). Counts bytes by the shared write offset, without flushing or locking; a daemon thread truncates the file about every 100 ms to limit memory use when it can run. Reserves real streams for CLI output and seals fds 1/2 to `/dev/null` at production exit (§4, D26). |
 | `core/registry.py` | Discovers built-in subpackages of `housesitter.modules`, each defining exactly one `Module` subclass with an id matching the package name. Third-party entry points in the `housesitter.modules` group must load a `Module` subclass whose id equals the entry-point name. Validates declarations (MODULES §3), records third-party status, sorts modules by id, and builds a read-only command table. The id `housesitter` is reserved for core commands. Duplicate ids or command names, invalid declarations, or any import/load failure stop the registry. |
 | `core/config.py` | Loads `~/.config/housesitter/config.json` (or `$HOUSESITTER_CONFIG`), capped at 1 MiB. A missing file means defaults (`identifiers="full"`, retention 500) with no modules enabled. Validates the optional `housesitter.dashboard` settings (DASHBOARD §5). Rejects unknown top-level/core keys, unknown modules, and unknown keys in enabled module sections; validates values and applies defaults using each module's `Setting` declarations. A present module section defaults to enabled; disabled sections check only `enabled` and `retention`, ignoring other keys and values. Returns read-only config; the secrets directory is `<config dir>/secrets`. Errors name the key or file and problem, never the offending value. |
 | `core/serve.py` | Serves packaged web files and the saved-data dashboard API, GET/HEAD only, with a Host check and security headers (DASHBOARD §5). Never collects or writes. |
@@ -219,18 +220,29 @@ raise `not_found`; unsafe directories and failed writes raise
    count as absent; non-null defaults fill absent optionals.
 3. Build a Context with the module's store and a self-deadline measured
    from invocation start: command timeout minus 3 seconds.
-4. Call the handler in a worker thread and wait only until that deadline.
+4. Call the handler in a worker thread and wait until that deadline
+   (a module holding the GIL can delay the timeout response; §4).
    An overrun returns `timeout`; the CLI flushes the error envelope and
-   stderr line, then exits the process if the worker is still alive.
+   stderr line, then seals fds 1/2 to `/dev/null` before `os._exit`
+   if the worker is still alive (in-process callers restore instead).
    `CommandError`, `UpstreamError`, and store errors retain their stable
    codes; `NotAllowed` becomes `not_allowed`. Unexpected exceptions and
    non-`Result` returns become `upstream_unexpected`, without exception text.
-5. Sanitise the label (at most 200 characters), combine handler and Context
-   warnings, and sanitise declared untrusted fields in data, source, and
-   compact data. Warnings are capped at 200 characters each, de-duplicated,
+5. Use `runner.prepare_output()` (shared with the dashboard) to sanitise
+   the label (at most 200 characters), combine handler and Context warnings, and sanitise declared untrusted fields in data, source, and
+   compact data. With the CLI guard active, sample its byte count after a
+   valid handler result returns. The count is the sink's shared write offset,
+   read without flushing module streams or taking a lock; text left in a
+   module's own buffer is not counted. A non-zero count is passed to
+   `prepare_output()` via `leading_warnings` as the first warning:
+   "The module wrote N bytes to stdout or stderr outside its result;
+   Housesitter discarded them." The count includes import-time output
+   since the guard started. This warning survives the 20-warning cap and
+   counts toward the 88 KiB budget before size fitting. Warnings are capped
+   at 200 characters each, de-duplicated,
    and limited to 20; on overflow the last says how many more were omitted.
-6. Apply identifier policy, drop undeclared keys, and check declared types
-   in data, source, and compact data (MODULES §2). A mismatch becomes
+6. In `prepare_output()`, apply identifier policy, drop undeclared keys,
+   and check declared types in data, source, and compact data (MODULES §2). A mismatch becomes
    `upstream_unexpected` and names the field path.
 7. Fit the envelope to the budget: full data, then compact data, then
    truncation in `Paging.lists` order (§5). When `Result.save` is set, use
@@ -242,8 +254,15 @@ raise `not_found`; unsafe directories and failed writes raise
    `Result.save` is set, then build the envelope with the real id. The
    saved file preserves identifiers and undeclared keys from before
    projection, even when output is compacted or truncated.
-9. Return the envelope. On failure the CLI also prints the stable error
-   line last on stderr (§4). Records under the `housesitter` logger never
+9. Return the envelope. On success the runner records the sampled count in
+   `Outcome.stray_bytes`; the CLI reuses it so the envelope warning and
+   stderr log report the same number. On failure and timeout paths the CLI
+   samples the guard itself. For a non-zero count it prints
+   `housesitter: <module>: log: the module wrote N bytes outside its result; discarded`
+   on stderr.
+   On failure the CLI prints the stable error line after that log line,
+   keeping the error line last on stderr (§4). Records under the
+   `housesitter` logger never
    fall through to Python's last-resort stderr handler, so late worker logs
    after a timeout do not displace the final error line.
 
@@ -260,9 +279,135 @@ Conformance fails output captured during command execution through
 earlier stream references when they reach those descriptors during the run.
 Both streams are scanned for planted values. Import-time output, output
 from threads that outlive the command, and buffered output reaching the
-descriptors only after return are outside capture (MODULES §4).
-Core protection against stray handler output is **Planned (#29)**; the core
-does not yet guard those streams.
+descriptors only after return are outside harness capture (MODULES §4).
+The harness calls `run_command` directly without the CLI guard, so stray
+output still fails conformance.
+
+In production, the CLI starts a process-wide guard after argument parsing
+and before loading the module registry, except for `serve`. The dashboard
+server is routed immediately after parsing: it starts no guard, changes no
+SIGINT handling, arms no final-delivery watchdog, and uses neither sealing
+nor `os._exit`. Its request logs reach real stderr (the systemd journal).
+It runs no module handlers; accepted import-time output while loading its
+registry reaches its console (D26).
+
+For guarded subcommands, the guard flushes the original Python
+streams once, duplicates fds 1/2 as reserved real streams, and redirects
+fds 1/2, `sys.stdout`, `sys.stderr`, `sys.__stdout__`, and `sys.__stderr__`
+into one anonymous in-memory file (`os.memfd_create`, Linux only). The
+Python sink writers are unbuffered and write through. All sink descriptors
+share one write offset. The memfd is reopened once through
+`/proc/self/fd/<n>` to make shared position updates atomic; the raw memfd
+would undercount concurrent writes. Writes cannot block waiting for a
+reader, even when a C writer holds the GIL. A daemon trim thread owns a
+private duplicate of the sink and truncates it about every 100 ms without
+moving that offset.
+Before each truncate it clears `O_APPEND` on the shared file description,
+which narrows but does not close an append-mode gap: if something switches
+fd 1 or 2 to append mode after a trim, the count can be too low. The byte
+count is otherwise exact, including with concurrent writers. Jon accepted
+this limit on 2026-11-09 (D26). A module holding
+the GIL can delay both trimming and the runner's timeout response; memory can grow
+and the command can overrun until the writer releases the GIL. The timeout
+limitation predates the guard. The count reads the shared offset without
+flushing module streams or taking a lock; text left in a module's own buffer at
+exit is not counted. Captured text is never logged or deliberately written
+to disk, but memfd pages can be swapped like other process memory (D26).
+All guard fds are above 2 and each has one owner, so cleanup closes each
+once; a closed fd 0 reads as empty input, so `invoke` without `--params`
+gets `{}`. Only the byte count is reported (§3.4). All guarded CLI
+output, including envelopes, error lines, logs, list, config-check,
+dropins, and install-commands output, uses the reserved streams;
+`sudo install` children receive the reserved fds explicitly. Argument
+parser output and help without a subcommand precede the guard. An unknown
+subcommand reached after guard startup reports usage and its error to the
+reserved real stderr and returns 2 internally (production sealing exits 1).
+If guard startup raises `OSError` or `RuntimeError` (including missing or failed
+`memfd_create` or a failed `/proc/self/fd` reopen; there is no non-Linux
+fallback), `invoke`, `describe`, and `doctor` refuse without loading the registry or running a handler. Stdout
+gets `{"ok":false,"error":{"code":"upstream_unexpected","message":"cannot protect command output"}}`,
+the last stderr line is
+`housesitter: housesitter: upstream_unexpected: cannot protect command output`,
+and production arms the final-delivery watchdog before these writes, then
+calls `os._exit(1)`. In-process callers return 1. Other subcommands except
+`serve` continue unguarded after
+`housesitter: housesitter: log: output guard unavailable; continuing without it`
+on stderr; they arm no watchdog and exit normally, so slow work such as a
+`sudo` password prompt can finish. The same rules apply to a nested `cli.main()` while a guard is
+already active. A nested refusal uses injected streams where supplied
+and discards its envelope or error line where no stream was injected, so
+it cannot add a second JSON document to the outer command's output. Other
+nested subcommands use injected streams or the outer guard's reserved
+real streams. Nested calls without an explicit `seal=True` never arm the
+final-delivery watchdog: it would end the outer process while the outer
+handler is still running.
+
+In production (seal mode), right after the guard starts, the CLI sets
+SIGINT to the operating system's default action on the main thread. Like
+SIGTERM, an interrupt then ends the process immediately by signal with a
+nonzero status, without Python shutdown; bytes already delivered stay
+delivered. Setting the signal action is best-effort; in-process restore
+mode leaves signal handling unchanged.
+
+Before attempting its first stdout write, the CLI marks stdout output as
+started. A later failure never appends a replacement error envelope, even
+if only part of the first one was delivered. Stderr lines do not mark
+stdout as started and do not prevent a replacement envelope. After stdout
+starts, failure best-effort writes only the fixed stderr line below and
+exits 1.
+
+Just before the first CLI output write to stdout or stderr, after sudo,
+file, network, and handler work, production starts a five-second
+final-delivery watchdog (`_SEAL_WATCHDOG_S`). The unexpected-failure path
+arms it too. Timeout delivery uses the same timer; a production guard-down
+refusal arms it as described above. If the process is still alive
+when it fires, it calls `os._exit(1)`, bounding delivery and sealing when a
+stdout or stderr reader stops reading. A live reader too slow to finish
+within five seconds is also cut off with exit 1; this is an accepted limit
+(D26). Timer startup is best-effort. On guarded paths it is not armed while
+a handler runs.
+
+At production exit `seal()` signals the trim thread to stop and waits up
+to five seconds for it. It flushes and closes only the core-owned reserved
+real streams, closes saved fds and the core sink fd, and points fds 1/2 at
+`/dev/null`. It never flushes, closes, or replaces any of the four Python
+stdout/stderr streams or the sink wrappers: a module can make their flush
+hang. The trim thread closes its own private duplicate when it stops.
+After sealing, normal success and failure returns from the guarded CLI
+end with `os._exit(0)` only when the command succeeded and the reserved
+real streams flushed and closed completely; otherwise they exit 1. A failed
+or interrupted flush best-effort writes the fixed line
+`housesitter: housesitter: upstream_unexpected: the command failed unexpectedly`
+to the reserved real stderr. Timeout and unexpected-failure paths pass the
+same fixed line to `seal()` for a failed final flush. The timeout path also
+seals and hard-exits 1. This skips
+interpreter shutdown, which would flush module-reachable streams, so
+handler-started threads cannot keep the process alive and module `atexit`
+hooks do not run. Any exception escaping the guarded CLI body, including
+`SystemExit` with any code, `KeyboardInterrupt`, or a broken pipe on stdout,
+best-effort writes the matching error envelope (`ok: false`, error code
+`upstream_unexpected`, message "the command failed unexpectedly") to the
+reserved real stdout for `invoke`, `describe`, and `doctor` only if stdout
+output has not started, then the fixed stderr line above, then seals and calls
+`os._exit(1)`. No exception text is used. `KeyboardInterrupt` here means an
+exception raised by code; production SIGINT uses the signal policy above.
+Paths finishing before guard startup (`--help`, `--version`, argument
+parser errors, and help without a subcommand) exit normally. Writes after
+the warning count is sampled are discarded without adding an envelope
+warning. Injecting stdout or stderr into `cli.main()` defaults to restoring
+all four original Python streams and fds 1/2 and returning normally for
+in-process use (a live timed-out worker still invokes the exit callback).
+Escaping exceptions are re-raised after restoring in this mode.
+Its `seal` argument can override that choice.
+
+Child processes that inherit fds 1/2 keep writing to the sink after
+Housesitter exits, with no trimming. Modules cannot spawn processes under
+the import lint; core's `sudo install` children receive the real fds.
+
+This is a guard rail, not a sandbox: a hostile module could discover the
+reserved fds (for example through `/proc/self/fd`) and write directly to
+them. Interpreter fatal errors written to fd 2 are also discarded. Core
+code must use only the reserved streams while the guard is active (D26).
 
 Example envelope:
 
