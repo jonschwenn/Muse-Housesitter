@@ -39,6 +39,7 @@ packages = [
 
 [tool.setuptools.package-data]
 "housesitter.web" = ["*.html", "*.css", "*.js", "*.svg", "*.png", "*.ico"]
+"housesitter.modules.unifi_wifi" = ["SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

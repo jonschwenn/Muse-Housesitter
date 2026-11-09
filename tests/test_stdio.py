@@ -2148,7 +2148,9 @@ class TestProductionSubcommandMatrix:
         )
         home = tmp_path / "home-quiet-dry-run"
         dest = os.path.join(str(home), "dest")
-        expected = "".join(
+        # dest does not exist yet, so install-commands announces creating it.
+        expected = f"would create {dest} (owner root, mode 755)\n"
+        expected += "".join(
             f"would install {name} -> {dest}/{name}\n"
             for name in sorted(files)
         )

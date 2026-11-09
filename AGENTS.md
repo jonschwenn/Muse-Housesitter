@@ -215,7 +215,7 @@ gh api graphql -f query='query{repository(owner:"jonschwenn",name:"Muse-Housesit
   lives in DECISIONS as open. A doc that claims something the code doesn't
   do is a bug. The spec-vs-code gate in REVIEW.md checks this.
 - **Three audiences, three places:**
-  - Humans setting it up: `README.md`
+  - Humans setting it up: `README.md` (short) and `docs/INSTALL.md`
   - Contributors: `AGENTS.md`, `docs/`
   - Muse at runtime: each module's `SKILL.md`, which ships inside the
     package and is returned by `housesitter.describe`
@@ -247,7 +247,7 @@ results. It follows the SDK's community-skill shape (YAML `name` and
 ```
 AGENTS.md  CLAUDE.md  README.md  pyproject.toml
 .github/   workflows/ci.yml  rulesets/protect-main.json  pull_request_template.md
-docs/      ARCHITECTURE.md  MODULES.md  REVIEW.md  DECISIONS.md  GITHUB.md  DASHBOARD.md
+docs/      ARCHITECTURE.md  MODULES.md  REVIEW.md  DECISIONS.md  GITHUB.md  DASHBOARD.md  INSTALL.md
            modules/<id>.md
 scripts/   pr_evidence.py  make_dashboard_fixtures.py  dev_dashboard.py
 web/       dashboard front end: index.html, eink.html, static assets, DESIGN.md

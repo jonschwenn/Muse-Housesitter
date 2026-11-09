@@ -10,7 +10,7 @@ and a new entry that supersedes it. Entries are never edited away.
 |---|----------|----------|
 | D7 | **Proactive messages** (`musegadget send-user-msg`). | Not in v1: Muse decides when to collect and when to look (rule 3, D14), and pushing messages would reverse that. Revisit with a concrete need. |
 | D10 | **UniFi API-key auth** instead of a View Only password account (module item U4). | Password first, because its endpoint support is known. Add the key option once U4 is verified on a real console. |
-| D11 | **SDK run-as account with or without sudo.** Sudo is required to install. Whether Muse's run-as account keeps sudo afterwards is separate. With sudo, Muse can e.g. restart `musegadget` and install drop-ins itself. Without it, those steps stay with the owner. | Owner's choice, documented in README. Housesitter needs no sudo at run time. `doctor` reports which mode is in effect. |
+| D11 | **SDK run-as account with or without sudo.** Sudo is required to install. Whether Muse's run-as account keeps sudo afterwards is separate. With sudo, Muse can e.g. restart `musegadget` and install drop-ins itself. Without it, those steps stay with the owner. | Owner's choice, documented in `docs/INSTALL.md`. Housesitter needs no sudo at run time. `doctor` reports which mode is in effect. |
 
 ## Decided
 
@@ -562,3 +562,22 @@ handoff's "license not chosen; don't publish."
   writing after exit without trimming; modules cannot spawn them under
   the import lint, and core's `sudo install` children receive real fds.
   Linux only: Jon confirmed there is no non-Linux target.
+
+### D27. Install from main until releases are tagged (2026-11-09, Jon)
+- **Decision:** the install guide clones `main` and upgrades with `git pull --ff-only`;
+  there are no version tags yet. This narrows D25's "install from a git
+  release tag" until the first release.
+- **Why:** no releases exist, so `--branch v0.1.0` failed on the first real
+  install.
+- **Rejected:** tagging v0.1.0 now; we are not making versions yet.
+
+### D28. README install is "tell Muse"; full guide in docs/INSTALL.md (2026-11-09, Jon)
+- **Decision:** README lists requirements and one line to tell Muse;
+  `docs/INSTALL.md` holds the guided-with-Muse steps and the manual steps.
+  Muse does the unprivileged parts; the owner runs the one sudo command
+  from a fresh clone in their own account, creates the UniFi account, and
+  writes the password file.
+- **Why:** the first install was done by a Muse agent; a long README mixed
+  audiences.
+- **Rejected:** passwordless sudo for Muse's account (gives Muse root;
+  D11 stays open); Muse handling the password (rule 6).

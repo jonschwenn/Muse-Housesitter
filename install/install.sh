@@ -2,9 +2,10 @@
 #
 # install.sh — install, upgrade, or uninstall Housesitter.
 #
-# The owner clones the repo at a tag, reads this script, and runs it from
-# that checkout. The code is installed FROM THIS CHECKOUT (the repo root is
-# this script's parent directory), so the script and the code always match.
+# The owner clones the repo (main, until releases are tagged), reads this
+# script, and runs it from that checkout. The code is installed FROM THIS
+# CHECKOUT (the repo root is this script's parent directory), so the script
+# and the code always match.
 #
 # Run as the owner's own admin account, NOT root: the script refuses EUID 0
 # and uses sudo only for the specific privileged commands.
@@ -28,6 +29,7 @@ PREFIX="/opt/housesitter"
 BIN_LINK="/usr/local/bin/housesitter"
 UNIT_PATH="/etc/systemd/system/housesitter-serve.service"
 COMMANDS_DIR="/etc/musegadget/commands.d"
+MUSEGADGET_PREFIX="/opt/musegadget"
 
 if [ -n "${HOUSESITTER_TEST_ROOT:-}" ]; then
     case "$HOUSESITTER_TEST_ROOT" in
@@ -42,6 +44,7 @@ if [ -n "${HOUSESITTER_TEST_ROOT:-}" ]; then
     BIN_LINK="$HOUSESITTER_TEST_ROOT/usr/local/bin/housesitter"
     UNIT_PATH="$HOUSESITTER_TEST_ROOT/etc/systemd/system/housesitter-serve.service"
     COMMANDS_DIR="$HOUSESITTER_TEST_ROOT/etc/musegadget/commands.d"
+    MUSEGADGET_PREFIX="$HOUSESITTER_TEST_ROOT/opt/musegadget"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,6 +102,36 @@ preflight() {
     fi
     if ! python3 -c 'import sys, venv; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
         die "python3 >= 3.9 with the venv module is required"
+    fi
+}
+
+# check_sdk: warn (never fail: Housesitter installs without the SDK) when
+# the Muse SDK is missing, or too old to load drop-in commands. The SDK has
+# no usable version number, so look for drop-in support in its installed
+# code (added in SDK commit 693ef61862, 2026-10-29). Reads files only; never
+# imports or runs the SDK.
+check_sdk() {
+    local pkg="" d=""
+    for d in "$MUSEGADGET_PREFIX"/venv/lib/python3*/site-packages/musegadget; do
+        if [ -d "$d" ]; then
+            pkg=$d
+            break
+        fi
+    done
+    if [ -z "$pkg" ]; then
+        warn "Muse SDK not found in $MUSEGADGET_PREFIX; Muse sees Housesitter's commands only once the SDK is installed"
+    elif ! grep -rqs --include='*.py' 'commands\.d' "$pkg"; then
+        warn "this Muse SDK predates drop-in commands (SDK commit 693ef61862, 2026-10-29);"
+        warn "update the SDK first, or Muse will not see Housesitter's commands"
+    fi
+}
+
+# check_commands_dir: refuse early, before anything is installed, when the
+# drop-in path is a symlink (even a broken one) or not a directory;
+# install-commands would refuse it after the code is already installed.
+check_commands_dir() {
+    if [ -L "$COMMANDS_DIR" ] || { [ -e "$COMMANDS_DIR" ] && [ ! -d "$COMMANDS_DIR" ]; }; then
+        die "$COMMANDS_DIR is not a real directory; the Muse SDK refuses symlinks. Fix it, then run the installer again"
     fi
 }
 
@@ -229,7 +262,13 @@ musegadget_step() {
 # install_commands: install the drop-ins (install-commands prints the
 # musegadget restart step and its warning itself).
 install_commands() {
-    run "$PREFIX/bin/housesitter" install-commands --exec "$PREFIX/bin/housesitter"
+    # In --dry-run the installed binary does not exist yet, so the inner
+    # dry-run never runs: say here that install-commands creates the dir.
+    if [ "$DRY_RUN" -eq 1 ] && [ ! -e "$COMMANDS_DIR" ]; then
+        say "would create: $COMMANDS_DIR (owner root, mode 755; install-commands creates it)"
+    fi
+    run "$PREFIX/bin/housesitter" install-commands --exec "$PREFIX/bin/housesitter" \
+        || die "could not install the command drop-ins; fix the error above, then run '$0 $COMMAND' again (after a failed install, run '$0 uninstall' first)"
     if [ "$DRY_RUN" -eq 0 ]; then
         RESTART_PRINTED=1
     fi
@@ -245,6 +284,8 @@ cmd_install() {
     if [ -e "$PREFIX" ] || [ -L "$PREFIX" ]; then
         die "$PREFIX already exists; run '$0 upgrade' to update it"
     fi
+    check_commands_dir
+    check_sdk
     warn_trust "$user"
     # Everything inside the run-as account's home runs AS that account, never
     # as root, so a symlink planted there can't redirect a root write. These
@@ -280,6 +321,8 @@ cmd_upgrade() {
     if [ ! -d "$PREFIX" ] || [ -L "$PREFIX" ]; then
         die "$PREFIX is not installed; run '$0 install --run-as USER' first"
     fi
+    check_commands_dir
+    check_sdk
     old_version=$("$PREFIX/bin/housesitter" --version 2>/dev/null || true)
     if [ -z "$old_version" ]; then
         old_version="unknown"

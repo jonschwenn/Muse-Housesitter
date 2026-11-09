@@ -281,7 +281,7 @@ it with exit 0. It is a CLI subcommand only: no Muse command or drop-in is
 generated. The installer can install an optional hardened systemd unit with
 `--with-dashboard`. It runs as the SDK run-as account, read-only, without
 access to the secrets directory. It is not started during installation. See
-[README Setup](../README.md#setup) for installation and enabling it at boot.
+[install guide](INSTALL.md#9-open-the-dashboard) for installation and enabling it at boot.
 
 All settings in `housesitter.dashboard` are optional and validated by
 `housesitter config-check`:
@@ -332,8 +332,8 @@ housesitter: serve: cannot bind 127.0.0.1:8080: address already in use; stop the
   `web/` stays at the repo root and ships as package data in `housesitter.web`,
   so `serve` works from a pip install.
 - No login in v1, because it is read-only. **Anyone who can reach the port
-  sees everything on the dashboard, including MACs and IPs.** The README must
-  say so.
+  sees everything on the dashboard, including MACs and IPs.** The install guide
+  (`docs/INSTALL.md`) must say so.
 - Response headers on every response: `Cache-Control: no-store`,
   `X-Content-Type-Options: nosniff`, and
   `Content-Security-Policy: default-src 'self'; img-src 'self' data:;

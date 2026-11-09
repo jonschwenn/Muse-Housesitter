@@ -472,66 +472,116 @@ class TestStartup:
 # -- packaging -----------------------------------------------------------------------
 
 
+@pytest.fixture(scope="module")
+def built_wheel(tmp_path_factory):
+    """Build the wheel once and install it into a fresh venv once.
+
+    Skips only when the build or venv tooling is unavailable; checks on
+    what the wheel contains or how it runs belong in the tests.
+    """
+    base = tmp_path_factory.mktemp("wheel")
+    try:
+        proc = subprocess.run(
+            # Offline: build with the dev venv's own setuptools and
+            # wheel (pinned in the dev extra), never fetching from PyPI.
+            [sys.executable, "-m", "pip", "wheel", ".", "--no-deps",
+             "--no-build-isolation", "--no-index", "-w", str(base)],
+            cwd=str(ROOT),
+            capture_output=True,
+            timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("wheel build tooling unavailable")
+    if proc.returncode != 0:
+        pytest.skip(
+            "wheel build tooling unavailable "
+            f"(rc={proc.returncode}): "
+            f"{proc.stderr.decode()[-300:]}"
+        )
+    wheels = list(base.glob("*.whl"))
+    assert len(wheels) == 1
+    venv = base / "fresh"
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "venv", str(venv)],
+            check=True, capture_output=True, timeout=120,
+        )
+        subprocess.run(
+            [str(venv / "bin" / "pip"), "install", "--no-index",
+             str(wheels[0])],
+            check=True, capture_output=True, timeout=180,
+        )
+    except (OSError, subprocess.TimeoutExpired,
+            subprocess.CalledProcessError) as exc:
+        pytest.skip(f"fresh-venv install unavailable: {exc}")
+    return wheels[0], venv
+
+
 class TestPackaging:
     EXPECTED_WEB = ("index.html", "eink.html", "dashboard.js", "format.js",
                     "dashboard.css", "eink.css")
 
-    def test_wheel_ships_web_files(self, tmp_path):
-        try:
-            proc = subprocess.run(
-                # Offline: build with the dev venv's own setuptools and
-                # wheel (pinned in the dev extra), never fetching from PyPI.
-                [sys.executable, "-m", "pip", "wheel", ".", "--no-deps",
-                 "--no-build-isolation", "--no-index", "-w", str(tmp_path)],
-                cwd=str(ROOT),
-                capture_output=True,
-                timeout=300,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            pytest.skip("wheel build tooling unavailable")
-        if proc.returncode != 0:
-            pytest.skip(
-                "wheel build tooling unavailable "
-                f"(rc={proc.returncode}): "
-                f"{proc.stderr.decode()[-300:]}"
-            )
-        wheels = list(tmp_path.glob("*.whl"))
-        assert len(wheels) == 1
+    def test_wheel_ships_web_files(self, built_wheel):
         import zipfile
 
-        names = set(zipfile.ZipFile(wheels[0]).namelist())
+        wheel, venv = built_wheel
+        names = set(zipfile.ZipFile(wheel).namelist())
         for leaf in self.EXPECTED_WEB:
             assert f"housesitter/web/{leaf}" in names
         shipped_web = {n for n in names if n.startswith("housesitter/web/")}
         assert shipped_web == {f"housesitter/web/{leaf}" for leaf in self.EXPECTED_WEB}
         # A wheel install in a fresh venv finds the files at runtime.
-        venv = tmp_path / "fresh"
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "venv", str(venv)],
-                check=True, capture_output=True, timeout=120,
-            )
-            subprocess.run(
-                [str(venv / "bin" / "pip"), "install", "--no-index",
-                 str(wheels[0])],
-                check=True, capture_output=True, timeout=180,
-            )
-            probe = subprocess.run(
-                [str(venv / "bin" / "python"), "-c",
-                 "from housesitter.core.serve import web_dir,"
-                 " load_static_files;"
-                 " print(sorted(load_static_files(web_dir())))"],
-                check=True, capture_output=True, timeout=60,
-            )
-        except (OSError, subprocess.TimeoutExpired,
-                subprocess.CalledProcessError) as exc:
-            pytest.skip(f"fresh-venv install check unavailable: {exc}")
+        probe = subprocess.run(
+            [str(venv / "bin" / "python"), "-c",
+             "from housesitter.core.serve import web_dir,"
+             " load_static_files;"
+             " print(sorted(load_static_files(web_dir())))"],
+            capture_output=True, timeout=60,
+        )
+        assert probe.returncode == 0, probe.stderr.decode()[-500:]
         found = probe.stdout.decode()
         for leaf in self.EXPECTED_WEB:
             assert f"'/{leaf}'" in found
         # The editable install under test finds them too.
         table = serve_mod.load_static_files(serve_mod.web_dir())
         assert sorted(table) == sorted(f"/{leaf}" for leaf in self.EXPECTED_WEB)
+
+    def test_wheel_ships_module_skill_md(self, built_wheel, tmp_path):
+        import zipfile
+
+        wheel, venv = built_wheel
+        names = set(zipfile.ZipFile(wheel).namelist())
+        # Every module directory that carries a SKILL.md must ship it:
+        # otherwise `housesitter describe` warns "SKILL.md ... is missing"
+        # and Muse never gets the module guide.
+        expected = {
+            f"housesitter/modules/{d.name}/SKILL.md"
+            for d in (ROOT / "src" / "housesitter" / "modules").iterdir()
+            if (d / "SKILL.md").is_file()
+        }
+        assert expected, "no module SKILL.md found in the source tree"
+        assert expected <= names, f"missing from the wheel: {sorted(expected - names)}"
+        # A wheel install in a fresh venv describes the skill, not a
+        # "missing" warning. A failing describe fails the test.
+        home = tmp_path / "fresh-home"
+        home.mkdir()
+        probe = subprocess.run(
+            [str(venv / "bin" / "housesitter"), "describe"],
+            capture_output=True, timeout=60,
+            env={"HOME": str(home), "PATH": os.environ["PATH"]},
+        )
+        assert probe.returncode == 0, probe.stderr.decode()[-500:]
+        envelope = json.loads(probe.stdout.decode())
+        warnings = envelope.get("warnings", [])
+        assert not any("SKILL.md" in w for w in warnings), warnings
+        modules = {m["id"]: m for m in envelope["data"]["modules"]}
+        skill = modules["unifi_wifi"]["skill"]
+        assert skill, "installed describe has no unifi_wifi skill text"
+        source = (
+            ROOT / "src" / "housesitter" / "modules"
+            / "unifi_wifi" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert source[:200] in skill
 
 
 # -- review findings (adversarial review of #14) -----------------------------
