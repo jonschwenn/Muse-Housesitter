@@ -473,7 +473,7 @@ class TestStartup:
 
 
 class TestPackaging:
-    EXPECTED_WEB = ("index.html", "eink.html", "dashboard.js",
+    EXPECTED_WEB = ("index.html", "eink.html", "dashboard.js", "format.js",
                     "dashboard.css", "eink.css")
 
     def test_wheel_ships_web_files(self, tmp_path):

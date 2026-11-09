@@ -38,6 +38,11 @@ The Muse note gets two complete lines, or one when both a collection error and
 warning need space. Neither line-clamping nor hidden overflow conceals content.
 The dashboard retains the longer note and the full supplied recent history.
 
+`format.js` holds pure display formatters shared by both pages and Node tests.
+It rounds only the text shown on screen; saved data and API values stay intact.
+Reference labels use the original reading, with extra decimals near boundaries
+so the displayed number agrees with its label.
+
 ## States
 
 - **typical:** before/after device moves lead; 50 of 60 saved moments are shown,
