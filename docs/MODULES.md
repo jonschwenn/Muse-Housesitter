@@ -360,7 +360,7 @@ flowchart TD
 ```
 
 The handler runs in a worker thread with a self-deadline (timeout minus
-3 seconds). A module holding the GIL can delay the runner's timeout until
+3 seconds). A module holding the GIL can delay the runner's timeout response until
 it releases the GIL (ARCHITECTURE §4). Field projection also checks declared
 types. On failure the SDK discards stdout and gives Muse the last stderr line (ARCHITECTURE §2.2).
 

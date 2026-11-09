@@ -78,9 +78,10 @@ class Outcome:
     error_reason: str | None = None
     worker_alive: bool = False
     log_lines: list = field(default_factory=list)
-    # Bytes the stdio guard had discarded when the handler returned, or
-    # None on paths that never sampled it (failure/timeout). The CLI
-    # reuses this for its stderr log line so both counts agree.
+    # Bytes the stdio guard had discarded when the handler returned, set
+    # only on success; None on failure, timeout, and post-sample failure
+    # paths (fit, size, serialisation). On success the CLI reuses it for
+    # its stderr log line so both counts agree; otherwise it re-samples.
     stray_bytes: int | None = None
 
 

@@ -1246,6 +1246,49 @@ class TestNestedDiscard:
         assert status == 0, f"child failed with status {status}"
 
 
+    def test_nested_call_arms_no_watchdog(self, tmp_path):
+        # A nested production-shape cli.main() must not start a delivery
+        # watchdog: it would kill the outer process (still running the
+        # outer handler) once it fired. Refusals discard their output and
+        # continuing subcommands exit normally, so neither needs one.
+        _needs_fork()
+        from housesitter.core import cli as cli_mod
+        from housesitter.core import stdio as stdio_mod
+        from housesitter.core.registry import Registry
+
+        pid = os.fork()
+        if pid == 0:
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, 1)
+                os.dup2(devnull, 2)
+                os.close(devnull)
+                cli_mod._SEAL_WATCHDOG_S = 0.3
+                registry = Registry.from_classes([])
+                guard = stdio_mod.start()
+                try:
+                    codes = [
+                        cli_mod.main(
+                            argv,
+                            env={"HOME": str(tmp_path)},
+                            registry=registry,
+                        )
+                        for argv in (["describe"], ["list"])
+                    ]
+                    # Outlive any armed timer: it would os._exit(1).
+                    time.sleep(1.5)
+                finally:
+                    guard.restore()
+                os._exit(0 if codes == [1, 0] else 17)
+            except BaseException:
+                os._exit(16)
+        _, status = os.waitpid(pid, 0)
+        assert os.WIFEXITED(status)
+        assert os.WEXITSTATUS(status) == 0, (
+            f"child exited {os.WEXITSTATUS(status)}"
+        )
+
+
 class TestTrimMemory:
     """The trim thread bounds memory while the count stays exact."""
 
@@ -2636,6 +2679,29 @@ class TestGuardDownProductionBound:
                 pass
 
 
+    def test_guard_down_slow_install_commands_completes(self, tmp_path):
+        # Commands that continue unguarded after the guard-unavailable
+        # warning must not run their remaining work under the delivery
+        # watchdog: a slow installer (or a sudo password prompt) longer
+        # than the watchdog must still finish with exit 0.
+        start = time.monotonic()
+        out, err, code = run_helper_limited(
+            tmp_path, "guard_down_slow_install", 20
+        )
+        elapsed = time.monotonic() - start
+        assert code == 0
+        assert elapsed >= 6
+        assert err == (
+            b"housesitter: housesitter: log: output guard unavailable; "
+            b"continuing without it\n"
+        )
+        assert out.decode("utf-8") == (
+            "restart with: sudo systemctl restart musegadget\n"
+            "warning: restarting musegadget stops any command "
+            "Muse is running right now\n"
+        )
+
+
 class TestStdoutStartedIsSeparate:
     """W3: only a stdout write marks stdout output started. A failed
     stderr write must not suppress the fixed stdout envelope when
@@ -2644,6 +2710,17 @@ class TestStdoutStartedIsSeparate:
 
     def test_stray_then_failing_stderr_delivers_envelope(self, tmp_path):
         proc = run_helper(tmp_path, "stray_stderr_raise")
+        assert proc.returncode == 1
+        objects = _json_objects(proc.stdout)
+        assert len(objects) == 1
+        assert objects[0] == FIXED_ENVELOPE
+        assert proc.stderr == b""
+
+    def test_stray_success_failing_stderr_fails_closed(self, tmp_path):
+        # A succeeding handler with stray output whose stderr log line
+        # cannot be written fails closed: the fixed failure envelope and
+        # exit 1, never exit 0 with an undelivered log line.
+        proc = run_helper(tmp_path, "stray_ok_stderr_raise")
         assert proc.returncode == 1
         objects = _json_objects(proc.stdout)
         assert len(objects) == 1

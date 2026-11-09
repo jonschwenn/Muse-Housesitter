@@ -221,7 +221,7 @@ raise `not_found`; unsafe directories and failed writes raise
 3. Build a Context with the module's store and a self-deadline measured
    from invocation start: command timeout minus 3 seconds.
 4. Call the handler in a worker thread and wait until that deadline
-   (a module holding the GIL can delay the timeout; §4).
+   (a module holding the GIL can delay the timeout response; §4).
    An overrun returns `timeout`; the CLI flushes the error envelope and
    stderr line, then seals fds 1/2 to `/dev/null` before `os._exit`
    if the worker is still alive (in-process callers restore instead).
@@ -307,7 +307,7 @@ which narrows but does not close an append-mode gap: if something switches
 fd 1 or 2 to append mode after a trim, the count can be too low. The byte
 count is otherwise exact, including with concurrent writers. Jon accepted
 this limit on 2026-11-09 (D26). A module holding
-the GIL can delay both trimming and the runner's timeout; memory can grow
+the GIL can delay both trimming and the runner's timeout response; memory can grow
 and the command can overrun until the writer releases the GIL. The timeout
 limitation predates the guard. The count reads the shared offset without
 flushing module streams or taking a lock; text left in a module's own buffer at
@@ -325,20 +325,22 @@ reserved real stderr and returns 2 internally (production sealing exits 1).
 If guard startup raises `OSError` or `RuntimeError` (including missing or failed
 `memfd_create` or a failed `/proc/self/fd` reopen; there is no non-Linux
 fallback), `invoke`, `describe`, and `doctor` refuse without loading the registry or running a handler. Stdout
-gets `{"ok": false, "error": {"code": "upstream_unexpected", "message": "cannot protect command output"}}`,
+gets `{"ok":false,"error":{"code":"upstream_unexpected","message":"cannot protect command output"}}`,
 the last stderr line is
 `housesitter: housesitter: upstream_unexpected: cannot protect command output`,
 and production arms the final-delivery watchdog before these writes, then
 calls `os._exit(1)`. In-process callers return 1. Other subcommands except
 `serve` continue unguarded after
 `housesitter: housesitter: log: output guard unavailable; continuing without it`
-on stderr. In production this warning also arms the watchdog before the
-remaining unguarded work. The same rules apply to a nested `cli.main()` while a guard is
+on stderr; they arm no watchdog and exit normally, so slow work such as a
+`sudo` password prompt can finish. The same rules apply to a nested `cli.main()` while a guard is
 already active. A nested refusal uses injected streams where supplied
 and discards its envelope or error line where no stream was injected, so
 it cannot add a second JSON document to the outer command's output. Other
 nested subcommands use injected streams or the outer guard's reserved
-real streams.
+real streams. Nested calls without an explicit `seal=True` never arm the
+final-delivery watchdog: it would end the outer process while the outer
+handler is still running.
 
 In production (seal mode), right after the guard starts, the CLI sets
 SIGINT to the operating system's default action on the main thread. Like
@@ -357,9 +359,8 @@ exits 1.
 Just before the first CLI output write to stdout or stderr, after sudo,
 file, network, and handler work, production starts a five-second
 final-delivery watchdog (`_SEAL_WATCHDOG_S`). The unexpected-failure path
-arms it too, as does a nested refusal with an active outer guard and no
-injected streams. Timeout delivery uses the same timer; production
-guard-down writes arm it as described above. If the process is still alive
+arms it too. Timeout delivery uses the same timer; a production guard-down
+refusal arms it as described above. If the process is still alive
 when it fires, it calls `os._exit(1)`, bounding delivery and sealing when a
 stdout or stderr reader stops reading. A live reader too slow to finish
 within five seconds is also cut off with exit 1; this is an accepted limit

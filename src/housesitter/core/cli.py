@@ -602,11 +602,12 @@ def _guard_unavailable(
     except a nested module-command refusal with no injected streams,
     which discards its envelope and error line instead: writing them to
     the outer real streams would put two JSON documents on Muse's
-    stdout. In production (no injected streams and no outer guard) the
-    refusal and warning writes go to the real fds, so the delivery
-    watchdog is armed immediately before them and refusals end with a
-    hard exit, as the guarded production path does: a stalled reader
-    must not hang the process there either.
+    stdout. In production (no injected streams and no outer guard) a
+    refusal writes to the real fds, so the delivery watchdog is armed
+    immediately before it and it ends with a hard exit, as the guarded
+    production path does: a stalled reader must not hang the process
+    there either. Commands that continue get no watchdog: they run
+    unguarded to a normal exit.
     """
     outer = _stdio.active()
     if outer is not None:
@@ -614,11 +615,9 @@ def _guard_unavailable(
             out = outer.stdout
         if stderr is None:
             err = outer.stderr
-    if outer is not None and stdout is None and stderr is None:
-        # Production nested shape: the outer seal-mode process has not
-        # delivered anything yet, so its watchdog is not armed. Arm one
-        # for these refusal writes to the outer real streams.
-        _arm_seal_watchdog(_exit, None)
+    # No watchdog for nested calls: a nested refusal discards its output
+    # (nothing to stall on), and a timer here would kill the outer
+    # process, which may still be running the outer handler.
     # Production guard-down shape: no injected streams and no outer
     # guard, so the writes below go to the real fds.
     production = outer is None and stdout is None and stderr is None
@@ -652,8 +651,9 @@ def _guard_unavailable(
         if production:
             _exit(1)  # type: ignore[operator]
         return 1
-    if production:
-        _arm_seal_watchdog(_exit, None)
+    # No watchdog here: the command continues unguarded and exits
+    # normally, as without the guard, and its remaining work (sudo,
+    # file writes) may legitimately take longer than the watchdog.
     try:
         err.write(  # type: ignore[attr-defined]
             "housesitter: housesitter: log: output guard unavailable; "

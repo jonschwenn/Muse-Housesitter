@@ -457,13 +457,15 @@ def _install_faults(scenario):
             return real_seal(self, *args, **kwargs)
 
         _stdio_mod.OutputGuard.seal = sigint_seal
-    elif scenario == "guard_down":
+    elif scenario in ("guard_down", "guard_down_slow_install"):
         # W2: the guard cannot start at all in production shape.
         def _boom():
             raise OSError("injected guard failure")
 
         _stdio_mod.start = _boom
-    elif scenario in ("stray_stderr_raise", "registry_stderr_raise"):
+    elif scenario in (
+        "stray_stderr_raise", "registry_stderr_raise", "stray_ok_stderr_raise"
+    ):
         # W3: the reserved real stderr fails every write, while stdout
         # stays healthy.
         real_start = _stdio_mod.start
@@ -497,7 +499,9 @@ _SCENARIOS = {
     "slow_install": _run_quiet,
     "slow_check": _run_quiet,
     "guard_down": _run_quiet,
+    "guard_down_slow_install": _run_quiet,
     "stray_stderr_raise": _run_stderr_fail,
+    "stray_ok_stderr_raise": _run_print_leak,
     "registry_stderr_raise": _run_quiet,
     "fault_dump": _run_fault_dump,
     "c_printf_big": _run_c_printf_big,
@@ -737,7 +741,10 @@ def main(argv):
     if scenario == "registry_stderr_raise":
         # Pass no registry so the CLI loads it (and fails) itself.
         registry = None
-    if scenario == "slow_install":
+    if scenario in ("slow_install", "guard_down_slow_install"):
+        # guard_down_slow_install: the same slow install with the guard
+        # unable to start (the unguarded continue path).
+        _install_faults(scenario)
         # W1: a slow installer backend; only the first file sleeps so
         # one run stays well under 20 s. Uses the injectable runner
         # seam (an interactive sudo password prompt behaves the same

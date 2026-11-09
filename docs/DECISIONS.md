@@ -524,10 +524,11 @@ handoff's "license not chosen; don't publish."
   the registry or running handlers, with `upstream_unexpected` and
   "cannot protect command output". Production arms the watchdog before
   delivery and calls `os._exit(1)`; in-process callers return 1. Other
-  subcommands except `serve` warn and continue unguarded (Jon, 2026-11-08);
-  production arms the watchdog before that warning too. Nested refusals
-  discard output unless streams are injected, avoiding a second JSON
-  document; with no injected streams they also arm the watchdog.
+  subcommands except `serve` warn and continue unguarded with no watchdog
+  (Jon, 2026-11-08). Nested refusals discard output unless streams are
+  injected, avoiding a second JSON document; nested calls without an
+  explicit `seal=True` never arm the
+  watchdog, which would end the outer process mid-handler.
   Missing or failed memfd creation or `/proc` reopen follows the same
   refusal path, without a non-Linux fallback. Keep the guard in the CLI,
   so direct runner calls still expose stray output to conformance tests.
@@ -555,7 +556,7 @@ handoff's "license not chosen; don't publish."
   counted. Concurrent byte counts are exact except when append mode is
   set after a trim; clearing `O_APPEND` narrows but cannot close that gap
   (accepted by Jon, 2026-11-09). Memfd pages can be swapped. A GIL-holding
-  writer can delay trimming and the runner timeout: memory and duration
+  writer can delay trimming and the runner timeout response: memory and duration
   can grow until it releases the GIL. Module threads and `atexit` hooks
   cannot outlive the guarded process. Children inheriting fds 1/2 can keep
   writing after exit without trimming; modules cannot spawn them under
