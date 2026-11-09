@@ -159,8 +159,9 @@ gh api graphql -f query='query{repository(owner:"jonschwenn",name:"Muse-Housesit
   - generated drop-in files that pass the SDK's documented rules
   - envelope schema and size budget on every case and follow-up page
   - no captured handler output: Python stdout/stderr and fds 1/2 during
-    execution; import-time output and threads outliving the command are
-    outside capture (core protection is **Planned (#29)**)
+    execution; import-time output, threads outliving the command, and
+    buffered output after return are outside harness capture. The CLI
+    guard discards these in production except for `serve` (ARCHITECTURE §4)
   - no exact planted-secret substrings in scanned output, saves, or records
     reaching the `housesitter` logger (including default `ctx.log`);
     other loggers, `propagate=False`, and handlers writing elsewhere are
