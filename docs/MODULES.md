@@ -359,9 +359,10 @@ flowchart TD
     LINE --> M
 ```
 
-The handler runs in a worker thread bounded by the self-deadline (timeout
-minus 3 seconds). Field projection also checks declared types. On failure
-the SDK discards stdout and gives Muse the last stderr line (ARCHITECTURE §2.2).
+The handler runs in a worker thread with a self-deadline (timeout minus
+3 seconds). A module holding the GIL can delay the runner's timeout response until
+it releases the GIL (ARCHITECTURE §4). Field projection also checks declared
+types. On failure the SDK discards stdout and gives Muse the last stderr line (ARCHITECTURE §2.2).
 
 ## 3. Rules a module must follow
 
@@ -464,8 +465,11 @@ declaration; the separate checks below still apply.
 Each case gets its own temporary HOME, config, and secrets directory; a
 snapshot and its paging follow-ups share one. `os.environ` is restored
 after each synchronous run; threads that outlive the command are outside
-output capture, save recording, and environment restoration guarantees.
-Output when a module is first imported is also outside capture.
+harness output capture, save recording, and environment restoration
+guarantees.
+Output when a module is first imported is also outside harness capture.
+The CLI guard discards import-time and late-thread output in production
+except for `serve` (ARCHITECTURE §4); it does not extend save or environment guarantees.
 Inline route bodies are parsed as JSON for planted-secret
 and string-leaf harvesting, or treated literally if parsing fails; route
 header values are harvested too.
@@ -496,8 +500,11 @@ A module is not mergeable until it passes:
   `os.write(1/2, …)`, and writes through `sys.__stdout__`/`sys.__stderr__` or stream
   references saved earlier when they reach those descriptors during the
   run. Buffered output that reaches them only after return is outside
-  capture, as are import-time output and threads that outlive the command.
-  Core protection is **Planned (#29)**.
+  harness capture, as are import-time output and threads that outlive the
+  command. The production CLI guard (except for `serve`) discards these too
+  (ARCHITECTURE §4).
+  The harness calls `run_command` directly without that guard, so it still
+  detects stray output rather than hiding it.
   A module declaring a list (`x[]`) or an opaque `array` field in `data`
   needs at least one large and one hostile case that truncates; a hostile
   case for a command that never pages may expect `ok`.
