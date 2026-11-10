@@ -1,0 +1,289 @@
+{
+ "version": 1,
+ "browser": {
+  "channel": "chrome",
+  "version": "156.0.8078.79"
+ },
+ "captures": [
+  {
+   "fixture": "edge",
+   "view": "index-phone",
+   "status": "changed",
+   "base": "edge__index-phone__base.png",
+   "head": "edge__index-phone__head.png",
+   "diff": "edge__index-phone__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "edge",
+   "view": "index-desktop",
+   "status": "changed",
+   "base": "edge__index-desktop__base.png",
+   "head": "edge__index-desktop__head.png",
+   "diff": "edge__index-desktop__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "edge",
+   "view": "index-desktop-dark",
+   "status": "changed",
+   "base": "edge__index-desktop-dark__base.png",
+   "head": "edge__index-desktop-dark__head.png",
+   "diff": "edge__index-desktop-dark__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "edge",
+   "view": "eink",
+   "status": "changed",
+   "base": "edge__eink__base.png",
+   "head": "edge__eink__head.png",
+   "diff": "edge__eink__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "empty",
+   "view": "index-phone",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "empty",
+   "view": "index-desktop",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "empty",
+   "view": "index-desktop-dark",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "empty",
+   "view": "eink",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "error",
+   "view": "index-phone",
+   "status": "changed",
+   "base": "error__index-phone__base.png",
+   "head": "error__index-phone__head.png",
+   "diff": "error__index-phone__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "error",
+   "view": "index-desktop",
+   "status": "changed",
+   "base": "error__index-desktop__base.png",
+   "head": "error__index-desktop__head.png",
+   "diff": "error__index-desktop__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "error",
+   "view": "index-desktop-dark",
+   "status": "changed",
+   "base": "error__index-desktop-dark__base.png",
+   "head": "error__index-desktop-dark__head.png",
+   "diff": "error__index-desktop-dark__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "error",
+   "view": "eink",
+   "status": "changed",
+   "base": "error__eink__base.png",
+   "head": "error__eink__head.png",
+   "diff": "error__eink__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "failed",
+   "view": "index-phone",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "failed",
+   "view": "index-desktop",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "failed",
+   "view": "index-desktop-dark",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "failed",
+   "view": "eink",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "hostile",
+   "view": "index-phone",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "hostile",
+   "view": "index-desktop",
+   "status": "changed",
+   "base": "hostile__index-desktop__base.png",
+   "head": "hostile__index-desktop__head.png",
+   "diff": "hostile__index-desktop__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "hostile",
+   "view": "index-desktop-dark",
+   "status": "changed",
+   "base": "hostile__index-desktop-dark__base.png",
+   "head": "hostile__index-desktop-dark__head.png",
+   "diff": "hostile__index-desktop-dark__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "hostile",
+   "view": "eink",
+   "status": "changed",
+   "base": "hostile__eink__base.png",
+   "head": "hostile__eink__head.png",
+   "diff": "hostile__eink__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "large",
+   "view": "index-phone",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "large",
+   "view": "index-desktop",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "large",
+   "view": "index-desktop-dark",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "large",
+   "view": "eink",
+   "status": "unchanged",
+   "base": null,
+   "head": null,
+   "diff": null,
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "typical",
+   "view": "index-phone",
+   "status": "changed",
+   "base": "typical__index-phone__base.png",
+   "head": "typical__index-phone__head.png",
+   "diff": "typical__index-phone__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "typical",
+   "view": "index-desktop",
+   "status": "changed",
+   "base": "typical__index-desktop__base.png",
+   "head": "typical__index-desktop__head.png",
+   "diff": "typical__index-desktop__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "typical",
+   "view": "index-desktop-dark",
+   "status": "changed",
+   "base": "typical__index-desktop-dark__base.png",
+   "head": "typical__index-desktop-dark__head.png",
+   "diff": "typical__index-desktop-dark__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  },
+  {
+   "fixture": "typical",
+   "view": "eink",
+   "status": "changed",
+   "base": "typical__eink__base.png",
+   "head": "typical__eink__head.png",
+   "diff": "typical__eink__diff.png",
+   "diff_error": null,
+   "head_problems": []
+  }
+ ]
+}
