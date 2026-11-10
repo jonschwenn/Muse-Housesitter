@@ -18,17 +18,23 @@ MHz, utilization and reference label, controller client count, retries, power,
 self receive/transmit airtime, and satisfaction. AP metadata and all associated
 clients appear directly below. Client rows show signal in dBm with its reference
 label, both negotiated rates in Mbps, cumulative retries with its reference
-label, band, channel, SSID, and identity. Clients with no AP appear in their own
-“AP unknown” group. All 600 large-fixture clients are visible in these groups.
+label, band, channel, SSID, and identity. WiFi clients whose AP is unknown appear
+in one collapsed, keyboard-accessible count line that expands to the same
+compact client rows. No-AP devices have a separate collapsed count line with
+only name, vendor and IP on expansion, plus an explanation that they have no radio readings. The full count is retained
+when the supplied list is capped. Neither group appears when empty; no-AP
+devices stay outside the searchable WiFi ledger. All 600 large-fixture WiFi
+clients are available in the AP groups.
 The separate searchable, paged ledger exposes all other reported client fields
 without disclosures; it scrolls inside a keyboard-focusable region on phones.
 Controller counts and counts derived from the saved client list stay distinct.
 
 **B — e-ink.** A separate 800 × 480 sheet uses only black and white CSS colours,
 a compact status headline, all APs in two columns, and three clients ordered by
-lowest reported signal (unknowns last). A literal “+ N more devices” accounts for
-omitted clients. Unknown-AP counts share that line. Snapshot labels, newest and
-previous history timestamps, a Muse excerpt, and definitions remain visible.
+lowest reported signal (unknown readings last), excluding unknown-AP clients.
+A literal “+ N more devices” accounts for omitted clients. Unknown-AP and no-AP
+counts share that line. Snapshot labels, newest and previous history timestamps,
+a Muse excerpt, and definitions remain visible.
 There are no hover dependencies, animations, grey colours, or font-smoothing
 tricks. Browser font rasterization is left to the renderer.
 

@@ -88,6 +88,7 @@
         "ap_count": 3,
         "ap_online_count": 3,
         "client_count": 14,
+        "no_ap_client_count": 2,
         "clients_by_band": [
           {
             "band": "2.4GHz",
@@ -621,6 +622,26 @@
           "idle_s": 4,
           "guest": false
         }
+      ],
+      "no_ap_clients": [
+        {
+          "id": "00:00:5e:00:53:9e",
+          "ip": "192.0.2.32",
+          "name": "Bridged Subwoofer",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "main-example",
+          "is_wired": false
+        },
+        {
+          "id": "00:00:5e:00:53:9f",
+          "ip": "192.0.2.33",
+          "name": null,
+          "vendor": "unknown",
+          "private_mac": false,
+          "ssid": null,
+          "is_wired": null
+        }
       ]
     },
     "previous": {
@@ -640,6 +661,7 @@
         "ap_count": 3,
         "ap_online_count": 3,
         "client_count": 14,
+        "no_ap_client_count": 2,
         "clients_by_band": [
           {
             "band": "2.4GHz",
@@ -1172,6 +1194,26 @@
           "connected_s": 86400,
           "idle_s": 4,
           "guest": false
+        }
+      ],
+      "no_ap_clients": [
+        {
+          "id": "00:00:5e:00:53:9e",
+          "ip": "192.0.2.32",
+          "name": "Bridged Subwoofer",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "main-example",
+          "is_wired": false
+        },
+        {
+          "id": "00:00:5e:00:53:9f",
+          "ip": "192.0.2.33",
+          "name": null,
+          "vendor": "unknown",
+          "private_mac": false,
+          "ssid": null,
+          "is_wired": null
         }
       ]
     }

@@ -1,0 +1,227 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "mac": "02:00:00:00:06:01",
+      "ip": "192.0.2.101",
+      "name": "NoAP Device 01",
+      "hostname": "noap-1",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:02",
+      "ip": "192.0.2.102",
+      "name": "NoAP Device 02",
+      "hostname": "noap-2",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:03",
+      "ip": "192.0.2.103",
+      "name": "NoAP Device 03",
+      "hostname": "noap-3",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:04",
+      "ip": "192.0.2.104",
+      "name": "NoAP Device 04",
+      "hostname": "noap-4",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:05",
+      "ip": "192.0.2.105",
+      "name": "NoAP Device 05",
+      "hostname": "noap-5",
+      "oui": "NoApVendor",
+      "essid": "home-example"
+    },
+    {
+      "mac": "02:00:00:00:06:06",
+      "ip": "192.0.2.106",
+      "name": "NoAP Device 06",
+      "hostname": "noap-6",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:07",
+      "ip": "192.0.2.107",
+      "name": "NoAP Device 07",
+      "hostname": "noap-7",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:08",
+      "ip": "192.0.2.108",
+      "name": "NoAP Device 08",
+      "hostname": "noap-8",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:09",
+      "ip": "192.0.2.109",
+      "name": "NoAP Device 09",
+      "hostname": "noap-9",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:0a",
+      "ip": "192.0.2.110",
+      "name": "NoAP Device 10",
+      "hostname": "noap-10",
+      "oui": "NoApVendor",
+      "essid": "home-example"
+    },
+    {
+      "mac": "02:00:00:00:06:0b",
+      "ip": "192.0.2.111",
+      "name": "NoAP Device 11",
+      "hostname": "noap-11",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:0c",
+      "ip": "192.0.2.112",
+      "name": "NoAP Device 12",
+      "hostname": "noap-12",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:0d",
+      "ip": "192.0.2.113",
+      "name": "NoAP Device 13",
+      "hostname": "noap-13",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:0e",
+      "ip": "192.0.2.114",
+      "name": "NoAP Device 14",
+      "hostname": "noap-14",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:0f",
+      "ip": "192.0.2.115",
+      "name": "NoAP Device 15",
+      "hostname": "noap-15",
+      "oui": "NoApVendor",
+      "essid": "home-example"
+    },
+    {
+      "mac": "02:00:00:00:06:10",
+      "ip": "192.0.2.116",
+      "name": "NoAP Device 16",
+      "hostname": "noap-16",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:11",
+      "ip": "192.0.2.117",
+      "name": "NoAP Device 17",
+      "hostname": "noap-17",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:12",
+      "ip": "192.0.2.118",
+      "name": "NoAP Device 18",
+      "hostname": "noap-18",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:13",
+      "ip": "192.0.2.119",
+      "name": "NoAP Device 19",
+      "hostname": "noap-19",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:14",
+      "ip": "192.0.2.120",
+      "name": "NoAP Device 20",
+      "hostname": "noap-20",
+      "oui": "NoApVendor",
+      "essid": "home-example"
+    },
+    {
+      "mac": "02:00:00:00:06:15",
+      "ip": "192.0.2.121",
+      "name": "NoAP Device 21",
+      "hostname": "noap-21",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:16",
+      "ip": "192.0.2.122",
+      "name": "NoAP Device 22",
+      "hostname": "noap-22",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:17",
+      "ip": "192.0.2.123",
+      "name": "NoAP Device 23",
+      "hostname": "noap-23",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:18",
+      "ip": "192.0.2.124",
+      "name": "NoAP Device 24",
+      "hostname": "noap-24",
+      "oui": "NoApVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:06:19",
+      "ip": "192.0.2.125",
+      "name": "NoAP Device 25",
+      "hostname": "noap-25",
+      "oui": "NoApVendor",
+      "essid": "home-example"
+    }
+  ]
+}

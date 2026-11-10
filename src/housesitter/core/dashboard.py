@@ -180,6 +180,7 @@ def _load_validated(
             "summary": prepared.data["summary"],
             "aps": prepared.data["aps"],
             "clients": prepared.data["clients"],
+            "no_ap_clients": prepared.data["no_ap_clients"],
         }
     except DashboardUnavailable:
         raise

@@ -85,7 +85,7 @@ browser ── GET / , /eink.html, /*.js, /*.css ──▶ housesitter serve
   | `failed` | No readable data (`status: error`, `unifi_wifi: null`); failed-attempt reporting is **Planned**. |
   | `large` | 8 APs, one of them offline (no radio stats), and 600 clients. |
   | `hostile` | Markup, script, CSS, URL, and prototype-key injection in every text field, including in `previous`. |
-  | `edge` | Every nullable field is `null` somewhere (in `previous` too), a client whose band is `unknown`, a client with no AP, an AP without radio stats, and controller counts that disagree with the client list. |
+  | `edge` | Every nullable field is `null` somewhere (in `previous` too), a client whose band is `unknown`, no-AP devices, a WiFi client whose AP is unknown, an AP without radio stats, and controller counts that disagree with the client list. |
 
 - **Data age:** show how old the data is, so old data is obvious. Compute it
   as `generated_at − collected_at`, not from the browser's clock. That stays
@@ -100,6 +100,9 @@ browser ── GET / , /eink.html, /*.js, /*.css ──▶ housesitter serve
 - **`index.html`:** works from a phone (360 px wide) to a desktop. Readable
   in light and dark mode. Usable with a keyboard. Doesn't depend on colour
   alone; for example, a weak signal needs a label or icon, not only red.
+- **No-AP devices and clients whose AP is unknown:** each group takes one
+  collapsed line with a count that can be expanded. The e-ink page shows
+  at most a short count for these groups.
 - **`eink.html`:** a fixed **800 × 480** layout. Black and white only (no
   greys, no anti-aliasing tricks), large type, no animation, and nothing
   that relies on hover. It must make sense as a still image, because it will
@@ -229,10 +232,13 @@ These always hold (tested in `tests/test_dashboard_contract.py`):
 - `recent` is strictly newest first, and `recent[0]` is `latest`.
 - `previous` is set exactly when `total ≥ 2`, and it is `recent[1]`.
 - Within a snapshot, client ids are unique.
-- Every `summary` count is derived from `aps` and `clients`, so it always
-  agrees with them.
-- A client's `ap_id` is either an AP in `aps` or `null` (UniFi couldn't
-  place it). In the `null` case, `ap_name` is `null` too.
+- Summary counts and groupings derive from `aps` and `clients`, except
+  `no_ap_client_count`: it is the full module count before the no-AP cap.
+- Every `no_ap_clients[].id` is unique within the list and never appears
+  in `clients`.
+- `summary.no_ap_client_count >= len(no_ap_clients)`.
+- A client's `ap_id` is either an AP in `aps` or `null` (its AP is not in
+  `aps`). In the `null` case, `ap_name` is `null` too.
 
 These do **not** always hold. A page must not rely on them:
 - AP and radio `client_count` are the controller's own counts, read
@@ -258,10 +264,13 @@ The `edge` fixture breaks both of these on purpose.
 
 `unifi_wifi.latest` and `unifi_wifi.previous` each have `id`,
 `collected_at`, `label`, `source`, `warnings` (list of strings, **untrusted**),
-`summary`, `aps`, and `clients`. `source`, `summary`, `aps[]`,
-`aps[].radios[]`, and `clients[]` are **exactly** the objects defined in
+`summary`, `aps`, `clients`, and `no_ap_clients`. `source`, `summary`, `aps[]`,
+`aps[].radios[]`, `clients[]`, and `no_ap_clients[]` are **exactly** the
+objects defined in
 [`docs/modules/unifi_wifi.md`](modules/unifi_wifi.md) §4, with the same
-fields, units, and meanings. The default identifier policy is `full` (D2).
+fields, units, and meanings. `summary` includes `no_ap_client_count`.
+The dashboard schema stays `housesitter.dashboard/1`: `no_ap_clients` is
+an added key. The default identifier policy is `full` (D2).
 
 The view reads only saved `unifi_wifi` snapshots, through the module's own
 `get` validation and the same output policy as `invoke`: sanitising text,

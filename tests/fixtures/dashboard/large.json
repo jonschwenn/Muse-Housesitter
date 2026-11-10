@@ -61,6 +61,7 @@
         "ap_count": 8,
         "ap_online_count": 7,
         "client_count": 600,
+        "no_ap_client_count": 0,
         "clients_by_band": [
           {
             "band": "2.4GHz",
@@ -14926,7 +14927,8 @@
           "idle_s": 4,
           "guest": false
         }
-      ]
+      ],
+      "no_ap_clients": []
     },
     "previous": null
   }

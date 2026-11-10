@@ -1,7 +1,10 @@
 # Module spec: `unifi_wifi` — UniFi WiFi radio metrics
 
-Status: implemented on branch unifi-wifi-module (0.1.0); open questions in §7 await Jon.
+Status: implemented on branch unifi-wifi-module (0.1.0); open questions in §7 await Jon. Verified on UniFi OS, Network 10.6.x (U1, issue #16); classic unverified.
 Schemas: `housesitter.unifi_wifi.snapshot/1` and `housesitter.unifi_wifi.get/1`
+
+The schemas stay at `/1`: these additions and narrowing are not breaking
+changes to `data` (ARCHITECTURE §4).
 
 ## 1. Purpose
 
@@ -56,8 +59,8 @@ Only** role, no remote/cloud access, and no SSO. The password lives in
 - **Detection (`auto`): Planned (needs a core change; pending Jon's decision).**
   The module implements a single `GET /` probe without following redirects:
   200 means `unifi_os`, 3xx means `classic`, and anything else is
-  `upstream_unexpected`. This upstream behaviour is unverified until Jon's
-  live check (U1, issue #16). The core HTTP client currently refuses the
+  `upstream_unexpected`. This upstream behaviour remains unverified
+  (U1, issue #16). The core HTTP client currently refuses the
   bare root path `/`, so `flavor: "auto"` fails with `config_invalid`
   ("set unifi_wifi.flavor to unifi_os or classic") before any request is
   sent. Set `flavor` explicitly. The module never falls back to trying both
@@ -69,7 +72,8 @@ Only** role, no remote/cloud access, and no SSO. The password lives in
 - **Classic login and logout (U1):** a login response of 400 is treated as
   bad credentials (`upstream_auth`). Classic logout uses `POST /api/logout`;
   `GET /logout` remains on the allow-list but is unused. These upstream
-  behaviours are unverified until Jon's live check (issue #16).
+  behaviours remain unverified; no classic controller was available
+  for Jon's live check (issue #16).
 - **Logout** is always attempted after a successful login, including when a
   later step fails. If the process is killed (SDK timeout), logout cannot
   run, and the session expires on the controller.
@@ -152,7 +156,7 @@ it (AGENTS rule 2). SKILL.md explains how.
   Percentages are 0–100; out-of-range upstream percentages become `null`.
   Upstream percentage fields accept only integral values; the cumulative
   retry percentage is calculated separately and is currently unrounded.
-- Unknown values are `null`.
+- Unknown values are `null`, except `band` and `vendor`, which use `"unknown"`.
 - **Band** is `"2.4GHz"`, `"5GHz"`, `"6GHz"`, or `"unknown"`, from UniFi's
   `radio`: `ng`→2.4, `na`→5, `6e`→6.
 - Fields marked **Identifier** are returned as they are by default, and
@@ -189,8 +193,9 @@ it (AGENTS rule 2). SKILL.md explains how.
 | Field | Type | Unit | Source | Meaning |
 |-------|------|------|--------|---------|
 | `aps` | list | — | `stat/device` | Access points (§4.1). |
-| `clients` | list | — | `stat/sta` | Wireless clients (§4.2). |
-| `summary` | object | — | derived from `aps` and `clients` | Counts and groupings (§4.3). |
+| `clients` | list | — | `stat/sta` | WiFi clients (§4.2). |
+| `no_ap_clients` | list | — | `stat/sta` | Up to 10 devices reported with no AP (§4.2). |
+| `summary` | object | — | derived from `aps`, `clients`, and the full no-AP count | Counts and groupings (§4.3). |
 
 ### 4.1 APs
 
@@ -222,22 +227,55 @@ Duplicate AP MACs keep the first record, with a counted warning.
 | `channel` | int\|null | — | stats `channel`, else table `channel` if numeric | Channel in use. |
 | `channel_setting` | string\|null | — | table `channel` | Configured value, e.g. `"auto"` or `"36"`. |
 | `width_mhz` | int\|null | MHz | table `ht`, parsed | Channel width. |
-| `tx_power_dbm` | int\|null | dBm | stats `tx_power` | AP transmit power. |
-| `tx_power_mode` | string\|null | — | table `tx_power_mode` | `auto`, `high`, `medium`, `low`, or `custom`. |
+| `tx_power_dbm` | int\|null | dBm | stats `tx_power` | AP transmit power; may be null. |
+| `tx_power_mode` | string\|null | — | table `tx_power_mode` | `auto`, `high`, `medium`, `low`, or `custom`; may be null. |
 | `channel_utilization_pct` | int\|null | % | stats `cu_total` | How busy the channel is, counting every network the AP can hear. |
-| `self_rx_pct` | int\|null | % | stats `cu_self_rx` | Airtime this AP spends receiving, as UniFi reports it (U1: confirm the denominator). |
-| `self_tx_pct` | int\|null | % | stats `cu_self_tx` | Airtime this AP spends transmitting, as UniFi reports it. |
+| `self_rx_pct` | int\|null | % | stats `cu_self_rx` | Percent of all airtime this AP spends receiving; part of `channel_utilization_pct`. |
+| `self_tx_pct` | int\|null | % | stats `cu_self_tx` | Percent of all airtime this AP spends transmitting; part of `channel_utilization_pct`. |
 | `client_count` | int\|null | — | stats `num_sta` | |
-| `satisfaction_pct` | int\|null | % | stats `satisfaction` | |
-| `tx_retry_pct_cumulative` | float\|null | % | stats `tx_retries / (tx_packets + tx_retries)` × 100 | Since the counters reset. `null` if both are 0. |
+| `satisfaction_pct` | int\|null | % | stats `satisfaction` | May be null. |
+| `tx_retry_pct_cumulative` | float\|null | % | stats `tx_retries / (tx_packets + tx_retries)` × 100 | Since the counters reset. May be null, including when both counters are 0. |
+
+`self_rx_pct` and `self_tx_pct` share `channel_utilization_pct`'s all-airtime
+base; their sum did not exceed it in Jon's live check. A radio's channel
+in use can differ from its configured setting, for example after the AP
+moved off a DFS channel (one it must leave when it detects radar).
+The module reports both and does not flag or interpret the difference.
 
 ### 4.2 Clients
 
 Records with `is_wired` exactly true are excluded; a missing flag is treated
-as wireless (unverified upstream assumption: U1, issue #16). Duplicate
-client MACs keep the first record, with a counted warning. A client's
-`ap_id` is an AP in `aps` or `null`; when it is `null`, `ap_name` is `null`
-too.
+as wireless (unverified upstream assumption: U1, issue #16).
+
+`data.clients[]` contains WiFi clients only. A readable dictionary with
+`is_wired` not exactly true, a valid MAC, and `ap_mac` missing, null, or a
+string that is empty or only whitespace goes into `data.no_ap_clients[]`
+instead. Collection checks unreadable records first, then silently excludes
+wired records, then rejects invalid MACs with the unreadable-client warning.
+Within each list, the first record for a MAC is kept; the existing counted
+duplicate-client warning counts the rest. If a MAC occurs in both lists,
+the WiFi record wins: the no-AP record is dropped and counted in that same
+warning, regardless of upstream order.
+
+A present, non-blank `ap_mac` that matches no AP in `aps`, including a
+non-blank value that is not a valid MAC, keeps the client in `clients[]`
+with `ap_id` and `ap_name` null. The controller says it is associated with
+an AP and reports radio data. The AP may be absent because its record was
+unreadable, a duplicate, or not `type == "uap"` (possibly a console with
+built-in WiFi). Dropping the client would hide a real WiFi client. No
+warning is emitted for this case.
+
+UniFi can report a device as wireless with no AP when it reaches the
+network through another device rather than directly through a UniFi AP.
+Examples include a speaker on its soundbar's own wireless link (such as a
+bonded subwoofer or surround speaker), a device behind a wireless bridge,
+extender, or repeater in client mode, or a computer connected by both cable
+and WiFi. Housesitter does not tell which applies and has no radio readings
+for these devices. Jon's UniFi OS live check saw such devices reported as
+wireless (`is_wired` not true).
+
+A client's `ap_id` is an AP in `aps` or `null`; when it is `null`,
+`ap_name` is `null` too.
 
 `data.clients[]`
 
@@ -246,7 +284,7 @@ too.
 | `id` | string | — | `mac` | **Identifier.** |
 | `ip` | string\|null | — | `ip` | **Identifier.** |
 | `name` | string\|null | — | `name`, else `hostname` | **Untrusted.** |
-| `vendor` | string\|null | — | `oui` | Manufacturer looked up from the MAC prefix. Helps identify the device type. **Untrusted.** |
+| `vendor` | string | — | `oui`, else `"unknown"` | Manufacturer looked up from the MAC prefix. Helps identify the device type. Never null or blank. **Untrusted.** |
 | `private_mac` | bool | — | locally administered bit of `mac` | The device uses a randomised address, so it may appear with a different id later. |
 | `ssid` | string\|null | — | `essid` | **Untrusted.** |
 | `ap_id` | string\|null | — | `ap_mac` | **Identifier.** Joins to `aps[].id`. |
@@ -261,21 +299,47 @@ too.
 | `rx_rate_mbps` | float\|null | Mbps | `rx_rate` / 1000 | Negotiated rate, client → AP. |
 | `satisfaction_pct` | int\|null | % | `satisfaction` | UniFi's score. |
 | `tx_retry_pct_cumulative` | float\|null | % | `tx_retries / (tx_packets + tx_retries)` × 100 | Since this association. `null` if both are 0. |
-| `tx_retry_pct_recent` | float\|null | % | `wifi_tx_retries_percentage` | UniFi's own retry figure, believed to cover a recent window (U1). `null` if absent. |
+| `tx_retry_pct_recent` | float\|null | % | `wifi_tx_retries_percentage` | UniFi's own retry figure; consistent with a recent window, whose length is undocumented. Absent for many clients (`null`); usually lower than the cumulative figure when both were present in Jon's live check. |
 | `connected_s` | int\|null | s | `uptime` | Time since this association. |
 | `idle_s` | int\|null | s | `idletime` | Time since last traffic. |
 | `guest` | bool\|null | — | `is_guest` | |
 
-The upstream field names above come from community API documentation
-(Art-of-WiFi UniFi-API-client) and an independent review. Their presence,
-encodings, and units **must be verified against one live controller of each
-available flavour** before the schema is frozen (U1, issue #16; Jon's live
-check). Fields that turn out to be missing stay in the schema as `null`.
+In both client lists, `vendor` uses the upstream `oui` string,
+or `"unknown"` when it is missing, null, not a string, or blank: empty,
+only whitespace, or nothing left after the core removes control and
+formatting characters. A literal upstream `"unknown"` reads the same.
+
+`data.no_ap_clients[]`
+
+| Field | Type | Unit | Source (`stat/sta`) | Meaning |
+|-------|------|------|---------------------|---------|
+| `id` | string | — | `mac` | **Identifier.** |
+| `ip` | string\|null | — | `ip` | **Identifier.** |
+| `name` | string\|null | — | `name`, else `hostname` | **Untrusted.** |
+| `vendor` | string | — | `oui`, else `"unknown"` | Manufacturer; same rule as `clients[].vendor`. Never null or blank. **Untrusted.** |
+| `private_mac` | bool | — | locally administered bit of `mac` | May appear with a different id later. |
+| `ssid` | string\|null | — | `essid` | **Untrusted.** |
+| `is_wired` | bool\|null | — | `is_wired` | Controller's flag as reported: false means wireless, null means missing. Never true, because wired records are excluded. |
+
+No radio or rate fields are included: these records have none. Sort by
+`name` (nulls last), then `id`, and list only the first 10. Records beyond
+10 are dropped: they are not returned or saved, so `get` cannot recover them
+later. The summary counts all no-AP records after de-duplication, including
+the dropped ones.
+Extra records produce the cap warning in §4.4; there is no separate warning
+for having no AP.
+
+The upstream field names, encodings, and units were checked on one UniFi
+OS console running Network 10.6.x (U1, issue #16). Units and ranges were
+plausible, and the `na`/`ng` → `n` mapping worked. Classic is not yet
+checked. Missing fields stay `null`, except the `"unknown"` values in §4.0.
 
 ### 4.3 Summary
 
 These are counts only, with no judgement. Groupings are lists, never maps
-keyed by untrusted names (ARCHITECTURE §7).
+keyed by untrusted names (ARCHITECTURE §7). On the fixture house,
+the sum of `aps[].client_count` equals `summary.client_count`.
+On a real controller these counts come separately and can differ.
 
 `data.summary`
 
@@ -283,7 +347,8 @@ keyed by untrusted names (ARCHITECTURE §7).
 |-------|------|------|--------|---------|
 | `ap_count` | int | — | derived | APs in `aps`. |
 | `ap_online_count` | int | — | derived | APs with `online` true. |
-| `client_count` | int | — | derived | Clients in `clients`. |
+| `client_count` | int | — | derived | WiFi clients in `clients`. |
+| `no_ap_client_count` | int | — | `stat/sta`, after de-duplication | Full no-AP count, including records beyond the 10 listed; never null. |
 | `clients_by_band` | list | — | derived | `[{band, count}]` for every band value, including zeros. |
 | `clients_by_ap` | list | — | derived | `[{ap_id, ap_name, count}]`. `ap_id` is an **identifier** and `ap_name` is **untrusted**. |
 | `clients_by_ssid` | list | — | derived | `[{ssid, count}]`. At most 50 non-null groups, plus a null group if present. `ssid` is **untrusted**; distinct groups can display the same name (below). |
@@ -325,15 +390,20 @@ clients; the clients list still includes every client.
 
 ### 4.4 Order, compact form, paging
 
-`get` re-validates saved records with the same rules used at collection.
+`get` re-validates saved records with the same value rules used at collection,
+with the record-retention exception below.
 An AP or client record that cannot be read or has no valid MAC `id`, an AP
 with more than 16 saved radios, or a source with an invalid `kind`, `flavor`,
 or `site` (§4.5 and §5), fails the whole command with
 `upstream_unexpected`, "That saved snapshot is damaged."
-Records are not dropped, so paging offsets do not shift. Other invalid
-values in nullable fields become `null`; an invalid band becomes `"unknown"`.
+Records are never moved or dropped, so paging offsets do not shift. A
+snapshot saved before this change may still contain a no-AP client inside
+`clients` with `ap_id` null; `get` returns it as saved. `get` applies the same
+vendor rule as collection (§4.2), so older null or blank vendors return
+`"unknown"`. Other invalid values in nullable fields become `null`; an invalid band becomes `"unknown"`.
 Whole-snapshot `get` preserves and validates the saved `clients_by_ssid`
-groups; it recomputes the rest of `summary` from the re-validated records.
+groups; it recomputes the other counts from the re-validated records, except
+for the saved `no_ap_client_count`, which is preserved as described below.
 The saved SSID summary must be a list of objects with exactly `ssid`
 (string or null) and `count` (integer, not boolean, at least 1). It may have
 at most 50 non-null entries and at most one null entry, which must be last.
@@ -349,21 +419,40 @@ and the shortfall must equal its client count. Any failure gives the same
 damaged-snapshot error. This preserves groups that display identically instead of merging
 them on read.
 
+Whole-snapshot `get` returns `no_ap_clients`, re-validated with the same
+value rules. A missing key reads as an empty list, and a missing saved
+`summary.no_ap_client_count` reads as 0, for snapshots saved before this
+change. An unreadable record, a record without a valid MAC `id`, a record
+with `is_wired` true (collection never lists one), a MAC listed twice or
+also listed in `clients`, more than
+10 records, or a count that is not an integer (booleans are not integers
+here) gives the damaged-snapshot error. The saved count must equal the
+list length unless a recognised saved no-AP cap warning is present. With
+that warning, the list must contain exactly 10 records and the count must
+equal 10 plus the warning's count; otherwise the snapshot is damaged.
+The count is preserved, never recomputed from the capped list.
+Section-only `get` (`aps` or `clients`) does not include `no_ap_clients`;
+there is no `no_ap_clients` section.
+
 Whole and section-only `get` also validate saved top-level `warnings`:
 missing means an empty list; any value other than a list of strings gives
 the damaged-snapshot error. Each string must match a known warning
 template exactly, including its singular or plural wording, to be
 repeated: unreadable AP/client records, duplicate AP/client MACs, the
-radio and SSID limits below, the exact core warning
+radio, SSID, and no-AP limits below, the exact core warning
 "TLS verification disabled by config (unifi_wifi.tls.insecure)", or
 "N more warnings omitted". Counts are decimal integers from 1 to
-`10**9`, without leading zeros. Recognised warnings are regenerated from
+`10**9`, without leading zeros; the no-AP cap warning uses the singular for 1
+and the plural for counts of 2 or more, just like duplicate-MAC warnings.
+Recognised warnings are regenerated from
 shared templates and parsed counts, never copied from saved text.
 Unrecognised strings are silently dropped. Saved warnings come first,
 followed by warnings from re-validation, with duplicates removed.
 
 Limit warnings use these exact texts (`N` and `M` are counts):
 
+- "1 more client record with no AP was not listed"
+- "N more client records with no AP were not listed"
 - "1 radio record beyond the 16-per-AP limit was left out"
 - "N radio records beyond the 16-per-AP limit were left out"
 - "1 more SSID group with 1 client was not listed in the summary"
@@ -377,20 +466,25 @@ their clients; singular `client` is used when the client count is 1.
 - `aps` are ordered by `name`, then `id`. `clients` are ordered by
   `ap_name`, then `name`, then `id`. The order is deterministic and doesn't
   rank anything. Null names sort last at each name comparison.
+- Compact form leaves `no_ap_clients` unchanged. With `identifiers: none`,
+  its `id` and `ip` are omitted, as for clients.
 - Compact form drops these client fields: `noise_dbm`, `idle_s`, `vendor`,
   `wifi_standard_raw`, `guest`, `ip`, `tx_retry_pct_recent`.
 - If the result is still over budget, `clients` is truncated and `more`
   points at `get` with `section: "clients"` and the next `offset`.
-- Whole-snapshot output keeps `summary` and `aps` in full. Section-only
-  `get` returns just that list, from `offset`; the runner pages it if needed.
-- Because `summary` and `aps` are not paged, a snapshot whose unpaged part
-  cannot fit the output limit fails before saving, with the core's
+- Whole-snapshot output keeps `summary`, `aps`, and `no_ap_clients` in full.
+  Section-only `get` returns just that list, from `offset`; the runner pages it if needed.
+- Because `summary`, `aps`, and `no_ap_clients` are not paged, a snapshot
+  whose unpaged part cannot fit the output limit fails before saving, with the core's
   `upstream_unexpected` error "the result is too large even with paging:
   the part that cannot be paged is <N> bytes; the output limit is 90112
   bytes" (ARCHITECTURE §5). Nothing is saved. Measured on invented data:
   the limit is reached above about 75 APs with short names, 3 radios, and
   5 clients each, and above about 14 APs with 64-character emoji names and
-  16 radios each. Every AP record is bounded (§4.0), so an `aps` section
+  16 radios each. These limits assume an empty no-AP list. A full list of
+  10 no-AP devices adds about 3.3 KB with 64-character plain names, and up to
+  about 24 KB when every name, vendor, and SSID is 64 emoji, so the AP
+  limits are lower in those houses. Every AP record is bounded (§4.0), so an `aps` section
   page always holds at least one AP, and the core's "one item in <section>
   is larger than the output limit" error is not expected for a snapshot
   this module saved.
@@ -448,14 +542,20 @@ snapshot. Core config, secret, and TLS checks apply to the connection.
 
 | Fixture (`tests/fixtures/unifi_wifi/`) | Purpose |
 |----------------------------------------|---------|
-| `unifi_os_*.json`, `classic_*.json` | Login responses, sysinfo, device, and sta for each flavour. The same invented house: 3 APs, 12 clients across all three bands, including a private-MAC phone and a 2.4 GHz-only device. |
-| `edge_*.json` | Missing `radio_table_stats`, a null `signal`, an unknown `radio`, a `tx_packets` of 0 (no divide-by-zero), an AP that is offline. |
+| `unifi_os_*.json`, `classic_*.json` | Login responses, sysinfo, device, and sta for each flavour. The same invented house: 3 APs, 14 WiFi clients across all three bands, including a private-MAC phone and a 2.4 GHz-only device. Plus 1 wired record (excluded) and 1 no-AP client: a bridged speaker with no `ap_mac` and `is_wired: false`, listed in `no_ap_clients`; two WiFi clients, one with empty-string `oui` and one with no `oui` (both `"unknown"`); one radio with no satisfaction, retry counters, tx power, or tx power mode (nulls); one radio whose channel in use differs from its setting. Per-AP `num_sta` values match each AP's clients, so AP counts add up to the client count. |
+| `edge_*.json` | Missing `radio_table_stats`, a null `signal`, an unknown `radio`, a `tx_packets` of 0 (no divide-by-zero), an AP that is offline. `edge_sta.json` adds no-AP records with empty-string and whitespace-only `ap_mac`, one with `is_wired` missing, and one sharing a MAC with a WiFi client (dropped as duplicate); null, non-string, and zero-width-only `oui` values (all `"unknown"`). Existing unmatched-AP clients are kept with `ap_id` null. |
 | `hostile_*.json` | Names that are 5 KB long, names with control, bidi, or zero-width characters, an injection-style name, two clients with the same name, `x_authkey` and `x_passphrase` in device records, an `X-CSRF-Token` value, and a controller error message that tries to inject text. The planted secrets must be absent from output, saved files, and logs, and the error text must be absent from stderr. |
+| `many_no_ap_sta.json` | 25 no-AP records, exercising the 10-record cap and its warning. |
 | `large_sta.json` | 600 clients, to exercise compact form and paging. |
 
 The tests check:
 
 - Field-by-field normalisation for both flavours.
+- No-AP ordering, de-duplication, cap warning, full summary count, identifier
+  policy, and unchanged compact form.
+- `get` accepts a snapshot saved without `no_ap_clients`, preserves older
+  no-AP records in `clients`, applies vendor fallback, and validates the
+  saved no-AP list, count, and cap warning together (§4.4).
 - `auto` fails before any request because the core refuses `/`; explicit
   flavours skip the probe. **Planned:** end-to-end `auto` detection tests
   (200, 3xx, other) after a core change and Jon's decision (D-auto).
@@ -473,9 +573,18 @@ The tests check:
 
 ## 7. Open items for this module
 
-- **U1.** Verify the upstream field names and units on one real UniFi OS
-  console and, if available, one classic controller. Use a tests/live run
-  by Jon, with output not committed.
+- **U1. Settled 2026-11-10 by Jon for UniFi OS, Network 10.6.x** (issue #16).
+  - Login and logout worked (§2.2); paged output worked (§4.4).
+  - Field names, encodings, units, and ranges were checked; `na`/`ng` → `n` worked (§4.2).
+  - Self RX/TX percentages use all airtime, as `cu_total` does (§4.1).
+  - Recent retry figures were often absent and usually below cumulative figures when present; window length is undocumented (§4.2).
+  - Radio satisfaction, cumulative retries, tx power, and power mode may be null (§4.1).
+  - Channel in use may differ from its setting; both are reported without interpretation (§4.1).
+- **U1-classic (still open).** Classic login/logout, including login-400
+  handling, and the `auto` probe behaviour remain unverified (§2.2); no
+  classic controller was available. Automatic detection stays **Planned**.
+  The missing-`is_wired` assumption also remains unverified (§4.2); on the
+  UniFi OS console, bridged devices were reported as wireless.
 - **U2.** Should `snapshot` also read `stat/health`, for WAN and other
   subsystem status? It's useful context, but it isn't radio metrics.
   Proposed: no, it belongs in a later `unifi_health` module.
@@ -516,3 +625,9 @@ The tests check:
 - **D4. Decided 2026-11-08 by Jon:** keep at most 50 non-null SSID groups,
   choosing by client count with SSID ties, always keep the null group, and
   warn with omitted group and client counts; keep every client (§4.3, §4.4).
+- **D5. Decided 2026-11-10 by Jon:** WiFi clients only in `clients`;
+  no-AP devices listed separately (at most 10, with the full count in the
+  summary); vendor is never null (`"unknown"`). See DECISIONS D29 (§4.2, §4.4).
+- **D6. Decided 2026-11-10 by Jon:** clients whose AP is not in `aps`
+  stay in `clients` with `ap_id` and `ap_name` null, without a warning.
+  See DECISIONS D29 (§4.2).

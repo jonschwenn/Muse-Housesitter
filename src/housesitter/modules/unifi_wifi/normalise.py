@@ -15,6 +15,7 @@ import decimal
 import ipaddress
 import math
 import re
+import unicodedata
 from typing import Any
 
 _MAC_RE = re.compile(r"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}\Z")
@@ -51,6 +52,10 @@ _SOURCE_FLAVORS = frozenset({"unifi_os", "classic"})
 #: AP record small enough that a section page always makes progress (D1).
 MAX_RADIOS_PER_AP = 16
 
+#: At most 10 no-AP devices are listed; the summary counts every no-AP
+#: device after de-duplication, including those beyond the cap (D5).
+MAX_NO_AP_CLIENTS = 10
+
 
 def _ap_unreadable_warning(count: int) -> str:
     if count == 1:
@@ -86,6 +91,12 @@ def _client_duplicate_warning(count: int) -> str:
     if count == 1:
         return "1 duplicate client MAC address was left out"
     return f"{count} duplicate client MAC addresses were left out"
+
+
+def _no_ap_cap_warning(count: int) -> str:
+    if count == 1:
+        return "1 more client record with no AP was not listed"
+    return f"{count} more client records with no AP were not listed"
 
 
 def _radio_cap_warning(count: int) -> str:
@@ -211,6 +222,14 @@ def _match_warning(text: str) -> Any:
         return found
     found = _match_counted(
         text,
+        "1 more client record with no AP was not listed",
+        _COUNT_RE + r" more client records with no AP were not listed",
+        _no_ap_cap_warning,
+    )
+    if found is not None:
+        return found
+    found = _match_counted(
+        text,
         "1 radio record beyond the "
         f"{MAX_RADIOS_PER_AP}-per-AP limit was left out",
         _COUNT_RE + r" radio records beyond the "
@@ -244,19 +263,33 @@ def _ssid_cap_counts(text: str) -> Any:
     return _parse_count(match.group(1)), _parse_count(match.group(2))
 
 
+def _no_ap_cap_counts(text: str) -> Any:
+    """The omitted count of a regenerated no-AP-cap warning, else None."""
+    if text == "1 more client record with no AP was not listed":
+        return 1
+    match = re.fullmatch(
+        _COUNT_RE + r" more client records with no AP were not listed",
+        text,
+    )
+    if match is None:
+        return None
+    return _parse_count(match.group(1))
+
+
 def restated_warnings(saved: Any) -> tuple:
     """Regenerated collection warnings from a saved file (D3).
 
-    Returns ``(warnings, ssid_omitted)``: the matched warnings
-    regenerated from their templates in saved order (de-duplicated),
-    and the ``(groups, clients)`` counts of any recognised SSID-cap
-    warnings. A missing top-level ``warnings`` key means none; any other
-    non-list-of-strings shape is a damaged file. A string is restated
-    only if it equals its regenerated template exactly; anything else is
-    dropped silently.
+    Returns ``(warnings, ssid_omitted, no_ap_omitted)``: the matched
+    warnings regenerated from their templates in saved order
+    (de-duplicated), the ``(groups, clients)`` counts of any recognised
+    SSID-cap warnings, and the omitted counts of any recognised
+    no-AP-cap warnings. A missing top-level ``warnings`` key means
+    none; any other non-list-of-strings shape is a damaged file. A
+    string is restated only if it equals its regenerated template
+    exactly; anything else is dropped silently.
     """
     if not isinstance(saved, dict) or "warnings" not in saved:
-        return [], []
+        return [], [], []
     raw = saved["warnings"]
     if not isinstance(raw, list) or any(
         not isinstance(item, str) for item in raw
@@ -264,6 +297,7 @@ def restated_warnings(saved: Any) -> tuple:
         raise ValueError(DAMAGED_SNAPSHOT)
     warnings: list[str] = []
     ssid_omitted: list[tuple] = []
+    no_ap_omitted: list[int] = []
     for text in raw:
         regenerated = _match_warning(text)
         if regenerated is None or regenerated != text:
@@ -274,8 +308,11 @@ def restated_warnings(saved: Any) -> tuple:
         omitted = _ssid_cap_counts(regenerated)
         if omitted is not None:
             ssid_omitted.append(omitted)
+        no_ap_count = _no_ap_cap_counts(regenerated)
+        if no_ap_count is not None:
+            no_ap_omitted.append(no_ap_count)
         warnings.append(regenerated)
-    return warnings, ssid_omitted
+    return warnings, ssid_omitted, no_ap_omitted
 
 #: Fixed reason for a saved snapshot that fails re-validation.
 DAMAGED_SNAPSHOT = "That saved snapshot is damaged."
@@ -579,6 +616,49 @@ def _client_name(record: Any) -> Any:
     return None
 
 
+def _has_visible_text(value: str) -> bool:
+    """True when anything survives the core's text sanitiser.
+
+    Mirrors ``core/envelope.py`` ``sanitize_text`` emptiness without
+    importing core (rule 9): whitespace runs are collapsed, characters
+    in Unicode categories ``Cc``, ``Cf``, and ``Cs`` are removed, and
+    the ends are stripped. The length cap cannot empty a non-empty
+    string, so it is not checked here.
+    """
+    cleaned = "".join(
+        char for char in value
+        if unicodedata.category(char) not in ("Cc", "Cf", "Cs")
+    )
+    return bool(cleaned.strip())
+
+
+def _vendor_value(value: Any) -> str:
+    """The upstream ``oui`` string, or ``"unknown"`` (spec §4.2).
+
+    Missing, null, non-string, or blank values read as ``"unknown"``:
+    empty, only whitespace, or nothing left after the core removes
+    control and formatting characters.
+    """
+    if not isinstance(value, str):
+        return "unknown"
+    if not _has_visible_text(value):
+        return "unknown"
+    return value
+
+
+def _is_no_ap_record(record: Any) -> bool:
+    """True when a readable, wireless record reports no AP (spec §4.2).
+
+    The ``ap_mac`` is missing, null, or a string that is empty or only
+    whitespace. Any other value — including a non-blank string that is
+    not a valid MAC — keeps the record a WiFi client.
+    """
+    ap_mac = record.get("ap_mac")
+    if ap_mac is None:
+        return True
+    return isinstance(ap_mac, str) and not ap_mac.strip()
+
+
 def _client_record(record: Any, aps_by_id: Any) -> Any:
     """One normalised client, or None when the record is excluded."""
     if not isinstance(record, dict):
@@ -616,9 +696,7 @@ def _client_record(record: Any, aps_by_id: Any) -> Any:
         "id": client_id,
         "ip": _normalise_ip(record.get("ip")),
         "name": _client_name(record),
-        "vendor": (
-            record.get("oui") if isinstance(record.get("oui"), str) else None
-        ),
+        "vendor": _vendor_value(record.get("oui")),
         "private_mac": bool(int(client_id.split(":")[0], 16) & 0x02),
         "ssid": (
             record.get("essid")
@@ -650,17 +728,49 @@ def _client_record(record: Any, aps_by_id: Any) -> Any:
     }
 
 
-def normalise_clients(stations: Any, aps: Any) -> tuple:
-    """Normalise ``stat/sta`` records to ``(clients, warnings)``.
+def _no_ap_record(record: Any, client_id: str) -> Any:
+    """One normalised no-AP device (spec §4.2): identity and context.
 
-    Wired records are excluded. Records without a valid MAC are
-    skipped (counted); duplicate MACs keep the first record (counted).
-    Clients sort by AP name, then name, then id, with nulls last.
+    No radio or rate fields: these records have none. ``is_wired`` is
+    the controller's flag as reported (false means wireless, null means
+    missing); it is never true, because wired records are excluded.
+    """
+    is_wired = record.get("is_wired")
+    if not isinstance(is_wired, bool):
+        is_wired = None
+    essid = record.get("essid")
+    return {
+        "id": client_id,
+        "ip": _normalise_ip(record.get("ip")),
+        "name": _client_name(record),
+        "vendor": _vendor_value(record.get("oui")),
+        "private_mac": bool(int(client_id.split(":")[0], 16) & 0x02),
+        "ssid": essid if isinstance(essid, str) else None,
+        "is_wired": is_wired,
+    }
+
+
+def normalise_clients(stations: Any, aps: Any) -> tuple:
+    """Normalise ``stat/sta`` records to ``(clients, no_ap, total, warns)``.
+
+    ``clients`` holds WiFi clients only; readable wireless records with
+    no AP go into ``no_ap`` instead (spec §4.2). Unreadable records are
+    checked first, wired records are silently excluded, then invalid
+    MACs are rejected with the unreadable-client warning. Within each
+    list the first record for a MAC is kept; the duplicate-client
+    warning counts the rest. A MAC in both lists keeps its WiFi record:
+    the no-AP record is dropped and counted in that same warning,
+    regardless of upstream order. ``no_ap`` sorts by name (nulls last),
+    then id, and lists at most ``MAX_NO_AP_CLIENTS`` records; ``total``
+    is the full no-AP count after de-duplication, including records
+    beyond the cap.
     """
     warnings: list[str] = []
     aps_by_id = {item["id"]: item for item in aps}
     clients: list[dict] = []
-    seen: set[str] = set()
+    no_ap: list[dict] = []
+    seen_wifi: set[str] = set()
+    no_ap_index: dict[str, int] = {}
     skipped = 0
     duplicates = 0
     records = stations if isinstance(stations, list) else []
@@ -674,10 +784,26 @@ def normalise_clients(stations: Any, aps: Any) -> tuple:
         if client_id is None:
             skipped += 1
             continue
-        if client_id in seen:
+        if _is_no_ap_record(record):
+            if client_id in seen_wifi or client_id in no_ap_index:
+                duplicates += 1
+                continue
+            no_ap_index[client_id] = len(no_ap)
+            no_ap.append(_no_ap_record(record, client_id))
+            continue
+        if client_id in no_ap_index:
+            # The WiFi record wins regardless of upstream order: drop
+            # the earlier no-AP record and count it as a duplicate.
+            dropped = no_ap_index.pop(client_id)
+            del no_ap[dropped]
+            for other, pos in no_ap_index.items():
+                if pos > dropped:
+                    no_ap_index[other] = pos - 1
+            duplicates += 1
+        elif client_id in seen_wifi:
             duplicates += 1
             continue
-        seen.add(client_id)
+        seen_wifi.add(client_id)
         clients.append(_client_record(record, aps_by_id))
     if skipped:
         warnings.append(_client_unreadable_warning(skipped))
@@ -686,7 +812,13 @@ def normalise_clients(stations: Any, aps: Any) -> tuple:
     clients.sort(key=lambda item: (
         item["ap_name"] is None, item["ap_name"] or "",
         item["name"] is None, item["name"] or "", item["id"]))
-    return clients, warnings
+    no_ap.sort(key=lambda item: (
+        item["name"] is None, item["name"] or "", item["id"]))
+    total = len(no_ap)
+    if total > MAX_NO_AP_CLIENTS:
+        warnings.append(_no_ap_cap_warning(total - MAX_NO_AP_CLIENTS))
+        no_ap = no_ap[:MAX_NO_AP_CLIENTS]
+    return clients, no_ap, total, warnings
 
 
 def compact_client(client: Any) -> Any:
@@ -698,14 +830,17 @@ def compact_client(client: Any) -> Any:
     }
 
 
-def build_summary(aps: Any, clients: Any) -> tuple:
+def build_summary(
+    aps: Any, clients: Any, no_ap_client_count: int
+) -> tuple:
     """Counts only: bands in fixed order, APs by id, SSIDs null-last.
 
     Returns ``(summary, warnings)``. At most ``MAX_SSID_GROUPS``
     non-null SSID groups are listed: the groups with the most clients
     are kept (ties by SSID ascending) and the rest are counted in one
     warning; the null group is always kept and never counts
-    toward the cap (D4).
+    toward the cap (D4). ``no_ap_client_count`` is the full no-AP
+    count after de-duplication, including records beyond the cap (D5).
     """
     band_counts = {band: 0 for band in _BANDS}
     for client in clients:
@@ -759,6 +894,7 @@ def build_summary(aps: Any, clients: Any) -> tuple:
         "ap_count": len(aps),
         "ap_online_count": sum(1 for item in aps if item["online"]),
         "client_count": len(clients),
+        "no_ap_client_count": no_ap_client_count,
         "clients_by_band": by_band,
         "clients_by_ap": by_ap,
         "clients_by_ssid": by_ssid,
@@ -947,7 +1083,7 @@ def _revalidate_client(item: Any, aps_by_id: Any) -> Any:
         "id": client_id,
         "ip": _normalise_ip(item.get("ip")),
         "name": name if isinstance(name, str) else None,
-        "vendor": vendor if isinstance(vendor, str) else None,
+        "vendor": _vendor_value(vendor),
         "private_mac": bool(int(client_id.split(":")[0], 16) & 0x02),
         "ssid": ssid if isinstance(ssid, str) else None,
         "ap_id": ap_id,
@@ -1031,6 +1167,94 @@ def revalidate_clients(clients: Any, aps: Any) -> tuple:
     if skipped:
         warnings.append(_client_unreadable_warning(skipped))
     return clean, warnings
+
+
+def _revalidate_no_ap(item: Any) -> Any:
+    """One saved no-AP device, re-checked with the collection value
+    rules, or None when it cannot be read or claims to be wired."""
+    if not isinstance(item, dict):
+        return None
+    client_id = _normalise_mac(item.get("id"))
+    if client_id is None:
+        return None
+    is_wired = item.get("is_wired")
+    if is_wired is True:
+        # Collection excludes wired records, so a saved no-AP record
+        # can never claim one (spec §4.4): the file is damaged.
+        return None
+    name = item.get("name")
+    ssid = item.get("ssid")
+    return {
+        "id": client_id,
+        "ip": _normalise_ip(item.get("ip")),
+        "name": name if isinstance(name, str) else None,
+        "vendor": _vendor_value(item.get("vendor")),
+        "private_mac": bool(int(client_id.split(":")[0], 16) & 0x02),
+        "ssid": ssid if isinstance(ssid, str) else None,
+        "is_wired": is_wired if isinstance(is_wired, bool) else None,
+    }
+
+
+def revalidate_no_ap_clients(items: Any, clients: Any = ()) -> list:
+    """Re-check saved no-AP devices, or raise ValueError when damaged.
+
+    Unlike clients, nothing is ever moved or dropped here: an
+    unreadable record, a record without a valid MAC ``id``, a wired
+    record, more than ``MAX_NO_AP_CLIENTS`` records, a MAC listed twice,
+    or a MAC that is also one of the re-validated WiFi ``clients`` fails
+    the whole ``get`` as damaged (spec §4.4). Collection never produces
+    any of these.
+    """
+    if not isinstance(items, list) or len(items) > MAX_NO_AP_CLIENTS:
+        raise ValueError(DAMAGED_SNAPSHOT)
+    wifi_ids = {client["id"] for client in clients}
+    seen: set = set()
+    clean: list[dict] = []
+    for entry in items:
+        record = _revalidate_no_ap(entry)
+        if (
+            record is None
+            or record["id"] in seen
+            or record["id"] in wifi_ids
+        ):
+            raise ValueError(DAMAGED_SNAPSHOT)
+        seen.add(record["id"])
+        clean.append(record)
+    return clean
+
+
+def validated_no_ap_count(summary: Any, listed: Any, omitted: Any) -> int:
+    """The saved ``no_ap_client_count``, or raise ValueError when damaged.
+
+    A missing key reads as 0, for snapshots saved before this change. A
+    present value must be an integer (booleans are not integers here):
+    it must equal the listed length, unless one recognised saved no-AP
+    cap warning is present — then the list must hold exactly
+    ``MAX_NO_AP_CLIENTS`` records and the count must equal that plus
+    the warning's number. More than one recognised cap warning is
+    damaged too. The count is preserved, never recomputed from the
+    capped list (spec §4.4).
+    """
+    if not isinstance(summary, dict):
+        raise ValueError(DAMAGED_SNAPSHOT)
+    if "no_ap_client_count" not in summary:
+        raw: Any = 0
+    else:
+        raw = summary["no_ap_client_count"]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(DAMAGED_SNAPSHOT)
+    left_out = list(omitted) if isinstance(omitted, list) else []
+    if len(left_out) > 1:
+        raise ValueError(DAMAGED_SNAPSHOT)
+    if left_out:
+        if (
+            len(listed) != MAX_NO_AP_CLIENTS
+            or raw != MAX_NO_AP_CLIENTS + left_out[0]
+        ):
+            raise ValueError(DAMAGED_SNAPSHOT)
+    elif raw != len(listed):
+        raise ValueError(DAMAGED_SNAPSHOT)
+    return raw
 
 
 def revalidate_source(source: Any) -> Any:
