@@ -165,6 +165,18 @@ function normalise(d) {
     : null;
   return out;
 }
+// With identifiers hidden (D24) every AP and client id is null, so a null
+// ap_id no longer means the client's AP is unknown. Module ids are never
+// null otherwise.
+function idsHidden(snap) {
+  return snap.aps.some((a) => a.id === null) || snap.clients.some((c) => c.id === null);
+}
+
+// WiFi clients whose AP is not in aps; none can be told apart when ids are hidden.
+function unknownAPClients(snap) {
+  return idsHidden(snap) ? [] : snap.clients.filter((c) => c.ap_id === null);
+}
+
 function render(d) {
   const frag = document.createDocumentFragment();
   const w = d.unifi_wifi;
@@ -412,10 +424,36 @@ function render(d) {
     for (const a of goneAPs)
       apGrid.append(el("p", `Gone AP: ${clean(named(a, "Unnamed access point"))}`));
     aps.append(apGrid);
-    const unplaced = w.latest.clients.filter((c) => c.ap_id === null);
+    const unplaced = unknownAPClients(w.latest);
     if (unplaced.length) {
-      aps.append(el("h3", "AP unknown"));
-      aps.append(apClients(unplaced));
+      const details = el("details");
+      details.append(el(
+        "summary",
+        `${F.whole(unplaced.length)} WiFi ${unplaced.length === 1 ? "device" : "devices"} on an unknown AP`,
+      ));
+      details.append(apClients(unplaced));
+      aps.append(details);
+    }
+    const noAP = w.latest.no_ap_clients || [];
+    const noAPCount = w.latest.summary.no_ap_client_count || 0;
+    if (noAPCount > 0) {
+      const details = el("details");
+      details.append(el(
+        "summary",
+        `${F.whole(noAPCount)} ${noAPCount === 1 ? "device" : "devices"} with no WiFi AP${noAPCount > noAP.length ? ` · showing ${F.whole(noAP.length)} of ${F.whole(noAPCount)}` : ""}`,
+      ));
+      details.append(el(
+        "p",
+        "The controller listed these with no access point, for example a speaker linked through a soundbar or a device behind a bridge. They have no radio readings.",
+        "aside-note",
+      ));
+      for (const c of noAP)
+        details.append(el(
+          "div",
+          `${clean(c.name || "Unnamed device")} · ${clean(c.vendor)} · ${clean(c.ip)}`,
+          "no-ap-client",
+        ));
+      aps.append(details);
     }
     frag.append(aps);
     frag.append(clientPanel(w.latest));
@@ -729,7 +767,8 @@ function renderInkPage(frag, d, w, module) {
     }
     const clients = el("section", null, "ink-clients");
     clients.append(el("h2", "Devices / lowest reported signal"));
-    const selected = [...s.clients]
+    const unplacedSet = new Set(unknownAPClients(s));
+    const selected = s.clients.filter((c) => !unplacedSet.has(c))
       .sort((a, b) => (a.signal_dbm ?? Infinity) - (b.signal_dbm ?? Infinity))
       .slice(0, 3);
     for (const c of selected) {
@@ -745,11 +784,11 @@ function renderInkPage(frag, d, w, module) {
       );
       clients.append(row);
     }
-    const unplaced = s.clients.filter((c) => c.ap_id === null).length;
+    const unplaced = unplacedSet.size;
     clients.append(
       el(
         "p",
-        `+ ${F.whole(s.clients.length - selected.length)} more devices${unplaced ? " · " + F.whole(unplaced) + " unknown AP" : ""}`,
+        `+ ${F.whole(s.clients.length - selected.length)} more devices${unplaced ? " · " + F.whole(unplaced) + " unknown AP" : ""}${s.summary.no_ap_client_count > 0 ? " · " + F.whole(s.summary.no_ap_client_count) + " no AP" : ""}`,
       ),
     );
     add(grid, aps, clients);

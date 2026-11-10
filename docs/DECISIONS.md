@@ -581,3 +581,27 @@ handoff's "license not chosen; don't publish."
   audiences.
 - **Rejected:** passwordless sudo for Muse's account (gives Muse root;
   D11 stays open); Muse handling the password (rule 6).
+
+### D29. unifi_wifi: WiFi clients only, no-AP devices listed separately, vendor never null (2026-11-10, Jon)
+- **Decision:** `clients` contains WiFi clients only. Keep devices with
+  missing, null, empty, or whitespace-only `ap_mac` separately in
+  `no_ap_clients`, ordered by name then id, capped at 10 with a count-only
+  warning. Devices beyond the cap are dropped (not returned or saved);
+  `summary.no_ap_client_count` still counts them.
+  De-duplicate by MAC; WiFi records win across lists. Vendor uses `oui`, or
+  `"unknown"` for missing, null, non-string, or blank values, including after
+  sanitising; apply this on `get` too. Never move or drop saved records.
+  Clients with a non-blank but unmatched AP stay in `clients` with `ap_id`
+  and `ap_name` null, without a warning. Dashboards show no-AP devices and
+  unplaced clients compactly: collapsed, one line with a count.
+- **Why:** the live check found bridged devices reported as wireless with
+  no AP and no radio data. Mixing them in made the client list disagree
+  with AP counts. Jon wants the data kept but not prominent. One vendor
+  fallback gives missing and blank manufacturer values the same meaning.
+- **Rejected:** dropping no-AP records (loses data Jon wants); keeping them
+  in `clients` with `ap_id` null (counts disagree and shows non-WiFi devices
+  as WiFi clients); a flag field on clients; leaving vendor null; dropping
+  clients whose AP is not in `aps` (hides real WiFi clients); paging no-AP
+  records (a cap is simpler and these lists are short); a cap of 20 (a full
+  list of hostile emoji names could use about 49 KB of the 90 KB output budget,
+  which cannot be paged).

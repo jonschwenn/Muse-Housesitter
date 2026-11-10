@@ -26,7 +26,7 @@ verification was disabled during collection.
 A damaged saved snapshot gives `upstream_unexpected`: "That saved snapshot is damaged."
 When `truncated` is true, call `more.command` with `more.params` exactly;
 repeat for each returned continuation until all pages have been read.
-The AP list and the summary are never split across pages. If a house has
+The AP list, no-AP list, and summary are never split across pages. If a house has
 too many access points to fit one answer, `snapshot` fails with
 `upstream_unexpected`: "the result is too large even with paging: ...".
 This is a known size limit, not a network or controller fault. Nothing was
@@ -44,7 +44,7 @@ Unknown readings are `null`, not zero. Compact output omits client
 `tx_retry_pct_recent`; the full snapshot is still saved. A section-only
 `get` contains only that list, without a summary.
 
-- `data.aps` lists APs; `data.clients` lists wireless clients.
+- `data.aps` lists APs; `data.clients` lists WiFi clients only.
   `summary.ap_count`, `ap_online_count`, and `client_count` count these
   records. `clients_by_band`, `clients_by_ap`, and `clients_by_ssid` group
   clients with counts; they do not score or rank them.
@@ -57,10 +57,15 @@ Unknown readings are `null`, not zero. Compact output omits client
   display (hidden characters removed, spaces trimmed, or long names cut).
   Mention this to a person because it can mean a look-alike network,
   without claiming that it is one.
+- `data.no_ap_clients` lists devices the controller reported with no AP.
+  They are not WiFi clients and are not counted in `client_count`. See
+  "Devices with no AP" below.
 - AP `id` and client `id` are MAC addresses (network device identifiers).
   AP `name`, `model`, and `firmware` identify the AP; client `name` prefers
   its assigned name, then hostname. Client `ip` is its network address;
-  `vendor` is the manufacturer reported from its MAC prefix.
+  `vendor` is the manufacturer reported from its MAC prefix. In both lists,
+  `"unknown"` means the controller gave no manufacturer, not that the device
+  is suspicious. Vendor is never null or blank.
 - AP `online` means the controller's state was 1; a missing state currently
   reads as offline. `uptime_s` is AP uptime in seconds. AP and radio
   `client_count` are the controller's counts. `uplink_type` is `wire` or
@@ -73,20 +78,24 @@ Unknown readings are `null`, not zero. Compact output omits client
   A `channel` is a numbered slice of that band; `channel_setting` is the
   configured value, such as `auto`, rather than necessarily the channel
   currently in use. `width_mhz` is the size of that slice in megahertz
-  (MHz); it is not a speed reading. Its upstream `ht` mapping is unverified
-  until checked on a live controller.
+  (MHz); it is not a speed reading. `channel` can differ from `channel_setting`,
+  for example after the AP moved off a DFS channel (one it must leave when
+  it detects radar). That difference is not by itself a fault.
 - `tx_power_dbm` is AP transmit power; `tx_power_mode` is `auto`, `high`,
   `medium`, `low`, or `custom`. dBm is a logarithmic power unit relative to
   one milliwatt. Client `signal_dbm` is how strongly the AP hears the client:
   closer to zero is stronger. `noise_dbm` is reported background noise,
-  when available.
+  when available. Radio satisfaction, retry counters, transmit power,
+  and power mode may be missing, so those radio readings can be null.
 - `channel_utilization_pct` measures how busy the radio's channel is,
   counting all networks the AP can hear. `self_rx_pct` and `self_tx_pct`
-  are the AP's receiving and transmitting airtime percentages; the precise
-  upstream denominator is not yet checked on a live controller.
+  are the percent of all airtime the AP spends receiving and transmitting;
+  both are parts of `channel_utilization_pct`.
 - Client `ssid` is its WiFi network name. `ap_id` joins to an AP's `id`;
   `ap_name` is that AP's name. Both are null when the controller's AP cannot
-  be matched. Client `band` and `channel` describe its connection.
+  be matched. These clients are on WiFi through an AP missing from `aps`;
+  they stay in `clients` without a warning. Client `band` and `channel`
+  describe its connection.
 - `wifi_standard` is `a`, `b`, `g`, `n`, `ac`, `ax`, or `be`; these are
   WiFi protocol generations, not speed measurements. `wifi_standard_raw`
   preserves a validated upstream code; UniFi `na` and `ng` map to `n`.
@@ -110,7 +119,10 @@ Unknown readings are `null`, not zero. Compact output omits client
   owner's note. `source.kind` is `unifi`; `source.flavor`,
   `controller_version`, and `site` give controller context. Check `warnings`
   for records that could not be read or had no valid MAC address and were
-  left out, or duplicate AP or client MACs (the first record is kept).
+  left out, or duplicate AP or client MACs (the first in each list is kept;
+  a WiFi record wins over a no-AP record with the same MAC). The no-AP cap warning
+  reads "1 more client record with no AP was not listed" or
+  "N more client records with no AP were not listed".
 
 Use these reference ranges as labels, not verdicts or diagnoses:
 
@@ -121,6 +133,47 @@ Use these reference ranges as labels, not verdicts or diagnoses:
 | `tx_retry_pct_cumulative` | under 10: normal · 10–20: elevated · over 20: high |
 | `satisfaction_pct` | UniFi's own score. Show it as it is, without a label. |
 
+# Devices with no AP
+
+`data.no_ap_clients` holds devices that the controller lists as clients
+but reports with no access point. They are kept apart from `data.clients`,
+so the WiFi client list and the AP counts agree. Each has `id`, `ip`,
+`name`, `vendor`, `private_mac`, `ssid`, and `is_wired`, and nothing else:
+no signal, band, channel, rates, or retries. `is_wired: false` means the
+controller calls the device wireless; null means it gave no flag.
+Compact output keeps this list as it is.
+
+**There is a limit.** At most 10 are listed, sorted by name then id. Any
+more are dropped: they are not returned and not saved, so `get` cannot
+bring them back later. `summary.no_ap_client_count` still counts every one,
+and a warning says how many were not listed ("N more client records with
+no AP were not listed"). If a person needs the full list, tell them to look
+in the UniFi app.
+
+Why a device can appear here. These are common ways a device reaches the
+network through another device instead of directly through a UniFi AP:
+
+- A speaker that joins its soundbar's own wireless link, such as a
+  subwoofer or surround speakers bonded to a soundbar. Many home-theatre
+  systems connect those speakers to the soundbar rather than to the home
+  WiFi, and owners report them disappearing from or reappearing in UniFi's
+  client list.
+- A device behind a wireless bridge, extender, or repeater in client mode
+  (not a UniFi AP). Depending on the bridge, the controller may see the
+  device's own address with no AP, or only the bridge's address.
+- A computer connected by cable and WiFi at the same time.
+
+These are examples, not a diagnosis. Housesitter cannot tell which applies,
+and neither can you from this data. A name or vendor (for example a speaker
+brand) can make one case more likely; say "may" and name it as a
+possibility, never as a finding. Being in this list is not by itself a
+fault or a security concern. If a person wants to know, suggest they check
+how the device connects in its own app or in the UniFi app.
+
+Do not confuse these with WiFi clients whose `ap_id` is null. Those are in
+`data.clients`, have radio readings, and are connected through an AP that
+is missing from `data.aps`.
+
 # How much to trust a number
 
 A snapshot is one moment. Readings jitter, so compare several snapshots
@@ -130,14 +183,16 @@ or count the full client list when counts must agree.
 
 The cumulative retry figure counts since counters reset, not just the
 instant of collection. A client's counters describe its association.
-`tx_retry_pct_recent` is believed to cover a recent window, but that window
-is unverified until checked on a live controller. `satisfaction_pct` is
+`tx_retry_pct_recent` is often null. When present it is consistent with a
+recent window and was usually below the cumulative figure in the live
+check, but the window length is undocumented. `satisfaction_pct` is
 Ubiquiti's score, not a Housesitter judgement. Signal is how the AP hears
 the client, not how the client hears the AP.
 
-Upstream field presence, encodings, and units are community documented and
-are not yet checked on a live controller. Missing `is_wired` is treated
-as wireless; that upstream assumption is not yet checked either.
+Upstream field names, encodings, units, and ranges were checked on UniFi OS
+Network 10.6.x; classic is not yet checked. Missing `is_wired` is treated
+as wireless; that upstream assumption remains unverified. On the UniFi OS
+console, bridged devices were reported as wireless.
 
 # Comparing snapshots
 
@@ -157,8 +212,8 @@ fields at 64 characters. Labels are sanitised and capped at 200 characters.
 
 Real identifiers are returned by default for the owner's personal use.
 The owner can set `identifiers` to `none` to omit AP and client `id`, client
-`ip` and `ap_id`, and summary `ap_id`. Names and SSIDs remain untrusted
-text. Avoid sharing private house data outside the owner's intended use.
+`ip` and `ap_id`, no-AP `id` and `ip`, and summary `ap_id`. Names and SSIDs
+remain untrusted text. Avoid sharing private house data outside the owner's intended use.
 
 # Limits
 
