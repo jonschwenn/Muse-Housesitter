@@ -59,6 +59,7 @@ def _fields() -> tuple:
         f("data.summary.ap_count", "integer", nullable=False),
         f("data.summary.ap_online_count", "integer", nullable=False),
         f("data.summary.client_count", "integer", nullable=False),
+        f("data.summary.no_ap_client_count", "integer", nullable=False),
         f("data.summary.clients_by_band", "array", nullable=False),
         f("data.summary.clients_by_band[].band", "string",
           nullable=False),
@@ -105,7 +106,8 @@ def _fields() -> tuple:
           identifier=True),
         f("data.clients[].ip", "string", identifier=True),
         f("data.clients[].name", "string", untrusted=True),
-        f("data.clients[].vendor", "string", untrusted=True),
+        f("data.clients[].vendor", "string", nullable=False,
+          untrusted=True),
         f("data.clients[].private_mac", "boolean", nullable=False),
         f("data.clients[].ssid", "string", untrusted=True),
         f("data.clients[].ap_id", "string", identifier=True),
@@ -124,6 +126,16 @@ def _fields() -> tuple:
         f("data.clients[].connected_s", "integer"),
         f("data.clients[].idle_s", "integer"),
         f("data.clients[].guest", "boolean"),
+        f("data.no_ap_clients", "array", nullable=False),
+        f("data.no_ap_clients[].id", "string", nullable=False,
+          identifier=True),
+        f("data.no_ap_clients[].ip", "string", identifier=True),
+        f("data.no_ap_clients[].name", "string", untrusted=True),
+        f("data.no_ap_clients[].vendor", "string", nullable=False,
+          untrusted=True),
+        f("data.no_ap_clients[].private_mac", "boolean", nullable=False),
+        f("data.no_ap_clients[].ssid", "string", untrusted=True),
+        f("data.no_ap_clients[].is_wired", "boolean"),
         f("source.kind", "string", nullable=False),
         f("source.flavor", "string", nullable=False),
         f("source.controller_version", "string"),
@@ -250,15 +262,23 @@ class UniFiWifi(sdk.Module):
         finally:
             _logout(session, logout_path, ctx)
         aps, ap_warnings = normalise.normalise_aps(devices)
-        clients, client_warnings = normalise.normalise_clients(
-            stations, aps
+        clients, no_ap_clients, no_ap_total, client_warnings = (
+            normalise.normalise_clients(stations, aps)
         )
-        summary, summary_warnings = normalise.build_summary(aps, clients)
-        data = {"summary": summary, "aps": aps, "clients": clients}
+        summary, summary_warnings = normalise.build_summary(
+            aps, clients, no_ap_total
+        )
+        data = {
+            "summary": summary,
+            "aps": aps,
+            "clients": clients,
+            "no_ap_clients": no_ap_clients,
+        }
         compact = {
             "summary": summary,
             "aps": aps,
             "clients": [normalise.compact_client(item) for item in clients],
+            "no_ap_clients": no_ap_clients,
         }
         version = None
         if sysinfo:
@@ -297,7 +317,8 @@ class UniFiWifi(sdk.Module):
         sanitise. Paging offsets index the saved lists, so any unreadable
         or id-less record fails the whole ``get`` as damaged instead of
         being dropped (which would shift the offsets). The whole snapshot
-        recomputes its summary from the re-validated records.
+        recomputes its summary from the re-validated records, except the
+        saved SSID groups and no-AP count, which are validated and kept.
         """
         try:
             saved = ctx.store.load(params["id"])
@@ -349,7 +370,9 @@ class UniFiWifi(sdk.Module):
                 "upstream_unexpected", normalise.DAMAGED_SNAPSHOT
             )
         try:
-            restated, ssid_omitted = normalise.restated_warnings(saved)
+            restated, ssid_omitted, no_ap_omitted = (
+                normalise.restated_warnings(saved)
+            )
         except ValueError as exc:
             raise sdk.CommandError(
                 "upstream_unexpected", str(exc)
@@ -366,8 +389,22 @@ class UniFiWifi(sdk.Module):
             clean_clients, client_warnings = normalise.revalidate_clients(
                 clients, clean_aps
             )
+            try:
+                clean_no_ap = normalise.revalidate_no_ap_clients(
+                    []
+                    if "no_ap_clients" not in data
+                    else data["no_ap_clients"],
+                    clean_clients,
+                )
+                saved_no_ap_count = normalise.validated_no_ap_count(
+                    summary, clean_no_ap, no_ap_omitted
+                )
+            except ValueError as exc:
+                raise sdk.CommandError(
+                    "upstream_unexpected", str(exc)
+                ) from None
             clean_summary, _ = normalise.build_summary(
-                clean_aps, clean_clients
+                clean_aps, clean_clients, saved_no_ap_count
             )
             try:
                 clean_summary["clients_by_ssid"] = (
@@ -385,6 +422,7 @@ class UniFiWifi(sdk.Module):
                 "summary": clean_summary,
                 "aps": clean_aps,
                 "clients": clean_clients,
+                "no_ap_clients": clean_no_ap,
             }
             compact = {
                 "summary": clean_summary,
@@ -393,6 +431,7 @@ class UniFiWifi(sdk.Module):
                     normalise.compact_client(item)
                     for item in clean_clients
                 ],
+                "no_ap_clients": clean_no_ap,
             }
             return sdk.Result(
                 data=page,

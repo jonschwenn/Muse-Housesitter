@@ -178,7 +178,7 @@ LIVING_ROOM = {
     "firmware": "7.0.23",
     "online": True,
     "uptime_s": 86400,
-    "client_count": 5,
+    "client_count": 7,
     "satisfaction_pct": 95,
     "uplink_type": "wire",
     "uplink_speed_mbps": 1000,
@@ -193,21 +193,21 @@ LIVING_ROOM = {
             "channel_utilization_pct": 35,
             "self_rx_pct": 5,
             "self_tx_pct": 8,
-            "client_count": 5,
+            "client_count": 2,
             "satisfaction_pct": 90,
             "tx_retry_pct_cumulative": 500 / 10500 * 100,
         },
         {
             "band": "5GHz",
             "channel": 36,
-            "channel_setting": "36",
+            "channel_setting": "100",
             "width_mhz": 80,
             "tx_power_dbm": 23,
             "tx_power_mode": "high",
             "channel_utilization_pct": 25,
             "self_rx_pct": 4,
             "self_tx_pct": 6,
-            "client_count": 4,
+            "client_count": 3,
             "satisfaction_pct": 95,
             "tx_retry_pct_cumulative": 300 / 20300 * 100,
         },
@@ -303,6 +303,123 @@ STUDIO = {
     "guest": False,
 }
 
+OFFICE = {
+    "id": AP2,
+    "name": "Office",
+    "model": "U6-Lite",
+    "firmware": "6.5.12",
+    "online": True,
+    "uptime_s": 172800,
+    "client_count": 4,
+    "satisfaction_pct": 88,
+    "uplink_type": "wire",
+    "uplink_speed_mbps": 1000,
+    "radios": [
+        {
+            "band": "2.4GHz",
+            "channel": 11,
+            "channel_setting": "auto",
+            "width_mhz": 20,
+            "tx_power_dbm": 17,
+            "tx_power_mode": "low",
+            "channel_utilization_pct": 45,
+            "self_rx_pct": 6,
+            "self_tx_pct": 9,
+            "client_count": 2,
+            "satisfaction_pct": 85,
+            "tx_retry_pct_cumulative": 900 / 8900 * 100,
+        },
+        {
+            "band": "5GHz",
+            "channel": 149,
+            "channel_setting": "149",
+            "width_mhz": 80,
+            "tx_power_dbm": 20,
+            "tx_power_mode": "medium",
+            "channel_utilization_pct": 30,
+            "self_rx_pct": 5,
+            "self_tx_pct": 7,
+            "client_count": 2,
+            "satisfaction_pct": 92,
+            "tx_retry_pct_cumulative": 200 / 15200 * 100,
+        },
+        {
+            "band": "6GHz",
+            "channel": 69,
+            "channel_setting": "69",
+            "width_mhz": 160,
+            "tx_power_dbm": None,
+            "tx_power_mode": None,
+            "channel_utilization_pct": 8,
+            "self_rx_pct": 1,
+            "self_tx_pct": 1,
+            "client_count": 0,
+            "satisfaction_pct": None,
+            "tx_retry_pct_cumulative": None,
+        },
+    ],
+}
+
+SUBWOOFER = {
+    "id": "02:00:00:00:01:0c",
+    "ip": "192.0.2.33",
+    "name": "Bedroom Subwoofer",
+    "vendor": "Sonos",
+    "private_mac": True,
+    "ssid": "home-example",
+    "is_wired": False,
+}
+
+GARAGE_SENSOR = {
+    "id": "02:00:00:00:01:0d",
+    "ip": "192.0.2.34",
+    "name": "Garage Sensor",
+    "vendor": "unknown",
+    "private_mac": True,
+    "ssid": "iot-example",
+    "ap_id": AP3,
+    "ap_name": "Garage",
+    "band": "2.4GHz",
+    "channel": 1,
+    "wifi_standard": "n",
+    "wifi_standard_raw": "n",
+    "signal_dbm": -75,
+    "noise_dbm": -93,
+    "tx_rate_mbps": 72.2,
+    "rx_rate_mbps": 72.2,
+    "satisfaction_pct": 72,
+    "tx_retry_pct_cumulative": 150 / 1050 * 100,
+    "tx_retry_pct_recent": 14,
+    "connected_s": 20000,
+    "idle_s": 90,
+    "guest": False,
+}
+
+GARAGE_PLUG = {
+    "id": "02:00:00:00:01:0e",
+    "ip": "192.0.2.35",
+    "name": "Garage Plug",
+    "vendor": "unknown",
+    "private_mac": True,
+    "ssid": "iot-example",
+    "ap_id": AP3,
+    "ap_name": "Garage",
+    "band": "2.4GHz",
+    "channel": 1,
+    "wifi_standard": "n",
+    "wifi_standard_raw": "n",
+    "signal_dbm": -77,
+    "noise_dbm": -94,
+    "tx_rate_mbps": 65.0,
+    "rx_rate_mbps": 65.0,
+    "satisfaction_pct": 68,
+    "tx_retry_pct_cumulative": 180 / 880 * 100,
+    "tx_retry_pct_recent": 22,
+    "connected_s": 12000,
+    "idle_s": 45,
+    "guest": False,
+}
+
 
 def by_id(items):
     return {item["id"]: item for item in items}
@@ -321,20 +438,27 @@ def test_snapshot_unifi_os_exact_fields():
     }
     data = env["data"]
     assert by_id(data["aps"])[AP1] == LIVING_ROOM
+    assert by_id(data["aps"])[AP2] == OFFICE
     clients = by_id(data["clients"])
     assert clients["02:00:00:00:01:02"] == PHONE
     assert clients["00:00:5e:00:53:0a"] == THERMOSTAT
     assert clients["02:00:00:00:01:0b"] == STUDIO
+    assert clients["02:00:00:00:01:0d"] == GARAGE_SENSOR
+    assert clients["02:00:00:00:01:0e"] == GARAGE_PLUG
     # wired client and switch never appear
     assert "02:00:00:00:02:01" not in clients
     assert "02:00:00:00:00:09" not in by_id(data["aps"])
+    # the bridged speaker has no AP: listed separately, never in clients
+    assert data["no_ap_clients"] == [SUBWOOFER]
+    assert "02:00:00:00:01:0c" not in clients
     # summary
     assert data["summary"] == {
         "ap_count": 3,
         "ap_online_count": 3,
-        "client_count": 12,
+        "client_count": 14,
+        "no_ap_client_count": 1,
         "clients_by_band": [
-            {"band": "2.4GHz", "count": 5},
+            {"band": "2.4GHz", "count": 7},
             {"band": "5GHz", "count": 5},
             {"band": "6GHz", "count": 2},
             {"band": "unknown", "count": 0},
@@ -342,18 +466,26 @@ def test_snapshot_unifi_os_exact_fields():
         "clients_by_ap": [
             {"ap_id": AP1, "ap_name": "Living Room", "count": 7},
             {"ap_id": AP2, "ap_name": "Office", "count": 4},
-            {"ap_id": AP3, "ap_name": "Garage", "count": 1},
+            {"ap_id": AP3, "ap_name": "Garage", "count": 3},
         ],
         "clients_by_ssid": [
             {"ssid": "guest-example", "count": 1},
             {"ssid": "home-example", "count": 7},
-            {"ssid": "iot-example", "count": 4},
+            {"ssid": "iot-example", "count": 6},
         ],
     }
+    # per-AP controller counts add up to the WiFi client count
+    assert (
+        sum(item["client_count"] for item in data["aps"])
+        == data["summary"]["client_count"]
+        == len(data["clients"])
+    )
     # deterministic order: APs by name, clients by AP name then name
     assert [item["id"] for item in data["aps"]] == [AP3, AP1, AP2]
     assert [item["id"] for item in data["clients"]] == [
         "02:00:00:00:01:04",
+        "02:00:00:00:01:0e",
+        "02:00:00:00:01:0d",
         "00:00:5e:00:53:0e",
         "02:00:00:00:01:08",
         "02:00:00:00:01:01",
@@ -469,23 +601,86 @@ def test_edge_cases():
     assert odd["wifi_standard"] is None
     assert odd["wifi_standard_raw"] == "xx"
     assert odd["channel"] == 0
-    # ap_mac matches no AP -> null join, and it is the first record kept
+    # ap_mac matches no AP -> kept in clients with a null join, no warning
     assert odd["ip"] == "192.0.2.61"
     assert odd["ap_id"] is None
     assert odd["ap_name"] is None
     assert data["summary"]["clients_by_ap"] == []
     assert data["summary"]["clients_by_band"] == [
         {"band": "2.4GHz", "count": 0},
-        {"band": "5GHz", "count": 1},
+        {"band": "5GHz", "count": 2},
         {"band": "6GHz", "count": 0},
         {"band": "unknown", "count": 1},
     ]
     # duplicate mac: first wins; missing mac skipped
     assert clients["02:00:00:00:03:01"]["ip"] == "192.0.2.61"
+    # the WiFi record wins over the earlier no-AP record with the same
+    # MAC, regardless of upstream order: the later WiFi record is kept
+    assert clients["02:00:00:00:03:10"] == {
+        "id": "02:00:00:00:03:10",
+        "ip": "192.0.2.69",
+        "name": "Shadow Device Real",
+        "vendor": "Vendor",
+        "private_mac": True,
+        "ssid": "home-example",
+        "ap_id": None,
+        "ap_name": None,
+        "band": "5GHz",
+        "channel": 36,
+        "wifi_standard": "ac",
+        "wifi_standard_raw": "ac",
+        "signal_dbm": -72,
+        "noise_dbm": -90,
+        "tx_rate_mbps": 433.3,
+        "rx_rate_mbps": 433.3,
+        "satisfaction_pct": 80,
+        "tx_retry_pct_cumulative": 50 / 1050 * 100,
+        "tx_retry_pct_recent": 5,
+        "connected_s": 500,
+        "idle_s": 20,
+        "guest": False,
+    }
+    assert [item["id"] for item in data["clients"]] == [
+        "02:00:00:00:03:01",
+        "02:00:00:00:03:02",
+        "02:00:00:00:03:10",
+    ]
+    # no-AP devices: empty-string, whitespace-only, and missing ap_mac
+    assert data["no_ap_clients"] == [
+        {
+            "id": "02:00:00:00:03:03",
+            "ip": "192.0.2.66",
+            "name": "Edge Blank",
+            "vendor": "unknown",
+            "private_mac": True,
+            "ssid": "home-example",
+            "is_wired": False,
+        },
+        {
+            "id": "02:00:00:00:03:04",
+            "ip": "192.0.2.67",
+            "name": "Edge Spaces",
+            "vendor": "unknown",
+            "private_mac": True,
+            "ssid": "home-example",
+            "is_wired": False,
+        },
+        {
+            "id": "02:00:00:00:03:05",
+            "ip": "192.0.2.68",
+            "name": None,
+            "vendor": "unknown",
+            "private_mac": True,
+            "ssid": "home-example",
+            "is_wired": None,
+        },
+    ]
+    assert data["summary"]["client_count"] == 3
+    assert data["summary"]["no_ap_client_count"] == 3
     assert outcome.envelope["warnings"] == [
         "1 client record could not be read or had no valid MAC "
         "address and was left out",
-        "1 duplicate client MAC address was left out",
+        "2 duplicate client MAC addresses were left out",
     ]
 
 
@@ -979,7 +1174,7 @@ def test_get_revalidates_saved_fields_and_recomputes_summary():
         assert data["summary"]["ap_count"] == n_aps
         assert data["summary"]["client_count"] == n_clients
         assert data["summary"]["clients_by_band"] == [
-            {"band": "2.4GHz", "count": 4},
+            {"band": "2.4GHz", "count": 6},
             {"band": "5GHz", "count": 5},
             {"band": "6GHz", "count": 2},
             {"band": "unknown", "count": 1},
@@ -1034,6 +1229,11 @@ def test_identifiers_none_removes_ids():
         walk(data)
         assert data["clients"]
         assert all("ap_name" in item for item in data["clients"])
+        # the no-AP list is still returned, without its identifiers
+        assert data["no_ap_clients"]
+        assert all("id" not in item for item in data["no_ap_clients"])
+        assert all("ip" not in item for item in data["no_ap_clients"])
+        assert data["summary"]["no_ap_client_count"] == 1
     finally:
         home.close()
 
@@ -1378,7 +1578,7 @@ def test_missing_ssid_is_its_own_group_listed_last():
     groups = outcome.envelope["data"]["summary"]["clients_by_ssid"]
     assert groups[-1] == {"ssid": None, "count": 2}
     assert all(g["ssid"] is not None for g in groups[:-1])
-    assert sum(g["count"] for g in groups) == 12
+    assert sum(g["count"] for g in groups) == 14
 
 
 def test_logout_failure_never_replaces_the_result():
@@ -1388,7 +1588,7 @@ def test_logout_failure_never_replaces_the_result():
     routes[("POST", "/api/auth/logout")] = Canned(status=500, body=b"{}")
     outcome, info = run_case(routes)
     assert outcome.exit_code == 0
-    assert len(outcome.envelope["data"]["clients"]) == 12
+    assert len(outcome.envelope["data"]["clients"]) == 14
     assert len(logout_requests(info)) == 1
     routes[("POST", "/api/auth/logout")] = Canned(status=401, body=b"{}")
     outcome, info = run_case(routes)
@@ -1788,7 +1988,7 @@ def test_get_restates_saved_collection_warnings():
         expected = [
             "1 client record could not be read or had no valid MAC "
             "address and was left out",
-            "1 duplicate client MAC address was left out",
+            "2 duplicate client MAC addresses were left out",
         ]
         assert snap.envelope["warnings"] == expected
         full = home.run(
@@ -1854,7 +2054,7 @@ def test_get_drops_unrecognised_saved_warnings():
         assert full.envelope["warnings"] == [
             "1 client record could not be read or had no valid MAC "
             "address and was left out",
-            "1 duplicate client MAC address was left out",
+            "2 duplicate client MAC addresses were left out",
             "5 more warnings omitted",
         ]
     finally:
@@ -1907,6 +2107,9 @@ def _many_ssid_routes(count=300):
         stations.append({
             "mac": f"02:00:00:{index // 256:02x}:{index % 256:02x}:ab",
             "essid": f"{index:04d}-{'界' * 60}-example",
+            # unmatched but non-blank: stays a WiFi client with a null
+            # join, so the SSID cap still applies to the clients list
+            "ap_mac": "02:00:00:00:00:99",
         })
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200,
@@ -2026,7 +2229,10 @@ def _cap_boundary_routes(extra_names):
     names = [f"A{index:02d}-example" for index in range(49)] + extra_names
     stations = [
         {"mac": f"02:00:00:00:{index // 256:02x}:{index % 256:02x}",
-         "essid": name}
+         "essid": name,
+         # unmatched but non-blank: stays a WiFi client with a null
+         # join, so the SSID cap still applies to the clients list
+         "ap_mac": "02:00:00:00:00:99"}
         for index, name in enumerate(names)
     ]
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
@@ -2216,5 +2422,418 @@ def test_large_aps_below_the_limit_still_save_and_page_by_section():
             params = dict(more["params"]) if more is not None else None
         assert len(seen) == 10
         assert all(len(item["radios"]) == 16 for item in seen)
+    finally:
+        home.close()
+
+
+# --- D5/D6: no-AP devices listed separately (spec §4.2, §4.4) ---------------
+
+
+def _no_ap_routes():
+    prefix = "/proxy/network/api/s/default"
+    return {
+        ("POST", "/api/auth/login"): Canned(
+            status=200, body=fixture_bytes("unifi_os_login.json")),
+        ("GET", prefix + "/stat/sysinfo"): Canned(
+            status=200, body=fixture_bytes("unifi_os_sysinfo.json")),
+        ("GET", prefix + "/stat/device"): Canned(
+            status=200, body=fixture_bytes("empty_device.json")),
+        ("GET", prefix + "/stat/sta"): Canned(
+            status=200, body=fixture_bytes("many_no_ap_sta.json")),
+        ("POST", "/api/auth/logout"): Canned(status=200, body=b"{}"),
+    }
+
+
+def test_no_ap_cap_lists_10_and_counts_all():
+    # D5: 25 no-AP records list the first 10 by name, count all 25 in
+    # the summary, and warn about the 15 left out.
+    outcome, _info = run_case(_no_ap_routes())
+    assert outcome.exit_code == 0
+    data = outcome.envelope["data"]
+    assert data["clients"] == []
+    assert data["summary"]["client_count"] == 0
+    assert [item["name"] for item in data["no_ap_clients"]] == [
+        f"NoAP Device {index:02d}" for index in range(1, 11)
+    ]
+    assert data["summary"]["no_ap_client_count"] == 25
+    assert outcome.envelope["warnings"] == [
+        "15 more client records with no AP were not listed"
+    ]
+    assert data["no_ap_clients"][0] == {
+        "id": "02:00:00:00:06:01",
+        "ip": "192.0.2.101",
+        "name": "NoAP Device 01",
+        "vendor": "NoApVendor",
+        "private_mac": True,
+        "ssid": "home-example",
+        "is_wired": False,
+    }
+    # a record with a missing is_wired flag reads as null, still listed
+    assert by_id(data["no_ap_clients"])["02:00:00:00:06:05"][
+        "is_wired"] is None
+
+
+def test_no_ap_cap_singular_warning():
+    # D5: exactly one record beyond the cap uses the singular warning.
+    stations = [
+        {
+            "mac": f"02:00:00:00:07:{index:02x}",
+            "name": f"Solo Device {index:02d}",
+            "essid": "home-example",
+        }
+        for index in range(1, 12)
+    ]
+    routes = _no_ap_routes()
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200,
+        body=json.dumps(
+            {"meta": {"rc": "ok"}, "data": stations}).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    data = outcome.envelope["data"]
+    assert len(data["no_ap_clients"]) == 10
+    assert data["summary"]["no_ap_client_count"] == 11
+    assert outcome.envelope["warnings"] == [
+        "1 more client record with no AP was not listed"
+    ]
+
+
+def test_no_ap_dedup_wifi_record_first_wins():
+    # D5: a no-AP record after a WiFi record with the same MAC is
+    # dropped and counted in the duplicate-client warning.
+    dup_mac = "02:00:00:00:08:01"
+    stations = [
+        {
+            "mac": dup_mac,
+            "name": "First Wifi",
+            "essid": "home-example",
+            "ap_mac": "02:00:00:00:00:99",
+            "radio": "ng",
+        },
+        {"mac": dup_mac, "name": "Later Shadow", "essid": "home-example"},
+    ]
+    routes = _no_ap_routes()
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200,
+        body=json.dumps(
+            {"meta": {"rc": "ok"}, "data": stations}).encode("utf-8"))
+    outcome, _info = run_case(routes)
+    assert outcome.exit_code == 0
+    data = outcome.envelope["data"]
+    assert data["clients"] == [{
+        "id": dup_mac,
+        "ip": None,
+        "name": "First Wifi",
+        "vendor": "unknown",
+        "private_mac": True,
+        "ssid": "home-example",
+        "ap_id": None,
+        "ap_name": None,
+        "band": "2.4GHz",
+        "channel": None,
+        "wifi_standard": None,
+        "wifi_standard_raw": None,
+        "signal_dbm": None,
+        "noise_dbm": None,
+        "tx_rate_mbps": None,
+        "rx_rate_mbps": None,
+        "satisfaction_pct": None,
+        "tx_retry_pct_cumulative": None,
+        "tx_retry_pct_recent": None,
+        "connected_s": None,
+        "idle_s": None,
+        "guest": None,
+    }]
+    assert data["no_ap_clients"] == []
+    assert data["summary"]["no_ap_client_count"] == 0
+    assert outcome.envelope["warnings"] == [
+        "1 duplicate client MAC address was left out"
+    ]
+
+
+def test_channel_in_use_may_differ_from_setting_and_idle_radio_nulls():
+    # U1: the 5 GHz radio moved off its configured channel (stats 36,
+    # table "100"); the idle 6 GHz radio with no stats reads nulls.
+    outcome, _info = run_case(typical_routes("unifi_os"))
+    assert outcome.exit_code == 0
+    aps = by_id(outcome.envelope["data"]["aps"])
+    moved = aps[AP1]["radios"][1]
+    assert moved["channel"] == 36
+    assert moved["channel_setting"] == "100"
+    assert aps[AP2]["radios"][2] == OFFICE["radios"][2]
+
+
+def test_truncated_snapshot_keeps_full_no_ap_list():
+    # D5: the no-AP list is never paged or compacted: a truncated
+    # snapshot still returns it in full, while clients page on.
+    routes = typical_routes("unifi_os")
+    sta = json.loads(fixture_bytes("large_sta.json"))
+    sta["data"].extend([
+        {
+            "mac": f"02:00:00:00:09:{index:02x}",
+            "ip": f"192.0.2.{200 + index}",
+            "name": f"Spare Sub {index}",
+            "oui": "SpareVendor",
+            "essid": "home-example",
+            "is_wired": False,
+        }
+        for index in range(1, 4)
+    ])
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200, body=json.dumps(sta).encode("utf-8"))
+    home = SavedHome(routes)
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        assert snap.envelope["truncated"] is True
+        assert snap.envelope["more"]["params"]["section"] == "clients"
+        saved, _path = _tamper_saved(home, snap.envelope["saved"])
+        assert len(saved["data"]["no_ap_clients"]) == 3
+        assert saved["data"]["summary"]["no_ap_client_count"] == 3
+        assert snap.envelope["data"]["no_ap_clients"] == (
+            saved["data"]["no_ap_clients"])
+    finally:
+        home.close()
+
+
+def test_get_reads_snapshot_saved_before_no_ap_change():
+    # D5: a save without no_ap_clients reads as an empty list with a
+    # zero count; null and blank vendors read as "unknown"; an old
+    # no-AP device inside clients is returned as saved.
+    home = SavedHome(typical_routes("unifi_os"))
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        saved_id = snap.envelope["saved"]
+        saved, path = _tamper_saved(home, saved_id)
+        del saved["data"]["no_ap_clients"]
+        del saved["data"]["summary"]["no_ap_client_count"]
+        saved["data"]["clients"][0]["vendor"] = None
+        saved["data"]["clients"][1]["vendor"] = 42
+        saved["data"]["clients"][2]["vendor"] = "   "
+        saved["data"]["clients"][0]["ap_id"] = None
+        saved["data"]["clients"][0]["ap_name"] = None
+        path.write_text(json.dumps(saved), encoding="utf-8")
+        full = home.run("housesitter.unifi_wifi.get", {"id": saved_id})
+        assert full.exit_code == 0, full.envelope
+        data = full.envelope["data"]
+        assert data["no_ap_clients"] == []
+        assert data["summary"]["no_ap_client_count"] == 0
+        assert data["clients"][0]["vendor"] == "unknown"
+        assert data["clients"][1]["vendor"] == "unknown"
+        assert data["clients"][2]["vendor"] == "unknown"
+        assert data["clients"][0]["ap_id"] is None
+        assert data["clients"][0]["ap_name"] is None
+        assert data["summary"]["client_count"] == 14
+    finally:
+        home.close()
+
+
+def _assert_no_ap_damaged(mutate):
+    home = SavedHome(_no_ap_routes())
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        saved, path = _tamper_saved(home, snap.envelope["saved"])
+        mutate(saved)
+        path.write_text(json.dumps(saved), encoding="utf-8")
+        full = home.run(
+            "housesitter.unifi_wifi.get", {"id": snap.envelope["saved"]})
+        assert full.exit_code == 1, full.envelope
+        assert full.envelope["error"]["code"] == "upstream_unexpected"
+        assert full.envelope["error"]["message"] == (
+            "That saved snapshot is damaged.")
+    finally:
+        home.close()
+
+
+def test_get_damaged_on_unreadable_no_ap_record():
+    # Replace (not append) so the list stays at the cap and the record
+    # check itself, not the length check, rejects the file.
+    def mutate(saved):
+        saved["data"]["no_ap_clients"][3] = "nope"
+
+    _assert_no_ap_damaged(mutate)
+
+
+def test_get_damaged_on_invalid_no_ap_mac():
+    def mutate(saved):
+        saved["data"]["no_ap_clients"][3]["id"] = "not-a-mac"
+
+    _assert_no_ap_damaged(mutate)
+
+
+def test_get_damaged_on_too_many_no_ap_records():
+    def mutate(saved):
+        saved["data"]["no_ap_clients"].append(
+            dict(saved["data"]["no_ap_clients"][0]))
+
+    _assert_no_ap_damaged(mutate)
+
+
+def test_get_damaged_on_non_integer_no_ap_count():
+    for bad in ("25", 25.0, True, None):
+        def mutate(saved, bad=bad):
+            saved["data"]["summary"]["no_ap_client_count"] = bad
+
+        _assert_no_ap_damaged(mutate)
+
+
+def test_get_damaged_on_no_ap_count_mismatch():
+    def mutate(saved):
+        saved["data"]["summary"]["no_ap_client_count"] = 26
+
+    _assert_no_ap_damaged(mutate)
+
+
+def test_get_damaged_on_forged_no_ap_cap_warning():
+    # The cap warning only explains a full 10-record list whose count
+    # is 10 plus the warning's number.
+    def short_list(saved):
+        saved["data"]["no_ap_clients"] = (
+            saved["data"]["no_ap_clients"][:5])
+        saved["warnings"] = [
+            "15 more client records with no AP were not listed"]
+
+    def wrong_count(saved):
+        saved["data"]["no_ap_clients"] = (
+            saved["data"]["no_ap_clients"][:10])
+        saved["warnings"] = [
+            "15 more client records with no AP were not listed"]
+        saved["data"]["summary"]["no_ap_client_count"] = 26
+
+    _assert_no_ap_damaged(short_list)
+    _assert_no_ap_damaged(wrong_count)
+
+
+def test_get_restates_no_ap_cap_warning_and_preserves_count():
+    # D5/D3: the whole get restates the cap warning, preserves the
+    # full count (never recomputed from the capped list), and section
+    # gets carry no no_ap_clients key.
+    home = SavedHome(_no_ap_routes())
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        saved_id = snap.envelope["saved"]
+        expected_warning = "15 more client records with no AP were not listed"
+        assert snap.envelope["warnings"] == [expected_warning]
+        full = home.run("housesitter.unifi_wifi.get", {"id": saved_id})
+        assert full.exit_code == 0
+        assert full.envelope["warnings"] == [expected_warning]
+        assert len(full.envelope["data"]["no_ap_clients"]) == 10
+        assert full.envelope["data"]["summary"]["no_ap_client_count"] == 25
+        page = home.run(
+            "housesitter.unifi_wifi.get",
+            {"id": saved_id, "section": "clients", "offset": 0},
+        )
+        assert page.exit_code == 0
+        assert page.envelope["warnings"] == [expected_warning]
+        assert set(page.envelope["data"]) == {"clients"}
+        aps_page = home.run(
+            "housesitter.unifi_wifi.get",
+            {"id": saved_id, "section": "aps", "offset": 0},
+        )
+        assert aps_page.exit_code == 0
+        assert set(aps_page.envelope["data"]) == {"aps"}
+    finally:
+        home.close()
+
+
+def test_compact_form_drops_no_identifier_or_compact_fields_from_no_ap():
+    # D5: compact form leaves the no-AP list unchanged, and the
+    # conformance field list covers every no-AP key.
+    import housesitter.modules.unifi_wifi as unifi_wifi_module
+
+    fields = {item.path for item in unifi_wifi_module._fields()}
+    for path in (
+        "data.no_ap_clients",
+        "data.no_ap_clients[].id",
+        "data.no_ap_clients[].ip",
+        "data.no_ap_clients[].name",
+        "data.no_ap_clients[].vendor",
+        "data.no_ap_clients[].private_mac",
+        "data.no_ap_clients[].ssid",
+        "data.no_ap_clients[].is_wired",
+        "data.summary.no_ap_client_count",
+    ):
+        assert path in fields, path
+
+
+def test_get_damaged_on_wired_no_ap_record():
+    # Gate 2: collection never lists a wired record (is_wired true is
+    # excluded), so a saved no-AP record claiming it is damaged.
+    def mutate(saved):
+        saved["data"]["no_ap_clients"][0]["is_wired"] = True
+
+    _assert_no_ap_damaged(mutate)
+
+
+def test_get_damaged_on_two_different_no_ap_cap_warnings():
+    def mutate(saved):
+        saved["warnings"] = [
+            "15 more client records with no AP were not listed",
+            "16 more client records with no AP were not listed",
+        ]
+
+    _assert_no_ap_damaged(mutate)
+
+
+def test_non_string_ap_mac_stays_a_wifi_client_with_null_join():
+    # Spec §4.2: only a missing, null, or blank-string ap_mac makes a
+    # no-AP device; any other value is a WiFi client whose AP is unknown.
+    routes = typical_routes("unifi_os")
+    routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
+        status=200,
+        body=json.dumps({"meta": {"rc": "ok"}, "data": [
+            {"mac": "02:00:00:00:05:01", "ap_mac": 42, "radio": "na",
+             "is_wired": False},
+            {"mac": "02:00:00:00:05:02", "ap_mac": "not-a-mac",
+             "radio": "ng", "is_wired": False},
+        ]}).encode("utf-8"))
+    home = SavedHome(routes)
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0, snap.envelope
+        data = snap.envelope["data"]
+        assert data["no_ap_clients"] == []
+        assert data["summary"]["no_ap_client_count"] == 0
+        assert [c["id"] for c in data["clients"]] == [
+            "02:00:00:00:05:01", "02:00:00:00:05:02"]
+        for client in data["clients"]:
+            assert client["ap_id"] is None
+            assert client["ap_name"] is None
+            assert client["vendor"] == "unknown"
+        assert snap.envelope["warnings"] == []
+    finally:
+        home.close()
+
+
+def test_get_damaged_on_duplicate_no_ap_ids():
+    # Deep review: collection never lists one MAC twice, so a saved
+    # duplicate is damage, not data (DASHBOARD §4.4 uniqueness).
+    def mutate(saved):
+        saved["data"]["no_ap_clients"][4]["id"] = (
+            saved["data"]["no_ap_clients"][3]["id"])
+
+    _assert_no_ap_damaged(mutate)
+
+
+def test_get_damaged_when_no_ap_id_is_also_a_wifi_client():
+    # Deep review: a MAC in both lists cannot come from collection (the
+    # WiFi record wins), so the saved file is damaged.
+    home = SavedHome(typical_routes("unifi_os"))
+    try:
+        snap = home.run("housesitter.unifi_wifi.snapshot", {})
+        assert snap.exit_code == 0
+        saved, path = _tamper_saved(home, snap.envelope["saved"])
+        assert len(saved["data"]["no_ap_clients"]) == 1
+        saved["data"]["no_ap_clients"][0]["id"] = (
+            saved["data"]["clients"][0]["id"])
+        path.write_text(json.dumps(saved), encoding="utf-8")
+        full = home.run(
+            "housesitter.unifi_wifi.get", {"id": snap.envelope["saved"]})
+        assert full.exit_code == 1, full.envelope
+        assert full.envelope["error"]["message"] == (
+            "That saved snapshot is damaged.")
     finally:
         home.close()

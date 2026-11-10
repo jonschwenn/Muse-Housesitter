@@ -52,6 +52,15 @@
       "is_wired": false
     },
     {
+      "mac": "02:00:00:00:03:10",
+      "ip": "192.0.2.65",
+      "name": "Shadow Device",
+      "hostname": "shadow-1",
+      "oui": "DupVendor",
+      "essid": "home-example",
+      "is_wired": false
+    },
+    {
       "mac": "02:00:00:00:03:01",
       "ip": "192.0.2.63",
       "name": "Odd Device Copy",
@@ -74,6 +83,56 @@
       "idletime": 20,
       "is_guest": false,
       "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:03:10",
+      "ip": "192.0.2.69",
+      "name": "Shadow Device Real",
+      "hostname": "shadow-1b",
+      "oui": "Vendor",
+      "essid": "home-example",
+      "ap_mac": "02:00:00:00:00:99",
+      "radio": "na",
+      "channel": 36,
+      "radio_proto": "ac",
+      "signal": -72,
+      "noise": -90,
+      "tx_rate": 433300,
+      "rx_rate": 433300,
+      "satisfaction": 80,
+      "tx_packets": 1000,
+      "tx_retries": 50,
+      "wifi_tx_retries_percentage": 5,
+      "uptime": 500,
+      "idletime": 20,
+      "is_guest": false,
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:03:03",
+      "ip": "192.0.2.66",
+      "name": "Edge Blank",
+      "hostname": "edge-blank",
+      "oui": null,
+      "essid": "home-example",
+      "ap_mac": "",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:03:04",
+      "ip": "192.0.2.67",
+      "name": "Edge Spaces",
+      "hostname": "edge-spaces",
+      "oui": 42,
+      "essid": "home-example",
+      "ap_mac": "   ",
+      "is_wired": false
+    },
+    {
+      "mac": "02:00:00:00:03:05",
+      "ip": "192.0.2.68",
+      "oui": "\u200b\u200b",
+      "essid": "home-example"
     },
     {
       "ip": "192.0.2.64",

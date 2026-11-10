@@ -51,10 +51,10 @@ KEYS = {
     "snapshots": {"total", "recent"},
     "history": {"id", "collected_at", "label", "ap_count", "client_count", "clients_by_band"},
     "snapshot": {"id", "collected_at", "label", "source", "warnings", "summary", "aps",
-                 "clients"},
+                 "clients", "no_ap_clients"},
     "source": {"kind", "flavor", "controller_version", "site"},
-    "summary": {"ap_count", "ap_online_count", "client_count", "clients_by_band",
-                "clients_by_ap", "clients_by_ssid"},
+    "summary": {"ap_count", "ap_online_count", "client_count", "no_ap_client_count",
+                "clients_by_band", "clients_by_ap", "clients_by_ssid"},
     "band_count": {"band", "count"},
     "ap_count": {"ap_id", "ap_name", "count"},
     "ssid_count": {"ssid", "count"},
@@ -68,6 +68,7 @@ KEYS = {
                "noise_dbm", "tx_rate_mbps", "rx_rate_mbps", "satisfaction_pct",
                "tx_retry_pct_cumulative", "tx_retry_pct_recent", "connected_s", "idle_s",
                "guest"},
+    "no_ap_client": {"id", "ip", "name", "vendor", "private_mac", "ssid", "is_wired"},
 }
 STATUSES = {"ok", "error", "never"}
 BANDS = {"2.4GHz", "5GHz", "6GHz", "unknown"}
@@ -104,14 +105,19 @@ def check_snapshot(snap, realistic=True):
         # still names the AP.
         if client["ap_id"] is None and not ids_hidden(snap):
             assert client["ap_name"] is None
+    for no_ap in snap["no_ap_clients"]:
+        keys(no_ap, "no_ap_client")
+        assert isinstance(no_ap["vendor"], str) and no_ap["vendor"]
     ids = [c["id"] for c in snap["clients"]]
     if ids_hidden(snap):
         # identifiers: "none" (D24): every identifier is null, so ids can't
         # be unique and per-AP counts can't be matched by ap_id.
         assert all(c["ip"] is None and c["ap_id"] is None for c in snap["clients"])
         assert all(e["ap_id"] is None for e in snap["summary"]["clients_by_ap"])
+        assert all(c["id"] is None and c["ip"] is None for c in snap["no_ap_clients"])
         return
     assert len(ids) == len(set(ids)), "client ids must be unique within a snapshot"
+    check_no_ap_invariants(snap)
     check_summary(snap, aps)
     if realistic:
         check_controller_counts(snap, aps)
@@ -121,7 +127,21 @@ def ids_hidden(snap):
     """True when the view was built with identifiers: "none" (D24)."""
     return all(c["id"] is None for c in snap["clients"]) and all(
         a["id"] is None for a in snap["aps"]
-    ) and bool(snap["aps"] or snap["clients"])
+    ) and all(
+        c["id"] is None for c in snap["no_ap_clients"]
+    ) and bool(snap["aps"] or snap["clients"] or snap["no_ap_clients"])
+
+
+def check_no_ap_invariants(snap):
+    """DASHBOARD.md §4.4: no-AP ids are unique, never in clients, and the
+    summary count covers the whole list including beyond-cap records."""
+    no_ap_ids = [c["id"] for c in snap["no_ap_clients"]]
+    assert len(no_ap_ids) == len(set(no_ap_ids)), "no-AP ids must be unique"
+    client_ids = {c["id"] for c in snap["clients"]}
+    assert not (set(no_ap_ids) & client_ids), "no-AP ids never appear in clients"
+    count = snap["summary"]["no_ap_client_count"]
+    assert isinstance(count, int) and not isinstance(count, bool)
+    assert count >= len(no_ap_ids)
 
 
 def check_summary(snap, aps):
@@ -313,6 +333,11 @@ def test_every_documented_state_has_a_fixture():
         assert any(c["ap_id"] is None for c in snap["clients"])
         assert any(a["name"] is None for a in snap["aps"])
         assert any(r["client_count"] is None for a in snap["aps"] for r in a["radios"])
+        assert len(snap["no_ap_clients"]) == 2
+        assert snap["summary"]["no_ap_client_count"] == 2
+    typical = states["typical"]["unifi_wifi"]["latest"]
+    assert len(typical["no_ap_clients"]) == 1
+    assert typical["summary"]["no_ap_client_count"] == 1
     with pytest.raises(AssertionError):
         check_controller_counts(edge["latest"], {a["id"]: a for a in edge["latest"]["aps"]})
     offline = [a for a in states["large"]["unifi_wifi"]["latest"]["aps"] if not a["online"]]

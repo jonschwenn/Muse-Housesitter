@@ -1289,6 +1289,7 @@
         "ap_count": 3,
         "ap_online_count": 3,
         "client_count": 12,
+        "no_ap_client_count": 1,
         "clients_by_band": [
           {
             "band": "2.4GHz",
@@ -1770,6 +1771,17 @@
           "idle_s": 4,
           "guest": false
         }
+      ],
+      "no_ap_clients": [
+        {
+          "id": "00:00:5e:00:53:8d",
+          "ip": "192.0.2.15",
+          "name": "Bedroom Subwoofer",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "is_wired": false
+        }
       ]
     },
     "previous": {
@@ -1787,6 +1799,7 @@
         "ap_count": 3,
         "ap_online_count": 3,
         "client_count": 12,
+        "no_ap_client_count": 1,
         "clients_by_band": [
           {
             "band": "2.4GHz",
@@ -2267,6 +2280,17 @@
           "connected_s": 86400,
           "idle_s": 4,
           "guest": false
+        }
+      ],
+      "no_ap_clients": [
+        {
+          "id": "00:00:5e:00:53:8d",
+          "ip": "192.0.2.15",
+          "name": "Bedroom Subwoofer",
+          "vendor": "Example Audio",
+          "private_mac": false,
+          "ssid": "iot-example",
+          "is_wired": false
         }
       ]
     }
