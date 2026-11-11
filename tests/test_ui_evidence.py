@@ -658,19 +658,37 @@ def _bad_header(kind: str) -> bytes:
         shot[12:16] = b"tEXt"
         return bytes(shot)
     if kind == "ihdr-wrong-length":
-        shot[8:12] = (12).to_bytes(4, "big")
-        return bytes(shot)
+        return bytes(shot[:8]) + ui_evidence._chunk(b"IHDR", b"\x00" * 14) + bytes(shot[33:])
+    if kind == "short-ihdr-before-real-one":
+        # Tall, so the shot needs cropping: decode_png alone would raise
+        # struct.error on the 12-byte IHDR, which callers do not catch.
+        tall = rgba_png(3, 12)
+        return tall[:8] + ui_evidence._chunk(b"IHDR", b"\x00" * 12) + tall[8:]
     raise AssertionError(kind)
 
 
 @pytest.mark.parametrize(
     "kind",
-    ["not-png", "magic-only", "truncated-ihdr", "first-chunk-not-ihdr", "ihdr-wrong-length"],
+    [
+        "not-png",
+        "magic-only",
+        "truncated-ihdr",
+        "first-chunk-not-ihdr",
+        "ihdr-wrong-length",
+        "short-ihdr-before-real-one",
+    ],
 )
 def test_clip_rejects_a_missing_or_malformed_header(monkeypatch, kind):
+    monkeypatch.setattr(ui_evidence, "MAX_SHOT_HEIGHT_PX", 10)
     monkeypatch.setattr(ui_evidence, "decode_png", _no_decode)
     with pytest.raises(ValueError):
         ui_evidence.clip_to_max_height(_bad_header(kind))
+
+
+def test_clip_names_an_ihdr_of_the_wrong_length():
+    for kind in ("ihdr-wrong-length", "short-ihdr-before-real-one"):
+        with pytest.raises(ValueError, match="wrong length"):
+            ui_evidence.clip_to_max_height(_bad_header(kind))
 
 
 @pytest.mark.parametrize("kind", ["palette", "sixteen-bit", "interlaced"])

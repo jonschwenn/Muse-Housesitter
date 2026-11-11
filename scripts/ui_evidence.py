@@ -344,7 +344,8 @@ def png_size(data: bytes) -> tuple:
     compressed image data, so it picks the same IHDR (the last one before
     IEND) and rejects the same headers: no IHDR, a truncated chunk, or
     anything but 8-bit RGB/RGBA non-interlaced. Raises ValueError for all of
-    them, and for an IHDR whose length is not 13.
+    them, and for any IHDR whose length is not 13 (decode_png would raise
+    struct.error there, which callers do not catch).
     """
     if data[:8] != PNG_MAGIC:
         raise ValueError("not a PNG file")
@@ -355,14 +356,14 @@ def png_size(data: bytes) -> tuple:
         if pos + 8 + length > len(data):
             raise ValueError("truncated PNG chunk")
         if ctype == b"IHDR":
+            if length != 13:
+                raise ValueError("PNG IHDR has the wrong length")
             ihdr = data[pos + 8:pos + 8 + length]
         elif ctype == b"IEND":
             break
         pos += 12 + length
     if ihdr is None:
         raise ValueError("PNG has no IHDR")
-    if len(ihdr) != 13:
-        raise ValueError("PNG IHDR has the wrong length")
     width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
         ">IIBBBBB", ihdr
     )
