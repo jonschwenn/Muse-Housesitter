@@ -6,6 +6,11 @@ dir. ``HOUSESITTER_TEST_ROOT`` (the script's documented test-only
 override) redirects the system paths there. Nothing real is changed:
 the ``sudo`` shim only logs calls, and dry-run tests assert it logged
 none.
+
+A real (non-dry-run) install is not tested here: it needs root
+(``install -o root -g root`` fails unprivileged), and the venv plus pip
+build needs network and tens of seconds, which the default hermetic run
+and this file's time budget forbid.
 """
 
 from __future__ import annotations
@@ -435,3 +440,127 @@ def test_home_with_percent_is_refused(lab, monkeypatch, tmp_path):
     proc = run_script("install", "--run-as", USER, "--with-dashboard", "--dry-run")
     assert proc.returncode != 0
     assert "%" in proc.stderr
+
+
+@pytest.mark.parametrize("command", ["install", "upgrade", "uninstall"])
+def test_dry_run_plan_is_idempotent(lab, command):
+    # The plan is a pure function of the checkout and the temp root:
+    # a second dry run prints the same bytes and still changes nothing.
+    if command == "install":
+        argv = ("install", "--run-as", USER, "--with-dashboard", "--dry-run")
+    elif command == "upgrade":
+        make_installed_housesitter(lab["root"] / "opt" / "housesitter")
+        argv = ("upgrade", "--dry-run")
+    else:
+        seed_uninstall_target(lab)
+        argv = ("uninstall", "--dry-run")
+    first = run_script(*argv)
+    second = run_script(*argv)
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+    assert sudo_calls(lab) == ""
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("install", "--dry-run"),  # missing --run-as
+        ("install", "--run-as", USER, "--purge", "--dry-run"),
+        ("install", "--run-as", USER, "--yes", "--dry-run"),
+        ("install", "--run-as", USER, "--dry-run", "--bogus"),
+        ("upgrade", "--run-as", USER, "--dry-run"),
+        ("upgrade", "--with-dashboard", "--dry-run"),
+        ("upgrade", "--purge", "--dry-run"),
+        ("upgrade", "--yes", "--dry-run"),
+        ("uninstall", "--with-dashboard", "--dry-run"),
+        ("install", "--run-as"),  # missing value
+    ],
+)
+def test_bad_option_sets_are_refused(lab, argv):
+    proc = run_script(*argv)
+    assert proc.returncode != 0
+    assert proc.stderr.startswith("install.sh: ")
+    assert "would run:" not in proc.stdout
+    assert sudo_calls(lab) == ""
+
+
+def test_unknown_command_prints_usage(lab):
+    proc = run_script("frobnicate", "--dry-run")
+    assert proc.returncode != 0
+    assert "Usage:" in proc.stderr
+    assert "would run:" not in proc.stdout
+    assert sudo_calls(lab) == ""
+
+
+def test_relative_test_root_is_refused(lab, monkeypatch):
+    monkeypatch.setenv("HOUSESITTER_TEST_ROOT", "relative/path")
+    proc = run_script("install", "--run-as", USER, "--dry-run")
+    assert proc.returncode != 0
+    assert "HOUSESITTER_TEST_ROOT must be absolute" in proc.stderr
+
+
+def test_test_root_with_whitespace_is_refused(lab, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOUSESITTER_TEST_ROOT", str(tmp_path / "with space"))
+    proc = run_script("install", "--run-as", USER, "--dry-run")
+    assert proc.returncode != 0
+    assert "must not hold whitespace" in proc.stderr
+
+
+def test_install_without_dashboard_plans_no_unit(lab):
+    proc = run_script("install", "--run-as", USER, "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    assert "rendered unit" not in proc.stdout
+    assert "housesitter-serve" not in proc.stdout
+    assert "install-commands --exec" in proc.stdout
+    assert sudo_calls(lab) == ""
+
+
+def test_install_refuses_a_symlinked_prefix(lab):
+    real = lab["root"] / "real-dir"
+    real.mkdir(parents=True)
+    (lab["root"] / "opt").mkdir(parents=True)
+    (lab["root"] / "opt" / "housesitter").symlink_to(real)
+    proc = run_script("install", "--run-as", USER, "--dry-run")
+    assert proc.returncode != 0
+    assert "already exists" in proc.stderr
+    assert "would run:" not in proc.stdout
+    assert sudo_calls(lab) == ""
+
+
+def test_upgrade_dry_run_without_unit_file(lab):
+    make_installed_housesitter(lab["root"] / "opt" / "housesitter")
+    proc = run_script("upgrade", "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    assert "rendered unit" not in proc.stdout
+    assert "housesitter-serve" not in proc.stdout
+    assert "install-commands --exec" in proc.stdout
+    assert "version: housesitter 0.1.0 ->" in proc.stdout
+    assert sudo_calls(lab) == ""
+
+
+def test_uninstall_dry_run_with_nothing_installed(lab):
+    root = lab["root"]
+    proc = run_script("uninstall", "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    assert f"no unit file at {root}/etc/systemd/system/housesitter-serve.service" in out
+    assert f"no housesitter drop-ins in {root}/etc/musegadget/commands.d" in out
+    assert f"no {root}/usr/local/bin/housesitter; skipping" in out
+    assert f"{root}/opt/housesitter is not installed; skipping" in out
+    assert "would run:" not in out
+    assert sudo_calls(lab) == ""
+
+
+def test_uninstall_dry_run_leaves_a_foreign_symlink(lab):
+    root = lab["root"]
+    link_dir = root / "usr" / "local" / "bin"
+    link_dir.mkdir(parents=True)
+    link = link_dir / "housesitter"
+    link.symlink_to("/usr/bin/something-else")
+    proc = run_script("uninstall", "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    assert "does not point into" in proc.stdout
+    assert f"would run: sudo rm -f {link}" not in proc.stdout
+    assert link.is_symlink()
+    assert os.readlink(link) == "/usr/bin/something-else"
