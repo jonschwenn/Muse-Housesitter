@@ -287,6 +287,30 @@ def test_missing_author_fails_closed():
         ci_guard.get_pr_author(lambda sub: {"user": {}})
 
 
+def test_head_repo_comes_from_the_pr_object():
+    def get(sub):
+        return {"head": {"repo": {"full_name": "fork-owner/repo"}}}
+
+    assert ci_guard.get_head_repo_full_name(get) == "fork-owner/repo"
+
+
+def test_null_head_repo_is_untrusted_not_an_error():
+    def get(sub):
+        return {"head": {"repo": None}}
+
+    assert ci_guard.get_head_repo_full_name(get) is None
+
+
+def test_missing_head_fails_closed():
+    with pytest.raises(ci_guard.ApiError):
+        ci_guard.get_head_repo_full_name(lambda sub: {"user": {"login": "octo"}})
+
+
+def test_nameless_head_repo_fails_closed():
+    with pytest.raises(ci_guard.ApiError):
+        ci_guard.get_head_repo_full_name(lambda sub: {"head": {"repo": {}}})
+
+
 def test_unknown_collaborator_counts_as_none():
     def get(subpath):
         raise ci_guard.ApiError("GET .../permission failed with HTTP 404")
@@ -305,31 +329,62 @@ def test_other_permission_errors_fail_closed():
 # Decision --------------------------------------------------------------------
 
 
+def _same_repo(**kwargs):
+    return {"head_repo_full_name": "o/r", "base_repo_full_name": "o/r", **kwargs}
+
+
 def test_no_protected_paths_passes_without_a_permission():
-    ok, protected, message = ci_guard.evaluate(["docs/GITHUB.md", "web/a.html"], None)
+    ok, protected, message = ci_guard.evaluate(
+        ["docs/GITHUB.md", "web/a.html"], None, **_same_repo()
+    )
     assert ok and protected == []
     assert "no protected paths" in message
 
 
 def test_trusted_permission_passes_with_protected_paths():
     for permission in ("admin", "maintain", "write"):
-        ok, protected, _ = ci_guard.evaluate(["pyproject.toml"], permission)
+        ok, protected, _ = ci_guard.evaluate(["pyproject.toml"], permission, **_same_repo())
         assert ok and protected == ["pyproject.toml"], permission
 
 
 @pytest.mark.parametrize("permission", ["read", "none", None])
 def test_untrusted_permission_blocks(permission):
     ok, protected, message = ci_guard.evaluate(
-        ["pyproject.toml", "docs/GITHUB.md"], permission
+        ["pyproject.toml", "docs/GITHUB.md"], permission, **_same_repo()
     )
     assert not ok
     assert protected == ["pyproject.toml"]
     assert "pyproject.toml" in message
 
 
+def test_fork_head_always_blocks_even_with_write_permission():
+    ok, protected, message = ci_guard.evaluate(
+        ["pyproject.toml"],
+        "write",
+        head_repo_full_name="fork-owner/repo",
+        base_repo_full_name="o/r",
+    )
+    assert not ok
+    assert protected == ["pyproject.toml"]
+    assert "fork-owner/repo" in message
+    assert "maintainer must recreate" in message
+
+
+def test_null_head_repo_blocks():
+    ok, _, message = ci_guard.evaluate(
+        ["pyproject.toml"],
+        "write",
+        head_repo_full_name=None,
+        base_repo_full_name="o/r",
+    )
+    assert not ok
+    assert "unavailable" in message
+    assert "maintainer must recreate" in message
+
+
 def test_blocked_message_names_every_protected_file():
     ok, _, message = ci_guard.evaluate(
-        [".github/workflows/ci.yml", "pyproject.toml"], "read"
+        [".github/workflows/ci.yml", "pyproject.toml"], "read", **_same_repo()
     )
     assert not ok
     assert ".github/workflows/ci.yml" in message
@@ -370,11 +425,13 @@ NOTICE = "::notice title=ci-guard::"
 class FakeApi:
     """Stands in for ``api_get``: serves canned file pages, author, permission."""
 
-    def __init__(self, pages, *, author="octo", permission="write", files_error=None,
-                 permission_error=None):
+    def __init__(self, pages, *, author="octo", permission="write", head_repo="o/r",
+                 files_error=None, permission_error=None):
         self.pages = pages
         self.author = author
         self.permission = permission
+        # None stands for a deleted fork's null head repo.
+        self.head_repo = head_repo
         self.files_error = files_error
         self.permission_error = permission_error
         self.calls = []
@@ -388,7 +445,16 @@ class FakeApi:
             page = int(subpath.rsplit("page=", 1)[1])
             return self.pages[page - 1] if page <= len(self.pages) else []
         if subpath == "":
-            return {"user": {"login": self.author}}
+            head = (
+                {"repo": {"full_name": self.head_repo}}
+                if self.head_repo is not None
+                else {"repo": None}
+            )
+            return {
+                "user": {"login": self.author},
+                "head": head,
+                "base": {"repo": {"full_name": "o/r"}},
+            }
         if subpath == f"collaborators/{self.author}/permission":
             if self.permission_error is not None:
                 raise self.permission_error
@@ -438,7 +504,8 @@ def test_main_trusted_author_passes_with_notice(monkeypatch, capsys, permission)
     assert ".github/workflows/ci.yml, pyproject.toml" in lines[0]
     assert "docs/GITHUB.md" not in lines[0]
     assert f"(author @octo has '{permission}')" in lines[0]
-    assert fake.calls[1:] == ["", "collaborators/octo/permission"]
+    # The PR object is fetched once for the author and once for the head repo.
+    assert fake.calls[1:] == ["", "", "collaborators/octo/permission"]
 
 
 @pytest.mark.parametrize(
@@ -467,6 +534,42 @@ def test_main_untrusted_author_is_blocked(monkeypatch, capsys, permission, permi
         assert f"{path} ({ci_guard.is_protected(path)})" in line
     assert "README.md" not in line
     assert f"(author @stranger has '{expected}'; needs admin, maintain, or write)" in line
+    assert "D16" in err
+
+
+def test_main_fork_head_with_write_permission_is_blocked(monkeypatch, capsys):
+    fake = FakeApi(
+        _files(".github/workflows/ci.yml", "pyproject.toml"),
+        author="octo",
+        permission="write",
+        head_repo="fork-owner/repo",
+    )
+    code, out, err = _run_main(monkeypatch, capsys, fake)
+    assert code == 1
+    lines = out.splitlines()
+    assert len(lines) == 1
+    line = lines[0]
+    assert line.startswith("::error::ci_guard: blocked: PR head repository is ")
+    assert "fork-owner/repo" in line
+    assert "maintainer must recreate" in line
+    assert "(author @octo; head repo 'fork-owner/repo')" in line
+    # Fork heads always fail: the permission lookup never runs.
+    assert not any(call.startswith("collaborators/") for call in fake.calls)
+    assert "D16" in err
+
+
+def test_main_null_head_repo_is_blocked(monkeypatch, capsys):
+    fake = FakeApi(
+        _files("pyproject.toml"),
+        author="octo",
+        permission="write",
+        head_repo=None,
+    )
+    code, out, err = _run_main(monkeypatch, capsys, fake)
+    assert code == 1
+    assert "unavailable" in out
+    assert "maintainer must recreate" in out
+    assert not any(call.startswith("collaborators/") for call in fake.calls)
     assert "D16" in err
 
 

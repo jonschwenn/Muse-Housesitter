@@ -2,10 +2,12 @@
 """Block untrusted changes to the testing/validation mechanism (D16).
 
 Lists a pull request's changed files through the GitHub API and refuses to
-pass when the PR touches a protected path unless its author has admin,
-maintain, or write permission on the repository. Runs on
-``pull_request_target`` from the base commit, so it never checks out or
-executes PR code; the token is used for read-only API calls only.
+pass when the PR touches a protected path unless the PR's head repository is
+this repository AND its author has admin, maintain, or write permission on
+the repository. A fork PR touching a protected path always fails, even when
+its author could otherwise pass; a maintainer must recreate the change on a
+branch here. Runs on ``pull_request_target`` from the base commit, so it never
+checks out or executes PR code; the token is used for read-only API calls only.
 
 Usage:
     GH_TOKEN=... python scripts/ci_guard.py --repo OWNER/NAME --pr 12
@@ -205,6 +207,27 @@ def get_pr_author(get) -> str:
     return user["login"]
 
 
+def get_head_repo_full_name(get) -> str | None:
+    """Return the PR head repository's ``full_name``, or None when unavailable.
+
+    A null head repo means the fork was deleted after the PR was opened; the
+    caller treats that as untrusted. Read from the same PR object the author
+    lookup already fetches, so the API allow-list below needs no new endpoint.
+    """
+    data = get("")
+    if not isinstance(data, dict):
+        raise ApiError("PR lookup returned an unexpected body")
+    head = data.get("head")
+    if not isinstance(head, dict):
+        raise ApiError("PR lookup returned no head")
+    repo = head.get("repo")
+    if repo is None:
+        return None
+    if not isinstance(repo, dict) or not isinstance(repo.get("full_name"), str):
+        raise ApiError("PR lookup returned no head repository name")
+    return repo["full_name"]
+
+
 def get_permission(get, username: str) -> str:
     try:
         data = get(f"collaborators/{username}/permission")
@@ -218,15 +241,35 @@ def get_permission(get, username: str) -> str:
     return data["permission"]
 
 
-def evaluate(changed: list[str], permission: str | None) -> tuple[bool, list[str], str]:
+def evaluate(
+    changed: list[str],
+    permission: str | None,
+    *,
+    head_repo_full_name: str | None,
+    base_repo_full_name: str,
+) -> tuple[bool, list[str], str]:
     """Decide the check. Returns (ok, protected_files, message).
 
     ``permission`` is None when no protected path was touched (no lookup
-    needed) or the lookup is skipped in tests.
+    needed) or the lookup is skipped for a fork head (forks always fail, so
+    there is nothing to look up). A PR passes with protected paths only when
+    BOTH its head repository is this repository AND its author has write,
+    maintain, or admin permission: a same-repo branch pushed to someone else's
+    fork must not ride on the author's permission.
     """
     protected = sorted({path for path in changed if is_protected(path) is not None})
     if not protected:
         return True, [], f"ci_guard: ok: no protected paths among {len(changed)} changed file(s)"
+    if head_repo_full_name != base_repo_full_name:
+        head = head_repo_full_name or "unavailable (the fork may have been deleted)"
+        return (
+            False,
+            protected,
+            "ci_guard: blocked: PR head repository is "
+            f"{head}, not this repo ({base_repo_full_name}): fork PRs touching "
+            "protected paths always fail; a maintainer must recreate the change "
+            "on a branch in this repo (D16)",
+        )
     if permission in TRUSTED_PERMISSIONS:
         files = ", ".join(protected)
         return True, protected, f"ci_guard: ok: trusted author touched protected path(s): {files}"
@@ -299,22 +342,38 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         author = get_pr_author(get)
-        permission = get_permission(get, author)
+        head_repo = get_head_repo_full_name(get)
+        # Fork heads always fail, so there is nothing to look up for them.
+        permission = get_permission(get, author) if head_repo == args.repo else None
     except ApiError as exc:
         print(f"::error::{escape_data(f'ci_guard: fail closed: {exc}')}")
         return 2
 
-    ok, _, message = evaluate(changed, permission)
+    ok, _, message = evaluate(
+        changed,
+        permission,
+        head_repo_full_name=head_repo,
+        base_repo_full_name=args.repo,
+    )
     safe = escape_data(message)
     if ok:
         print(f"::notice title=ci-guard::{safe} (author @{author} has '{permission}')")
         return 0
-    print(f"::error::{safe} (author @{author} has '{permission}'; needs admin, maintain, or write)")
-    print(
-        "A collaborator with write access must make this change instead; "
-        "fork PRs cannot touch these paths (D16).",
-        file=sys.stderr,
-    )
+    if head_repo != args.repo:
+        print(f"::error::{safe} (author @{author}; head repo '{head_repo or 'unavailable'}')")
+        print(
+            "Fork PRs cannot touch these paths; a maintainer must recreate the "
+            "change on a branch in this repo (D16).",
+            file=sys.stderr,
+        )
+    else:
+        who = f"(author @{author} has '{permission}'; needs admin, maintain, or write)"
+        print(f"::error::{safe} {who}")
+        print(
+            "A collaborator with write access must make this change instead; "
+            "fork PRs cannot touch these paths (D16).",
+            file=sys.stderr,
+        )
     return 1
 
 
