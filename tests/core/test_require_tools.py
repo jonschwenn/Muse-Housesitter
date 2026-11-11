@@ -103,9 +103,17 @@ def test_fail_on_proc_error_accepts_called_process_error():
 
 
 def test_expect_failure_turns_a_skip_into_a_failure():
-    with pytest.raises(pytest.fail.Exception, match="skipped"):
+    # Not pytest.raises: if expect_failure let the skip escape, that would
+    # make this test skip, not fail.
+    try:
         with expect_failure():
             pytest.skip("regressed to a skip")
+    except pytest.fail.Exception as exc:
+        assert "skipped" in str(exc)
+    except pytest.skip.Exception:
+        raise AssertionError("expect_failure let a skip escape") from None
+    else:
+        raise AssertionError("expect_failure swallowed a skip")
 
 
 def test_expect_failure_accepts_a_failure():
