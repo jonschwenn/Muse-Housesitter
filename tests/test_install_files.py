@@ -134,8 +134,13 @@ def test_unit_runs_only_the_dashboard_server():
     assert service["Type"] == "simple"
     assert service["Restart"] == "on-failure"
     assert "RestartSec" in service
-    assert "ExecStartPre" not in service
-    assert "ExecCondition" not in service
+    exec_directives = {
+        "ExecStart", "ExecStartPre", "ExecStartPost", "ExecCondition",
+        "ExecReload", "ExecStop", "ExecStopPost",
+    }
+    commands = [(k, v) for s, k, v in triples
+                if s == "Service" and k in exec_directives]
+    assert commands == [("ExecStart", "/opt/housesitter/bin/housesitter serve")]
 
 
 # Sandboxing directives whose exact values carry the read-only and
