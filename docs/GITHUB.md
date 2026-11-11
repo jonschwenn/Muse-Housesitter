@@ -47,6 +47,11 @@ after the PR. Merged branches clean themselves up.
      download the test-results artifacts and read job conclusions from the
      API; no permission was widened.
 
+The publisher checks freshness, serialises comment writes per PR, and posts
+fixed notices for artifact refusals or publish failures without adding
+permissions; see [REVIEW.md, "Evidence"](REVIEW.md#evidence-before-and-after-every-pr)
+for the checks, ordering rules and accepted pending-job limit (D34).
+
 Click **Save** in each section.
 
 ## The `main` ruleset

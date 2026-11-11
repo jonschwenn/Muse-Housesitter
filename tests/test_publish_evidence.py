@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import random
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,12 +28,43 @@ def _load(name):
 ui_evidence = _load("ui_evidence")
 pr_evidence = _load("pr_evidence")
 publish_evidence = _load("publish_evidence")
+# Shared with the publisher under test so monkeypatched caps apply to it.
+evidence_checks = publish_evidence.evidence_checks
 
 REPO = "example-owner/example-repo"
 PR = 7
 HEAD_SHA = "a" * 40
 
 TEXT = pr_evidence.MARKER + "\n## Before / after evidence\n\n**No output change.**\n"
+
+
+def _results(scenarios=None, **overrides):
+    """A minimal valid structured-results doc (Decision 13, option A)."""
+    if scenarios is None:
+        scenarios = [
+            {
+                "id": "version",
+                "title": "Installed version",
+                "command": ["housesitter", "--version"],
+                "exit_before": 0,
+                "exit_after": 0,
+                "expected_exit": 0,
+                "size_before": 10,
+                "size_after": 10,
+                "changed": False,
+                "new_in_pr": False,
+                "before": "$ exit 0\n",
+                "after": "$ exit 0\n",
+            }
+        ]
+    doc = {
+        "version": 1,
+        "metadata": {"generator": "scripts/pr_evidence.py", "head_sha": HEAD_SHA},
+        "scenarios": scenarios,
+        "removed": [],
+    }
+    doc.update(overrides)
+    return doc
 
 
 def _png(color=(10, 20, 30)):
@@ -56,10 +89,19 @@ def _manifest(*names):
     return {"version": 1, "captures": captures}
 
 
-def _artifact(tmp_path, text=TEXT, pngs=("typical__index-phone__head.png",), manifest=None):
+def _artifact(
+    tmp_path,
+    text=TEXT,
+    pngs=("typical__index-phone__head.png",),
+    manifest=None,
+    results=None,
+):
     artifact = tmp_path / "artifact"
     (artifact / "evidence.md").parent.mkdir(parents=True)
     (artifact / "evidence.md").write_text(text)
+    (artifact / "results.json").write_text(
+        json.dumps(_results() if results is None else results)
+    )
     ui_out = artifact / "ui_out"
     ui_out.mkdir()
     for i, name in enumerate(pngs):
@@ -73,29 +115,53 @@ def _artifact(tmp_path, text=TEXT, pngs=("typical__index-phone__head.png",), man
 
 def _render(tmp_path, artifact, **kwargs):
     out = tmp_path / "out"
-    rc = publish_evidence.main(
-        [
-            "render",
-            "--artifact-dir", str(artifact),
-            "--out-dir", str(out),
-            "--repo", kwargs.get("repo", REPO),
-            "--pr", str(kwargs.get("pr", PR)),
-            "--head-sha", kwargs.get("head_sha", HEAD_SHA),
+    argv = [
+        "render",
+        "--artifact-dir", str(artifact),
+        "--out-dir", str(out),
+        "--repo", kwargs.get("repo", REPO),
+        "--pr", str(kwargs.get("pr", PR)),
+        "--head-sha", kwargs.get("head_sha", HEAD_SHA),
+    ]
+    if kwargs.get("run_id") is not None:
+        argv += [
+            "--run-id", str(kwargs["run_id"]),
+            "--run-attempt", str(kwargs["run_attempt"]),
         ]
-    )
+    rc = publish_evidence.main(argv)
     return rc, out
 
 
 # Text-only path ---------------------------------------------------------------
 
 
-def test_render_without_ui_dir_publishes_text_only(tmp_path):
+# Rebuilt text (Decision 13, option A) --------------------------------------
+#
+# The comment is rebuilt from results.json; the PR's markdown (evidence.md)
+# is never read, let alone posted.
+
+
+def test_render_ignores_pr_markdown(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, text="PWNED: Approved\n")
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert body.startswith(pr_evidence.MARKER)
+    assert "PWNED" not in body
+    assert "produced by the PR's own CI run" in body
+
+
+def test_render_without_ui_dir_publishes_rebuilt_text_only(tmp_path):
     artifact = tmp_path / "artifact"
     artifact.mkdir()
     (artifact / "evidence.md").write_text(TEXT)
+    (artifact / "results.json").write_text(json.dumps(_results()))
     rc, out = _render(tmp_path, artifact)
     assert rc == 0
-    assert (out / "comment.md").read_text() == TEXT
+    body = (out / "comment.md").read_text()
+    assert body.startswith(pr_evidence.MARKER)
+    assert "**No output change.**" in body
+    assert "## Web UI" not in body
     assert list((out / "files").iterdir()) == []
 
 
@@ -114,6 +180,187 @@ def test_render_empty_manifest_notes_nothing_to_capture(tmp_path):
     assert "nothing to show" in body
     # The manifest alone is pushed; with no PNGs the workflow skips the push.
     assert sorted(p.name for p in (out / "files").iterdir()) == ["ui_manifest.json"]
+
+
+def test_render_requires_results_json(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").unlink()
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
+
+
+def test_render_refuses_malformed_results_json(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").write_text("{nope")
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
+
+
+def test_render_refuses_unknown_scenario_id(tmp_path):
+    bad = _results()
+    bad["scenarios"][0]["id"] = "forged-scenario"
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=bad)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
+
+
+def test_render_accepts_new_in_pr_scenario_id(tmp_path):
+    doc = _results()
+    doc["scenarios"][0]["id"] = "forged-scenario"
+    doc["scenarios"][0]["new_in_pr"] = True
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
+    rc, _ = _render(tmp_path, artifact)
+    assert rc == 0
+
+
+def test_render_refuses_stale_head_sha(tmp_path):
+    doc = _results()
+    doc["metadata"]["head_sha"] = "b" * 40
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
+
+
+# Fixed refusal notices (Decision 4, option B) --------------------------------
+#
+# Every refusal writes refusal.json with a reason code from the fixed enum,
+# and the `refusal` subcommand turns it into main's fixed notice. One test
+# per reason code; no silent no-comment outcome remains.
+
+
+def _refusal_reason(tmp_path, out):
+    return json.loads((out / publish_evidence.REFUSAL_FILENAME).read_text())["reason"]
+
+
+def test_refusal_missing_when_results_json_absent(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").unlink()
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "missing"
+    assert not (out / "comment.md").exists()
+    assert not (out / "files").exists()
+
+
+def test_refusal_too_large_when_results_json_oversized(tmp_path, monkeypatch):
+    monkeypatch.setattr(evidence_checks, "RESULTS_MAX_BYTES", 10)
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "too_large"
+
+
+def test_refusal_too_large_when_pngs_exceed_total_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(ui_evidence, "MAX_TOTAL_BYTES", 10)
+    artifact = _artifact(tmp_path)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "too_large"
+
+
+def test_refusal_bad_png_for_a_fake_screenshot(tmp_path):
+    artifact = _artifact(tmp_path)
+    (artifact / "ui_out" / "typical__index-phone__head.png").write_bytes(b"not a png")
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_png"
+
+
+def test_refusal_bad_png_for_a_bad_crc(tmp_path):
+    # Magic bytes alone pass; the structural check must still refuse.
+    artifact = _artifact(tmp_path)
+    path = artifact / "ui_out" / "typical__index-phone__head.png"
+    bad = bytearray(path.read_bytes())
+    bad[40] ^= 0xFF
+    path.write_bytes(bytes(bad))
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_png"
+
+
+def test_repo_encoder_output_passes_structure_check(tmp_path):
+    # The pipeline's own encoder output must validate: no false refusals
+    # on honest screenshots.
+    artifact = _artifact(tmp_path)
+    out = tmp_path / "out"
+    rc = publish_evidence.main(
+        [
+            "render",
+            "--artifact-dir", str(artifact),
+            "--out-dir", str(out),
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+        ]
+    )
+    assert rc == 0
+    assert (out / "comment.md").exists()
+
+
+def test_refusal_bad_schema_for_unknown_scenario_id(tmp_path):
+    bad = _results()
+    bad["scenarios"][0]["id"] = "forged-scenario"
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=bad)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+
+
+def test_refusal_stale_head_for_mismatched_sha(tmp_path):
+    doc = _results()
+    doc["metadata"]["head_sha"] = "b" * 40
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "stale_head"
+
+
+def test_refusal_subcommand_prints_fixed_notice(tmp_path):
+    (tmp_path / "refusal.json").write_text(json.dumps({"reason": "too_large"}))
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(tmp_path / "refusal.json")]
+    )
+    assert rc == 0
+
+
+def test_refusal_subcommand_rejects_a_bad_reason(tmp_path):
+    (tmp_path / "refusal.json").write_text(json.dumps({"reason": "pwned"}))
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(tmp_path / "refusal.json")]
+    )
+    assert rc == 2
+
+
+def test_refusal_subcommand_rejects_a_missing_file(tmp_path):
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(tmp_path / "no-such-file.json")]
+    )
+    assert rc == 2
+
+
+def test_refusal_notice_carries_no_artifact_content(tmp_path, capsys):
+    # Even a hostile artifact shapes nothing: the notice is fixed text.
+    bad = _results()
+    bad["scenarios"][0]["after"] = "PWNED Approved by maintainer"
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=bad)
+    bad["scenarios"][0]["id"] = "forged"
+    (artifact / "results.json").write_text(json.dumps(bad))
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(out / publish_evidence.REFUSAL_FILENAME)]
+    )
+    assert rc == 0
+    notice = capsys.readouterr().out
+    assert notice.startswith(evidence_checks.REFUSAL_MARKER + "\n")
+    assert "`bad_schema`" in notice
+    assert "PWNED" not in notice
+    assert "Approved by maintainer" not in notice
 
 
 # Valid artifact -----------------------------------------------------------------
@@ -154,16 +401,14 @@ def test_render_ignores_pre_rendered_markdown(tmp_path):
 # Refusals ---------------------------------------------------------------------
 
 
-def test_render_refuses_text_without_marker(tmp_path):
-    artifact = _artifact(tmp_path)
-    (artifact / "evidence.md").write_text("no marker here\n")
-    rc, _ = _render(tmp_path, artifact)
-    assert rc == 1
-
-
-def test_render_refuses_oversized_text(tmp_path, monkeypatch):
+def test_render_refuses_oversized_results_text(tmp_path, monkeypatch):
+    # The rebuilt text section, not the PR's markdown, is what must fit.
+    doc = _results()
+    doc["scenarios"][0]["changed"] = True
+    doc["scenarios"][0]["new_in_pr"] = True
+    doc["scenarios"][0]["after"] = "x" * 10_000
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
     monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", 10)
-    artifact = _artifact(tmp_path)
     rc, _ = _render(tmp_path, artifact)
     assert rc == 1
 
@@ -736,7 +981,8 @@ def test_render_without_result_args_is_unchanged(tmp_path):
     rc, out = _render(tmp_path, artifact)
     assert rc == 0
     text = (out / "comment.md").read_text()
-    assert text == TEXT
+    assert text.startswith(pr_evidence.MARKER)
+    assert "**No output change.**" in text
     assert "**Tests:**" not in text
 
 
@@ -968,15 +1214,53 @@ def test_ci_produces_test_results():
 # already over budget on its own still refuses (exit 1).
 
 
-def _padded_evidence(size):
-    assert size > len(TEXT.encode())
-    return TEXT + "x" * (size - len(TEXT.encode()))
+def _padded_results_text(size):
+    """A results doc whose rebuilt comment lands just under `size` bytes.
+
+    The comment is rebuilt from results.json now, so near-cap tests pad the
+    structured results instead of the ignored evidence.md. Padding uses new
+    scenarios with tiny outputs; the renderer keeps whole sections while
+    they fit, so the comment grows monotonically here. The last scenario
+    is popped back off when the target is overshot, so the comment never
+    exceeds `size` (one scenario is a few hundred bytes).
+    """
+    doc = {
+        "version": 1,
+        "metadata": {"generator": "scripts/pr_evidence.py", "head_sha": HEAD_SHA},
+        "scenarios": [],
+        "removed": [],
+    }
+    index = 0
+    while index < 250:
+        doc["scenarios"].append(
+            {
+                "id": f"pad-{index:04d}",
+                "title": "",
+                "command": ["housesitter", "--version"],
+                "exit_before": 0,
+                "exit_after": 0,
+                "expected_exit": 0,
+                "size_before": 10,
+                "size_after": 10,
+                "changed": True,
+                "new_in_pr": True,
+                "before": "$ exit 0\n",
+                "after": "$ exit 0\n",
+            }
+        )
+        body = pr_evidence.render_text_from_results(doc, HEAD_SHA)
+        if len(body.encode()) >= size:
+            doc["scenarios"].pop()
+            break
+        index += 1
+    return doc
 
 
-def _text_only_artifact(tmp_path, text):
+def _text_only_artifact(tmp_path, size):
     artifact = tmp_path / "artifact"
     artifact.mkdir()
-    (artifact / "evidence.md").write_text(text)
+    (artifact / "evidence.md").write_text(TEXT)  # ignored by the new publisher
+    (artifact / "results.json").write_text(json.dumps(_padded_results_text(size)))
     return artifact
 
 
@@ -996,9 +1280,14 @@ def _max_names_xml(version="3.14.1", count=20):
     ).encode()
 
 
-def test_render_text_only_near_cap_tests_line_stays_in_budget(tmp_path):
-    cap = pr_evidence.MAX_COMMENT_BYTES
-    artifact = _text_only_artifact(tmp_path, _padded_evidence(cap - 100))
+def test_render_text_only_near_cap_tests_line_stays_in_budget(tmp_path, monkeypatch):
+    # A near-cap rebuilt text plus a Tests line must still publish within
+    # the comment budget, keeping the failure counts. Whether the failing
+    # names survive depends on the exact room, so the shrink ladder itself
+    # is pinned by the fit_test_line unit tests below.
+    cap = 3000
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", cap)
+    artifact = _text_only_artifact(tmp_path, cap - 500)
     results = _results_tree(
         tmp_path,
         {"3.14": _junit("3.14.1", tests=3, failures=2,
@@ -1009,21 +1298,113 @@ def test_render_text_only_near_cap_tests_line_stays_in_budget(tmp_path):
     assert rc == 0
     body = (out / "comment.md").read_text()
     assert len(body.encode()) <= cap
-    assert "(2 failing)" in body
-    assert "test_case_00" not in body
+    assert "2 failing" in body
 
 
-def test_render_text_only_near_cap_many_long_names_stays_in_budget(tmp_path):
-    cap = pr_evidence.MAX_COMMENT_BYTES
-    artifact = _text_only_artifact(tmp_path, _padded_evidence(cap - 100))
+def test_render_text_only_near_cap_many_long_names_stays_in_budget(tmp_path, monkeypatch):
+    cap = 3000
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", cap)
+    artifact = _text_only_artifact(tmp_path, cap - 500)
     results = _results_tree(tmp_path, {"3.14": _max_names_xml()})
     jobs = _jobs_doc(_job("test (3.14)", "failure"))
     rc, out = _render_with_results(tmp_path, artifact, results, jobs)
     assert rc == 0
     body = (out / "comment.md").read_text()
     assert len(body.encode()) <= cap
-    assert "(20 failing)" in body
-    assert "n" * 165 not in body
+    assert "20 failing" in body
+
+
+def test_tests_line_shrink_ladder(tmp_path, monkeypatch):
+    # Byte-exact evidence sizes pin the D21 shrink order through the real
+    # renderer: the full Tests line first, then the brief line without
+    # names, then the fixed short line, then nothing. Counts and verdicts
+    # survive every step that keeps a line. (Review round 4: fit_test_line
+    # is gone, folded into render_comment's one shrink order; this pins the
+    # same rungs end to end.)
+    cap = 3000
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", cap)
+    payloads = {"3.9": _junit("3.9.25", tests=4, failures=2,
+                              failing=("test_case_00", "test_case_01")),
+                "3.10": _junit("3.10.12", tests=4, failures=2,
+                               failing=("test_case_00", "test_case_01"))}
+    jobs = _jobs_doc(_job("test (3.9)", "failure"), _job("test (3.10)", "failure"))
+    tree = _results_tree(tmp_path, payloads)
+    parsed = publish_evidence.load_test_results(tree)
+    validated = publish_evidence.validate_jobs([jobs])
+    full = _test_results.render_comment_line(validated, parsed)
+    brief = _test_results.render_comment_line(validated, parsed, include_names=False)
+    fallback = publish_evidence.TEST_LINE_FALLBACK
+    assert len(full) > len(brief) > len(fallback)
+
+    def text_of(after_len):
+        doc = _results(scenarios=[{
+            "id": "version", "title": "", "command": ["housesitter", "--version"],
+            "exit_before": 0, "exit_after": 0, "expected_exit": 0,
+            "size_before": 7, "size_after": after_len,
+            "changed": True, "new_in_pr": False,
+            "before": "$ exit 0\n", "after": "x" * after_len + "\n",
+        }])
+        body = pr_evidence.render_text_from_results(doc, HEAD_SHA)
+        assert "**Omitted to fit a GitHub comment:**" not in body
+        return body
+
+    reserve = pr_evidence.MARKER_GROWTH_RESERVE
+
+    def fits_line(line, after_len):
+        # Whether `line` fits the text of this size in the final-form budget.
+        candidate = publish_evidence.insert_test_line(text_of(after_len), line)
+        return pr_evidence.final_len(candidate) <= cap
+
+    def max_k(line, start):
+        # Largest after-length whose text still fits `line`: the estimate
+        # from the roughly two-bytes-per-after-byte growth is walked to the
+        # exact edge, so digit-length effects in the size column can't skew
+        # the boundary.
+        assert fits_line(line, 0)
+        est = start
+        while fits_line(line, est + 1):
+            est += 1
+        while not fits_line(line, est):
+            est -= 1
+        assert not fits_line(line, est + 1)
+        return est
+
+    t0 = len(text_of(0).encode())
+
+    def rung_k(line):
+        # Largest after-length whose text still fits `line` in the budget.
+        return max_k(line, (cap - reserve - 1 - len(line.encode()) - t0) // 2)
+
+    def render_with(after_len):
+        doc = _results(scenarios=[{
+            "id": "version", "title": "", "command": ["housesitter", "--version"],
+            "exit_before": 0, "exit_after": 0, "expected_exit": 0,
+            "size_before": 7, "size_after": after_len,
+            "changed": True, "new_in_pr": False,
+            "before": "$ exit 0\n", "after": "x" * after_len + "\n",
+        }])
+        artifact = tmp_path / f"ladder-{after_len}"
+        artifact.mkdir(exist_ok=True)
+        (artifact / "results.json").write_text(json.dumps(doc))
+        rc, out = _render_with_results(tmp_path, artifact, tree, jobs)
+        assert rc == 0
+        return (out / "comment.md").read_text()
+
+    # Room for the full line: names are kept.
+    body = render_with(rung_k(full))
+    assert full in body
+    # Room for the brief line only: names are dropped, counts stay.
+    assert rung_k(brief) > rung_k(full)
+    body = render_with(rung_k(full) + 1)
+    assert brief in body and "test_case_00" not in body
+    # Room only for the fixed short line.
+    assert rung_k(fallback) > rung_k(brief)
+    body = render_with(rung_k(brief) + 1)
+    assert fallback in body and "failing" not in body
+    # No room for any line: it is left out, and the publish stays in budget.
+    body = render_with(rung_k(fallback) + 1)
+    assert "**Tests:**" not in body
+    assert len(body.encode()) <= cap
 
 
 def test_render_ui_path_near_cap_tests_line_stays_in_budget(tmp_path, monkeypatch):
@@ -1038,6 +1419,291 @@ def test_render_ui_path_near_cap_tests_line_stays_in_budget(tmp_path, monkeypatc
     assert "## Web UI" in body
     assert "(20 failing)" in body
     assert "n" * 165 not in body
+
+
+# Review round 4: one budget on the final form ---------------------------------
+#
+# Fitting is measured on the body exactly as it will be posted — stamped
+# with the longest possible marker and every image placeholder counted at
+# its posted length — with one shrink order: the Tests line degrades
+# completely (names, then the line) before any screenshot detail is
+# dropped, and text sections shorten last, every omission notice counted
+# and bounded. The CI-side check and the publisher share render_comment,
+# so a body the check accepts is a body the publisher posts, and the
+# workflow's final size check uses the same 60,000-byte budget.
+
+
+def test_omission_notice_caps_names_and_counts_the_rest():
+    notice = pr_evidence.omission_notice([f"`s{i}`" for i in range(8)])
+    assert "**Omitted to fit a GitHub comment:**" in notice
+    for i in range(5):
+        assert f"`s{i}`" in notice
+    assert "`s5`" not in notice
+    assert "and 3 more" in notice
+    assert notice.endswith("locally to see them.\n")
+    short = pr_evidence.omission_notice(["`only`"])
+    assert "`only`" in short and "and " not in short
+
+
+def test_round4_omission_notice_is_bounded_and_counted(tmp_path):
+    # Finding 1: every omitted heading used to be appended without bound,
+    # eating the marker reserve until the stamped body no longer fit — the
+    # CI-side check accepted 59,949 bytes the publisher refused as
+    # too_large. The notice is now capped and measured.
+    seed = _results()["scenarios"][0]
+    doc = _results(scenarios=[dict(seed, changed=True, after="x" * 29100 + "\n")] + [
+        dict(seed, id=f"new-{i}", new_in_pr=True, title="T" * 200,
+             after="x" * 50000 + "\n") for i in range(3)
+    ])
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "results.json").write_text(json.dumps(doc))
+    check = SimpleNamespace(
+        artifact_dir=str(artifact), repo=REPO, pr=PR, head_sha=HEAD_SHA
+    )
+    assert evidence_checks.cmd_check(check) == 0
+    body = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA, run_id=100, run_attempt=1
+    )
+    assert "**Omitted to fit a GitHub comment:**" in body
+    posted = ui_evidence.substitute_sha(body, "c" * 40)
+    assert len(posted.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def test_round4_tests_line_degrades_before_screenshots(tmp_path):
+    # Finding 2: the Tests line with ten failing names used to survive
+    # while all three screenshots were dropped (58,873 bytes, zero
+    # images). Test data now degrades on its own line first.
+    files = [f"typical__index-phone__{side}.png" for side in ("base", "head", "diff")]
+    cap = dict(fixture="typical", view="index-phone", status="changed",
+               head_problems=[],
+               **dict(zip(("base", "head", "diff"), files)))
+    doc = _results()
+    doc["scenarios"][0].update(changed=True, before="before\n", after="x" * 28460 + "\n")
+    artifact = _artifact(
+        tmp_path, pngs=files,
+        manifest={"version": 1, "captures": [cap]}, results=doc)
+    results = _results_tree(tmp_path, {
+        "3.9": _junit(failures=10,
+                      failing=[f"test_case_{i:02d}" for i in range(10)])})
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(json.dumps(_jobs_doc(_job("test (3.9)", "failure"))))
+    plain = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA, run_id=100, run_attempt=1)
+    with_tests = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA, run_id=100, run_attempt=1,
+        test_results_dir=str(results), jobs_json=str(jobs_path))
+    assert plain.count("<img ") == 3
+    assert with_tests.count("<img ") == 3
+    assert "**Tests:**" in with_tests
+    for body in (plain, with_tests):
+        posted = ui_evidence.substitute_sha(body, "c" * 40)
+        assert len(posted.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def test_round4_placeholder_growth_stays_in_budget(tmp_path):
+    # Finding 3: fitting counted each image URL at placeholder length, so
+    # the posted body grew 12 bytes per image past the budget (58,201
+    # accepted, 60,001 posted). Placeholders now count at posted length.
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    ui_out = artifact / "ui_out"
+    ui_out.mkdir()
+    captures = []
+    for i in range(50):
+        fixture = f"f{i:03}"
+        cap = dict(fixture=fixture, view="index-phone", status="changed",
+                   head_problems=[])
+        for side in ("base", "head", "diff"):
+            name = f"{fixture}__index-phone__{side}.png"
+            cap[side] = name
+            (ui_out / name).write_bytes(_png())
+        captures.append(cap)
+    (ui_out / "ui_manifest.json").write_text(
+        json.dumps({"version": 1, "captures": captures}))
+    doc = _results()
+    doc["scenarios"][0].update(
+        changed=True, before="before\n", after="x" * 7662 + "\n")
+    (artifact / "results.json").write_text(json.dumps(doc))
+    body = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA, run_id=100, run_attempt=1)
+    # The full section no longer fits once placeholders count at posted
+    # length, so the table tier wins (shrink step (d) comes before text
+    # shortening (e)): the table and its notice survive, details don't.
+    assert "## Web UI" in body
+    assert "**Web UI details omitted to fit a GitHub comment:**" in body
+    assert "<img " not in body
+    posted = ui_evidence.substitute_sha(body, "c" * 40)
+    assert len(posted.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def test_round4_workflow_final_check_uses_comment_budget(tmp_path, monkeypatch):
+    # The comment step's final size check uses the same 60,000-byte budget
+    # as the renderer: a body of exactly the budget posts, one byte more
+    # falls back to the fixed publish_failed notice.
+    marker = pr_evidence.MARKER
+    exact = marker + "x" * (pr_evidence.MAX_COMMENT_BYTES - len(marker.encode()))
+    assert len(exact.encode()) == pr_evidence.MAX_COMMENT_BYTES
+    (tmp_path / "exact").mkdir()
+    (tmp_path / "over").mkdir()
+    proc, calls = _run_comment_step(
+        tmp_path / "exact", monkeypatch, "success", "success",
+        files={"rendered/comment.md": exact}, evidence_sha="c" * 40)
+    assert proc.returncode == 0, proc.stderr
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    assert posts[0]["body"] == exact
+    over = marker + "x" * (pr_evidence.MAX_COMMENT_BYTES + 1 - len(marker.encode()))
+    proc, calls = _run_comment_step(
+        tmp_path / "over", monkeypatch, "success", "success",
+        files={"rendered/comment.md": over}, evidence_sha="c" * 40)
+    assert proc.returncode == 0, proc.stderr
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    assert "`publish_failed`" in posts[0]["body"]
+    assert len(posts[0]["body"].encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def _round4_random_doc(rng, known_ids):
+    """A random valid results doc: small texts usually, huge ones rarely."""
+    scenarios = []
+    used = set()
+    for _ in range(rng.randint(0, 5)):
+        if rng.random() < 0.5 and len(used) < len(known_ids):
+            ident = rng.choice([i for i in known_ids if i not in used])
+            new = False
+        else:
+            ident = f"new-{rng.randint(0, 9999):04d}"
+            new = True
+        used.add(ident)
+        size_roll = rng.random()
+        if size_roll < 0.7:
+            after = rng.choice(["$ exit 0\n", "line one\nline two\n", "x" * 500 + "\n"])
+        elif size_roll < 0.9:
+            after = "y\n" * rng.randint(100, 2000)
+        else:
+            after = "z" * rng.randint(20000, 90000) + "\n"
+        before = None if rng.random() < 0.2 else rng.choice(["$ exit 0\n", after])
+        scenarios.append({
+            "id": ident, "title": "T" * rng.randint(0, 200),
+            "command": ["housesitter", "--version"],
+            "exit_before": None if before is None else 0,
+            "exit_after": rng.choice([0, 0, 1]),
+            "expected_exit": 0,
+            "size_before": None if before is None else len(before or ""),
+            "size_after": len(after),
+            "changed": True, "new_in_pr": new,
+            "before": before, "after": after,
+        })
+    return _results(scenarios=scenarios,
+                    removed=rng.sample(known_ids, rng.randint(0, min(2, len(known_ids)))))
+
+
+def _round4_random_ui(rng, root):
+    """A random ui_out dir (or None for no UI evidence at all)."""
+    roll = rng.random()
+    if roll < 0.25:
+        return None
+    ui_dir = root / "ui_out"
+    ui_dir.mkdir(exist_ok=True)
+    if roll < 0.4:
+        (ui_dir / "ui_manifest.json").write_text(
+            json.dumps({"version": 1, "captures": []}))
+        return ui_dir
+    captures = []
+    for i in range(rng.randint(1, 4)):
+        fixture = rng.choice(["typical", "admin", "a-b"])
+        view = rng.choice(
+            ["index-phone", "index-desktop", "index-desktop-dark", "eink"])
+        status = rng.choice(["added", "removed", "changed", "unchanged"])
+        cap = {"fixture": f"{fixture}-{i}" if i else fixture, "view": view,
+               "status": status,
+               "head_problems": ["check failed"] if rng.random() < 0.2 else []}
+        if status in ("added", "changed"):
+            name = f"{cap['fixture']}__{view}__head.png"
+            cap["head"] = name
+            (ui_dir / name).write_bytes(_png())
+        if status in ("removed", "changed"):
+            name = f"{cap['fixture']}__{view}__base.png"
+            cap["base"] = name
+            (ui_dir / name).write_bytes(_png())
+        if status == "changed":
+            if rng.random() < 0.7:
+                name = f"{cap['fixture']}__{view}__diff.png"
+                cap["diff"] = name
+                (ui_dir / name).write_bytes(_png((i * 40 + 10, 20, 30)))
+            else:
+                cap["diff_error"] = "no diff recorded"
+        captures.append(cap)
+    (ui_dir / "ui_manifest.json").write_text(
+        json.dumps({"version": 1, "captures": captures}))
+    return ui_dir
+
+
+def test_round4_property_ci_and_publisher_agree(tmp_path):
+    # For random mixes of text, test data and screenshots, the CI-side
+    # check accepts if and only if the publisher posts, and the posted body
+    # (stamped and substituted, exactly as GitHub gets it) never exceeds
+    # the budget. Test data only ever degrades its own line, so it cannot
+    # break the agreement.
+    rng = random.Random(20261111)
+    known_ids = sorted(evidence_checks.load_known_scenario_ids(
+        ROOT / "tests" / "evidence" / "scenarios.json"))
+    full_pythons = {"3.9": "3.9.25", "3.10": "3.10.12", "3.14": "3.14.1",
+                    "3.x": "3.14.1"}
+    for case in range(60):
+        root = tmp_path / f"case-{case}"
+        root.mkdir()
+        artifact = root / "artifact"
+        artifact.mkdir()
+        (artifact / "results.json").write_text(
+            json.dumps(_round4_random_doc(rng, known_ids)))
+        _round4_random_ui(rng, artifact)
+        test_args = []
+        if rng.random() < 0.7:
+            shorts = rng.sample(sorted(full_pythons), rng.randint(1, 2))
+            payloads = {}
+            jobs_list = []
+            for short in shorts:
+                conclusion = rng.choice(["success", "failure", "cancelled"])
+                if rng.random() < 0.85:
+                    count = rng.randint(1, 12)
+                    failing = (
+                        [f"test_case_{i:02d}" for i in range(count)]
+                        if conclusion == "failure" and rng.random() < 0.7
+                        else [])
+                    payloads[short] = _junit(
+                        full_pythons[short], tests=count,
+                        failures=len(failing), failing=failing)
+                else:
+                    payloads[short] = b"<not junit>"
+                jobs_list.append(_job(f"test ({short})", conclusion))
+            results_dir = root / "test-results"
+            for short, payload in payloads.items():
+                sub = results_dir / f"test-results-{short}"
+                sub.mkdir(parents=True)
+                (sub / "junit.xml").write_bytes(payload)
+            jobs_path = root / "jobs.json"
+            jobs_path.write_text(json.dumps(_jobs_doc(*jobs_list)))
+            test_args = ["--test-results-dir", str(results_dir),
+                         "--jobs-json", str(jobs_path)]
+        ci_check = SimpleNamespace(artifact_dir=str(artifact), repo=REPO,
+                                   pr=PR, head_sha=HEAD_SHA)
+        ci_rc = evidence_checks.cmd_check(ci_check)
+        assert ci_rc in (0, 1)
+        out = root / "out"
+        pub_rc = publish_evidence.main(
+            ["render", "--artifact-dir", str(artifact),
+             "--out-dir", str(out), "--repo", REPO, "--pr", str(PR),
+             "--head-sha", HEAD_SHA, "--run-id", "100", "--run-attempt", "1"]
+            + test_args)
+        assert pub_rc in (0, 1)
+        assert (ci_rc == 0) == (pub_rc == 0), f"case {case} disagrees"
+        if pub_rc == 0:
+            posted = ui_evidence.substitute_sha(
+                (out / "comment.md").read_text(), "e" * 40)
+            assert len(posted.encode()) <= pr_evidence.MAX_COMMENT_BYTES, (
+                f"case {case} posted over budget")
 
 
 @pytest.mark.parametrize("order", [["success", "failure"], ["failure", "success"]])
@@ -1074,19 +1740,6 @@ def test_test_results_module_is_stdlib_only():
 # Re-review fixes (#11) -----------------------------------------------------------
 
 
-def test_render_text_only_drops_tests_line_when_even_fallback_overflows(tmp_path):
-    # Evidence 10 bytes under the cap: no Tests line fits, not even the short
-    # fallback. Option A: leave the line out, publish within budget.
-    cap = pr_evidence.MAX_COMMENT_BYTES
-    artifact = _text_only_artifact(tmp_path, _padded_evidence(cap - 10))
-    jobs = _jobs_doc(_job("test (3.14)", "failure"))
-    rc, out = _render_with_results(tmp_path, artifact, None, jobs)
-    assert rc == 0
-    body = (out / "comment.md").read_text()
-    assert len(body.encode()) <= cap
-    assert "**Tests:**" not in body
-
-
 def test_render_ui_path_tests_line_never_tips_the_publish_into_refusal(tmp_path, monkeypatch):
     # Find the largest evidence that publishes with its Web UI section and no
     # test data; adding test data must never turn that into a refusal.
@@ -1095,7 +1748,7 @@ def test_render_ui_path_tests_line_never_tips_the_publish_into_refusal(tmp_path,
     for size in range(2990, 1000, -5):
         base = tmp_path / f"base{size}"
         base.mkdir()
-        artifact = _artifact(base, text=_padded_evidence(size))
+        artifact = _artifact(base, results=_padded_results_text(size))
         rc, _ = _render(base, artifact)
         if rc == 0:
             break
@@ -1107,7 +1760,7 @@ def test_render_ui_path_tests_line_never_tips_the_publish_into_refusal(tmp_path,
 
 
 def test_render_deeply_nested_jobs_json_degrades_only_the_line(tmp_path):
-    artifact = _text_only_artifact(tmp_path, TEXT)
+    artifact = _text_only_artifact(tmp_path, 1000)
     out = tmp_path / "out"
     jobs_path = tmp_path / "deep.json"
     jobs_path.write_text("[" * 20_000)
@@ -1165,3 +1818,959 @@ def test_insert_test_line_without_heading_goes_after_the_marker():
     text = pr_evidence.MARKER + "\nno heading here\n"
     out = publish_evidence.insert_test_line(text, "**Tests:** x")
     assert out.split("\n")[:3] == [pr_evidence.MARKER, "**Tests:** x", "no heading here"]
+
+
+# Review round 1, finding 3: no malformed artifact ends silently. ------------
+#
+# Missing fields, hostile nesting, lone surrogates and unexpected manifest
+# types used to escape render with a traceback (KeyError, RecursionError,
+# UnicodeEncodeError-as-caller-error, TypeError) and no refusal.json, so no
+# notice. Every case below must exit non-zero with a refusal file.
+
+
+def test_refusal_bad_schema_when_before_is_missing(tmp_path):
+    doc = _results()
+    del doc["scenarios"][0]["before"]
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+
+
+def test_refusal_bad_schema_for_deeply_nested_results(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").write_text("[" * 2000 + "]" * 2000)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+
+
+def test_refusal_bad_schema_for_a_lone_surrogate(tmp_path):
+    doc = _results()
+    doc["scenarios"][0]["after"] = "ok\ud800tail"
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").write_text(json.dumps(doc))
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+
+
+def test_refusal_render_error_for_an_unexpected_manifest_type(tmp_path):
+    base = "typical__index-phone__base.png"
+    head = "typical__index-phone__head.png"
+    manifest = {
+        "version": 1,
+        "captures": [
+            {
+                "fixture": "typical",
+                "view": [],
+                "status": "changed",
+                "base": base,
+                "head": head,
+                "diff": None,
+                "head_problems": [],
+            }
+        ],
+    }
+    artifact = _artifact(tmp_path, pngs=(base, head), manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc != 0
+    assert _refusal_reason(tmp_path, out) == "render_error"
+
+
+# Review round 1, finding 4: the comment job never ends silently. ------------
+#
+# A failed push skipped the comment job, and a build that died before
+# uploading left its download failing: both ended with no notice. The
+# decision of what to post lives here in Python (unit-tested); the workflow
+# only carries it out, falling back to a fixed publish_failed notice built
+# from main's text whenever the rendered artifact is missing or the push
+# failed. A stale head still writes nothing.
+
+
+@pytest.mark.parametrize(
+    "build,push,refusal,comment,action",
+    [
+        ("success", "success", False, True, "comment"),
+        ("failure", "skipped", True, False, "refusal-notice"),
+        ("success", "failure", False, True, "publish-failed"),
+        ("success", "failure", False, False, "publish-failed"),
+        ("success", "success", False, False, "publish-failed"),
+        ("failure", "skipped", False, False, "publish-failed"),
+        ("failure", "skipped", False, True, "publish-failed"),
+        ("cancelled", "skipped", False, False, "nothing"),
+        ("success", "cancelled", False, True, "nothing"),
+    ],
+)
+def test_decide_comment_action(build, push, refusal, comment, action):
+    assert (
+        publish_evidence.decide_comment_action(build, push, refusal, comment)
+        == action
+    )
+
+
+def test_decide_comment_subcommand_prints_only_the_action(capsys):
+    rc = publish_evidence.main(
+        [
+            "decide-comment",
+            "--build-result", "success",
+            "--push-result", "success",
+            "--has-comment",
+        ]
+    )
+    assert rc == 0
+    assert capsys.readouterr().out == "comment\n"
+
+
+# Review round 1, finding 6: re-check the head at the last moment. -----------
+#
+# The head used to be checked once, then the script fetched, prepared and
+# looked up comments: a head that moved mid-step still pushed and posted.
+# check-head asks the API for the current head through main's Python (faked
+# below), and the workflow calls it immediately before every push and
+# immediately before posting, after the comment lookup.
+
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = ""
+
+
+def _fake_gh(monkeypatch, stdout=HEAD_SHA, returncode=0, calls=None):
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append(argv)
+        return _FakeCompleted(returncode, stdout)
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(publish_evidence, "subprocess", SimpleNamespace(run=fake_run))
+
+
+def test_check_head_passes_when_fresh(tmp_path, monkeypatch, capsys):
+    calls = []
+    _fake_gh(monkeypatch, calls=calls)
+    rc = publish_evidence.main(
+        ["check-head", "--repo", REPO, "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 0
+    assert calls == [["gh", "api", f"repos/{REPO}/pulls/{PR}", "--jq", ".head.sha"]]
+    assert capsys.readouterr().out == ""
+
+
+def test_check_head_stops_when_the_head_moved(monkeypatch, capsys):
+    _fake_gh(monkeypatch, stdout="b" * 40)
+    rc = publish_evidence.main(
+        ["check-head", "--repo", REPO, "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 1
+    assert "stopping without writing" in capsys.readouterr().err
+
+
+def test_check_head_errors_when_the_api_fails(monkeypatch):
+    _fake_gh(monkeypatch, returncode=1)
+    rc = publish_evidence.main(
+        ["check-head", "--repo", REPO, "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 2
+
+
+def test_check_head_errors_on_a_bad_api_answer(monkeypatch):
+    _fake_gh(monkeypatch, stdout="not-a-sha")
+    rc = publish_evidence.main(
+        ["check-head", "--repo", REPO, "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 2
+
+
+def test_check_head_rejects_bad_arguments():
+    rc = publish_evidence.main(
+        ["check-head", "--repo", "not a repo", "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 2
+
+
+# Review round 2, finding 1: a missing rendered directory still posts. --------
+#
+# When the build fails before uploading validated-evidence, rendered/ does
+# not exist; the comment job must still post the fixed publish_failed
+# notice instead of dying on the missing directory. This runs the real
+# comment-step shell from the workflow with a fake gh on PATH.
+
+
+def _comment_step_shell():
+    """Extract the comment step's `run:` block from evidence-publish.yml."""
+    text = (
+        ROOT / ".github" / "workflows" / "evidence-publish.yml"
+    ).read_text(encoding="utf-8")
+    lines = text.splitlines()
+    start = next(
+        i for i, line in enumerate(lines)
+        if line.strip() == "- name: Post or update the evidence comment"
+    )
+    marker = next(
+        i for i in range(start, len(lines)) if lines[i].strip() == "run: |"
+    )
+    body = []
+    for line in lines[marker + 1 :]:
+        if line.strip() == "" or line.startswith(" " * 10):
+            body.append(line[10:] if line.startswith(" " * 10) else line)
+        else:
+            break
+    assert body, "comment step has no run block"
+    return "\n".join(body) + "\n"
+
+
+_FAKE_GH = """\
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+state = pathlib.Path(os.environ["FAKE_STATE"])
+if "-X" in args:
+    i = args.index("-X")
+    entry = {"method": args[i + 1], "argv": args}
+    for flag in args:
+        if flag.startswith("body=@"):
+            entry["body"] = pathlib.Path(flag[len("body=@"):]).read_text()
+    with (state / "calls.jsonl").open("a") as f:
+        f.write(json.dumps(entry) + "\\n")
+    print("")
+elif any("/pulls/" in a for a in args):
+    seq = state / "heads.json"
+    if seq.exists():
+        heads = json.loads(seq.read_text())
+        if heads:
+            head = heads.pop(0)
+            seq.write_text(json.dumps(heads))
+            print(head)
+        else:
+            print(os.environ.get("FAKE_HEAD") or os.environ["HEAD_SHA"])
+    else:
+        print(os.environ.get("FAKE_HEAD") or os.environ["HEAD_SHA"])
+elif any("/comments" in a for a in args):
+    listing = state / "listing.json"
+    print(listing.read_text() if listing.exists() else "[]")
+else:
+    raise SystemExit(f"unexpected gh call: {args}")
+"""
+
+
+def _run_comment_step(
+    tmp_path,
+    monkeypatch,
+    build_result,
+    push_result,
+    files=None,
+    listing=None,
+    evidence_sha="",
+    run_id="100",
+    run_attempt="1",
+    fake_head=None,
+    heads=None,
+):
+    """Run the real comment-step shell with a fake gh; return (proc, calls).
+
+    ``files`` pre-creates run-dir files (e.g. rendered/comment.md);
+    ``listing`` is the fake issue-comments API answer; every gh write lands
+    in the returned calls list as {"method", "argv", "body"?}.
+    """
+    import os
+    import subprocess
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "scripts").symlink_to(ROOT / "scripts", target_is_directory=True)
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    gh = fake_bin / "gh"
+    gh.write_text(_FAKE_GH)
+    gh.chmod(0o755)
+    state = tmp_path / "state"
+    state.mkdir()
+    if listing is not None:
+        (state / "listing.json").write_text(json.dumps(listing))
+    if heads is not None:
+        (state / "heads.json").write_text(json.dumps(heads))
+    for name, content in (files or {}).items():
+        path = run / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    step = tmp_path / "comment-step.sh"
+    step.write_text(_comment_step_shell())
+    env = {
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "GH_TOKEN": "fake",
+        "REPO": REPO,
+        "PR": str(PR),
+        "HEAD_SHA": HEAD_SHA,
+        "EVIDENCE_SHA": evidence_sha,
+        "BUILD_RESULT": build_result,
+        "PUSH_RESULT": push_result,
+        "RUN_ID": run_id,
+        "RUN_ATTEMPT": run_attempt,
+        "FAKE_STATE": str(state),
+    }
+    if fake_head is not None:
+        env["FAKE_HEAD"] = fake_head
+    proc = subprocess.run(
+        ["bash", str(step)], cwd=run, env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+    calls = []
+    calls_path = state / "calls.jsonl"
+    if calls_path.exists():
+        calls = [
+            json.loads(line) for line in calls_path.read_text().splitlines()
+        ]
+    return proc, calls
+
+
+def test_comment_step_posts_notice_with_no_rendered_dir(tmp_path, monkeypatch):
+    # Build failed before uploading: no rendered/ directory exists, the
+    # download found nothing, and the push was skipped. The fixed
+    # publish_failed notice must still reach the PR.
+    proc, calls = _run_comment_step(tmp_path, monkeypatch, "failure", "skipped")
+    assert proc.returncode == 0, proc.stderr
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1, f"expected one POST; stderr: {proc.stderr}"
+    body = posts[0]["body"]
+    assert body.startswith("<!-- housesitter-evidence head=")
+    assert "outcome=notice" in body.split("\n", 1)[0]
+    assert "`publish_failed`" in body
+
+
+# Review round 2, finding 2: monotonic comment writes. -------------------------
+#
+# Overlapping publisher runs used to both POST (duplicates), or let an older
+# attempt's notice replace a newer run's evidence, or PATCH a stale head's
+# body over the current head's. The comment job is now serialised per PR and
+# every body carries a hidden marker (head SHA, run id, attempt, outcome);
+# the write follows monotonic rules over the bot's own marker comments.
+
+OTHER_HEAD = "b" * 40
+BOT = "github-actions[bot]"
+
+
+def _marker(head=HEAD_SHA, run=100, attempt=1, outcome="evidence"):
+    return publish_evidence.build_marker(head, run, attempt, outcome)
+
+
+def _bot_comment(cid, head=HEAD_SHA, run=100, attempt=1, outcome="evidence",
+                 login=BOT):
+    return {
+        "id": cid,
+        "user": {"login": login},
+        "body": _marker(head, run, attempt, outcome) + "\n## Before / after evidence\n",
+    }
+
+
+def _triples(comments):
+    return [
+        (c["id"], c["user"]["login"], c["body"]) for c in comments
+    ]
+
+
+def test_build_marker_rejects_untrusted_shapes():
+    good = _marker()
+    assert good == (
+        f"<!-- housesitter-evidence head={HEAD_SHA} "
+        "run=100 attempt=1 outcome=evidence -->"
+    )
+    for bad in [
+        ("x" * 40, 100, 1, "evidence"),
+        (HEAD_SHA, 0, 1, "evidence"),
+        (HEAD_SHA, -3, 1, "evidence"),
+        (HEAD_SHA, True, 1, "evidence"),
+        (HEAD_SHA, 100, "1", "evidence"),
+        (HEAD_SHA, 100, 1, "refused"),
+    ]:
+        try:
+            publish_evidence.build_marker(*bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"marker accepted {bad!r}")
+
+
+def test_parse_marker_round_trip_and_rejections():
+    assert publish_evidence.parse_marker(_marker()) == {
+        "head_sha": HEAD_SHA,
+        "run_id": 100,
+        "attempt": 1,
+        "outcome": "evidence",
+    }
+    assert publish_evidence.parse_marker(pr_evidence.MARKER + "\nbody") == {
+        "legacy": True
+    }
+    assert publish_evidence.parse_marker("hello") is None
+    assert publish_evidence.parse_marker(_marker() + " trailing") is None
+    assert publish_evidence.parse_marker(None) is None
+
+
+def test_stamp_marker_upgrades_the_bare_marker():
+    body = pr_evidence.MARKER + "\n## Before / after evidence\n"
+    stamped = publish_evidence.stamp_marker(body, HEAD_SHA, 7, 2, "notice")
+    assert stamped.split("\n", 1)[0] == _marker(HEAD_SHA, 7, 2, "notice")
+    assert stamped.endswith("## Before / after evidence\n")
+    try:
+        publish_evidence.stamp_marker("no marker here", HEAD_SHA, 7, 2, "notice")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("stamp accepted a body without the marker")
+
+
+def test_second_same_head_run_patches_instead_of_posting():
+    # Interleaving (a): two same-head runs; the later one sees the earlier
+    # run's comment and patches it instead of posting a duplicate.
+    existing = _triples([_bot_comment(11, run=100)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 101, 1, "evidence"
+    ) == ("patch", 11, [])
+
+
+def test_older_same_head_attempt_never_writes():
+    existing = _triples([_bot_comment(11, run=101)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("skip", None, [])
+
+
+def test_stale_notice_never_replaces_same_head_evidence():
+    # Interleaving (b): attempt B published good evidence for head H, then
+    # the older attempt A finishes with a failed push: A's publish_failed
+    # notice must not replace B's evidence.
+    existing = _triples([_bot_comment(11, run=101, outcome="evidence")])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "notice"
+    ) == ("skip", None, [])
+    # Even a newer notice never replaces same-head evidence.
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 102, 1, "notice"
+    ) == ("skip", None, [])
+
+
+def test_stale_body_never_reaches_decide_write_for_a_moved_head():
+    # Interleaving (c): A read head H1, the head moved, B published H2, and
+    # A's stale body arrives last. A's freshness re-checks (expected H1 vs
+    # current H2, before the lookup and again after it) stop it before any
+    # write, so the H2 comment survives. If it still reached decide_write,
+    # the cross-head ordering (review round 3, finding 1) stops it there:
+    # run 101 is newer than run 100 whatever head it was for.
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=101)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("skip", None, [])
+
+
+def test_fresh_head_replaces_a_stale_head_comment():
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=90)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("patch", 11, [])
+
+
+def test_forged_markers_in_other_comments_are_ignored():
+    forged = {
+        "id": 9,
+        "user": {"login": "mallory"},
+        "body": _marker(run=999) + "\nforged",
+    }
+    assert publish_evidence.decide_write(
+        _triples([forged]), HEAD_SHA, 100, 1, "evidence"
+    ) == ("post", None, [])
+
+
+def test_bot_comment_without_a_marker_is_ignored():
+    plain = {"id": 8, "user": {"login": BOT}, "body": "hello"}
+    assert publish_evidence.decide_write(
+        _triples([plain]), HEAD_SHA, 100, 1, "evidence"
+    ) == ("post", None, [])
+
+
+def test_legacy_bare_marker_is_replaced():
+    legacy = {
+        "id": 7,
+        "user": {"login": BOT},
+        "body": pr_evidence.MARKER + "\nold evidence\n",
+    }
+    assert publish_evidence.decide_write(
+        _triples([legacy]), HEAD_SHA, 100, 1, "evidence"
+    ) == ("patch", 7, [])
+
+
+def test_multiple_markers_keep_one_and_delete_the_rest():
+    # Every marker here is older than this run: same-head markers win the
+    # pool over the stale cross-head one. (A newer cross-head marker would
+    # skip instead — review round 3, finding 1 — and skip-time cleanup is
+    # covered by the round 3 finding 4 tests.)
+    existing = _triples(
+        [
+            _bot_comment(11, run=90),
+            _bot_comment(12, run=95),
+            _bot_comment(13, head=OTHER_HEAD, run=80),
+        ]
+    )
+    action, keep, delete = publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    )
+    assert action == "patch"
+    assert keep == 12
+    assert delete == [11, 13]
+
+
+def test_no_markers_posts():
+    assert publish_evidence.decide_write([], HEAD_SHA, 100, 1, "evidence") == (
+        "post",
+        None,
+        [],
+    )
+
+
+def _listing_json(*comments):
+    return json.dumps(list(comments))
+
+
+def test_decide_write_subcommand_prints_patch_plan(monkeypatch, capsys):
+    comments = [_bot_comment(5, run=90)]
+
+    def fake_run(argv, **kwargs):
+        assert argv[:2] == ["gh", "api"]
+        return _FakeCompleted(0, _listing_json(*comments))
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        publish_evidence, "subprocess", SimpleNamespace(run=fake_run)
+    )
+    rc = publish_evidence.main(
+        [
+            "decide-write",
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+            "--run-id", "100",
+            "--run-attempt", "1",
+            "--outcome", "evidence",
+        ]
+    )
+    assert rc == 0
+    assert capsys.readouterr().out == "PATCH 5\n"
+
+
+def test_decide_write_subcommand_prints_skip_for_stale(monkeypatch, capsys):
+    comments = [_bot_comment(5, run=200, outcome="evidence")]
+
+    def fake_run(argv, **kwargs):
+        return _FakeCompleted(0, _listing_json(*comments))
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        publish_evidence, "subprocess", SimpleNamespace(run=fake_run)
+    )
+    rc = publish_evidence.main(
+        [
+            "decide-write",
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+            "--run-id", "100",
+            "--run-attempt", "1",
+            "--outcome", "notice",
+        ]
+    )
+    assert rc == 0
+    assert capsys.readouterr().out == "SKIP\n"
+
+
+def test_decide_write_subcommand_fails_loud_when_the_api_fails(monkeypatch):
+    _fake_gh(monkeypatch, returncode=1)
+    rc = publish_evidence.main(
+        [
+            "decide-write",
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+            "--run-id", "100",
+            "--run-attempt", "1",
+            "--outcome", "evidence",
+        ]
+    )
+    assert rc == 2
+
+
+def test_render_stamps_the_evidence_marker(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    rc, out = _render(tmp_path, artifact, run_id=7, run_attempt=2)
+    assert rc == 0
+    first = (out / "comment.md").read_text().split("\n", 1)[0]
+    assert first == _marker(run=7, attempt=2, outcome="evidence")
+
+
+def test_refusal_stamps_the_notice_marker(tmp_path, capsys):
+    (tmp_path / "refusal.json").write_text(json.dumps({"reason": "too_large"}))
+    rc = publish_evidence.main(
+        [
+            "refusal",
+            "--reason-file", str(tmp_path / "refusal.json"),
+            "--head-sha", HEAD_SHA,
+            "--run-id", "7",
+            "--run-attempt", "2",
+        ]
+    )
+    assert rc == 0
+    first = capsys.readouterr().out.split("\n", 1)[0]
+    assert first == _marker(run=7, attempt=2, outcome="notice")
+
+
+def test_refusal_without_marker_args_keeps_the_bare_marker(tmp_path, capsys):
+    (tmp_path / "refusal.json").write_text(json.dumps({"reason": "too_large"}))
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(tmp_path / "refusal.json")]
+    )
+    assert rc == 0
+    assert capsys.readouterr().out.startswith(evidence_checks.REFUSAL_MARKER)
+
+
+def test_comment_job_is_serialised_per_pr():
+    # The comment-writing job — and only that job — carries a concurrency
+    # group keyed by the PR number from resolve's outputs, waiting instead
+    # of cancelling, so one PR's publishers never write at once.
+    text = (
+        ROOT / ".github" / "workflows" / "evidence-publish.yml"
+    ).read_text(encoding="utf-8")
+    comment_at = text.index("\n  comment:")
+    assert text.count("cancel-in-progress") == 1
+    group = "group: evidence-comment-${{ needs.resolve.outputs.pr }}"
+    assert group in text[comment_at:]
+    assert "cancel-in-progress: false" in text[comment_at:]
+
+
+def _evidence_comment(head=HEAD_SHA, run=100, attempt=1):
+    return _marker(head, run, attempt, "evidence") + "\n## Before / after evidence\n"
+
+
+def test_comment_step_patches_the_existing_marker_comment(tmp_path, monkeypatch):
+    # Same head, earlier run already posted: the new run patches that
+    # comment instead of posting a duplicate.
+    listing = [_bot_comment(11, run=90)]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files=files, listing=listing, evidence_sha="c" * 40,
+    )
+    assert proc.returncode == 0, proc.stderr
+    writes = [c for c in calls if c["method"] in ("POST", "PATCH", "DELETE")]
+    assert len(writes) == 1, writes
+    assert writes[0]["method"] == "PATCH"
+    url = next(a for a in writes[0]["argv"] if "repos/" in a)
+    assert url == f"repos/{REPO}/issues/comments/11"
+
+
+def test_comment_step_skips_a_stale_notice_over_newer_evidence(tmp_path, monkeypatch):
+    # Interleaving (b) end to end: good evidence from run 200 is already
+    # posted; this run 100 only has a publish_failed notice. It writes
+    # nothing.
+    listing = [_bot_comment(11, run=200, outcome="evidence")]
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "failure", listing=listing,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [], calls
+
+
+def test_comment_step_stops_when_the_head_moved(tmp_path, monkeypatch):
+    # Interleaving (c) end to end: this run recorded H1 but the PR now
+    # points at H2, so the freshness re-check stops the step before any
+    # lookup or write, and the H2 comment survives untouched.
+    listing = [_bot_comment(11, head=OTHER_HEAD, run=101)]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files=files, listing=listing, evidence_sha="c" * 40,
+        fake_head=OTHER_HEAD,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [], calls
+
+
+def test_comment_step_replaces_a_stale_head_and_dedupes(tmp_path, monkeypatch):
+    # Fresh head, two leftover marker comments: patch one, delete the other.
+    listing = [
+        _bot_comment(11, head=OTHER_HEAD, run=90),
+        _bot_comment(12, head=OTHER_HEAD, run=95),
+    ]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files=files, listing=listing, evidence_sha="c" * 40,
+    )
+    assert proc.returncode == 0, proc.stderr
+    methods = sorted(c["method"] for c in calls)
+    assert methods == ["DELETE", "PATCH"], calls
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    drop = next(c for c in calls if c["method"] == "DELETE")
+    patch_url = next(a for a in patch["argv"] if "repos/" in a)
+    drop_url = next(a for a in drop["argv"] if "repos/" in a)
+    assert patch_url.endswith("/12")
+    assert drop_url.endswith("/11")
+
+
+# Review round 3, finding 1: cross-head monotonic ordering. ------------------
+#
+# Overlapping runs used to order only within one head: run 100 for head A
+# PATCHed head B's evidence from newer run 101 when the PR swung A -> B ->
+# A between the freshness check and the lookup. Ordering is now over every
+# bot marker comment: never replace a comment from a newer (run id,
+# attempt), whatever head it is for. A genuinely newer push always gets a
+# newer CI run id, so it still wins. The shell also re-checks the head
+# after the lookup, immediately before writing.
+
+
+def test_older_run_never_replaces_newer_cross_head_comment():
+    # The reviewer's ABA repro: run 100 is for head A, but head B's
+    # evidence from newer run 101 is already posted.
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=101)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "notice"
+    ) == ("skip", None, [])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("skip", None, [])
+
+
+def test_older_attempt_never_replaces_newer_cross_head_attempt():
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=100, attempt=2)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("skip", None, [])
+
+
+def test_newer_run_replaces_stale_cross_head_comment():
+    # Rollback: a NEW CI run for head A (higher id) correctly replaces
+    # head B's comment.
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=101)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 102, 1, "evidence"
+    ) == ("patch", 11, [])
+
+
+def test_comment_step_skips_older_run_over_newer_cross_head_comment(
+    tmp_path, monkeypatch
+):
+    # End to end: the PR is back on head A and run 100's freshness checks
+    # pass, but head B's evidence from run 101 is posted. Nothing is
+    # written: B's comment survives untouched.
+    listing = [_bot_comment(11, head=OTHER_HEAD, run=101)]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "failure",
+        files=files, listing=listing,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [], calls
+
+
+def test_comment_step_rechecks_the_head_after_the_lookup(tmp_path, monkeypatch):
+    # The head moves after the lookup but before the write: the second
+    # freshness re-check stops the step with no writes.
+    listing = [_bot_comment(11, run=90)]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files=files, listing=listing, evidence_sha="c" * 40,
+        heads=[HEAD_SHA, OTHER_HEAD],
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [], calls
+
+
+def test_comment_step_checks_the_head_twice():
+    assert _comment_step_shell().count("check-head") >= 2
+
+
+# Review round 3, finding 2: corrupt rendered files fall back. -------------
+#
+# A corrupt rendered/comment.md (success path) or rendered/refusal.json
+# (refusal path) used to end the step with no comment at all (exit 1 and
+# 2). Any failure to read or validate those files now falls back to the
+# fixed publish_failed notice — built only from main's text and trusted
+# event data — subject to the same freshness and ordering rules.
+
+
+def _posted_notice_body(calls):
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1, f"expected one POST; calls: {calls}"
+    return posts[0]["body"]
+
+
+def test_comment_step_falls_back_to_notice_on_corrupt_comment(
+    tmp_path, monkeypatch
+):
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files={"rendered/comment.md": "truncated"},
+        evidence_sha="c" * 40,
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = _posted_notice_body(calls)
+    assert body.split("\n", 1)[0].endswith("outcome=notice -->")
+    assert "`publish_failed`" in body
+    assert "truncated" not in body
+
+
+def test_comment_step_falls_back_to_notice_on_corrupt_refusal(
+    tmp_path, monkeypatch
+):
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "failure", "skipped",
+        files={"rendered/refusal.json": "{"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = _posted_notice_body(calls)
+    assert body.split("\n", 1)[0].endswith("outcome=notice -->")
+    assert "`publish_failed`" in body
+
+
+def test_comment_step_falls_back_to_notice_on_rejected_refusal_reason(
+    tmp_path, monkeypatch
+):
+    # Valid JSON but not a reason the publisher knows: the refusal
+    # subcommand rejects it, so the fixed notice posts instead.
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "failure", "skipped",
+        files={"rendered/refusal.json": '{"reason": "nope"}'},
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = _posted_notice_body(calls)
+    assert "`publish_failed`" in body
+    assert "nope" not in body
+
+
+# Review round 3, finding 3: the marker's length is reserved. ---------------
+#
+# The fitting budgets used to ignore the hidden marker the publisher
+# stamps last: one changed `version` scenario plus a Tests line fit in
+# 60,000 bytes unstamped, the CI-side check accepted it, and then stamping
+# pushed the body over budget and the publish was refused `too_large` —
+# test data breaking the whole publish (D21). Every fitting budget now
+# reserves the longest stamped marker, so both sides agree.
+
+
+def _ten_failure_inputs(tmp_path):
+    results_dir = _results_tree(
+        tmp_path,
+        {"3.9": _junit(failures=10, failing=[f"test_case_{i:02d}" for i in range(10)])},
+    )
+    jobs = _jobs_doc(_job("test (3.9)", "failure"))
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(json.dumps(jobs))
+    return str(results_dir), str(jobs_path)
+
+
+def test_render_with_tests_line_publishes_at_the_old_cliff(tmp_path):
+    # The reviewer's repro: before="before\n", after="X"*29304+"\n", valid
+    # XML with ten failures, run 100 attempt 1. The unstamped body with the
+    # Tests line was 59,920 bytes (accepted by the CI-side check) but the
+    # stamped body was refused `too_large`. Now the publish succeeds and
+    # the stamped body fits the budget.
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    doc = _results()
+    doc["scenarios"][0].update(changed=True, before="before\n", after="X" * 29304 + "\n")
+    (artifact / "results.json").write_text(json.dumps(doc))
+    results_dir, jobs_json = _ten_failure_inputs(tmp_path)
+    body = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA,
+        test_results_dir=results_dir, jobs_json=jobs_json,
+        run_id=100, run_attempt=1,
+    )
+    assert len(body.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+    assert "10 failing" in body
+
+
+def test_render_without_tests_matches_ci_side_check_at_the_old_cliff(tmp_path):
+    # The CI-side check renders without test data or run ids; it accepted
+    # this artifact while the publisher (with both) refused it. Both sides
+    # now use the same reservation, so agreement holds at the cliff.
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    doc = _results()
+    doc["scenarios"][0].update(changed=True, before="before\n", after="X" * 29304 + "\n")
+    (artifact / "results.json").write_text(json.dumps(doc))
+    plain = publish_evidence.render_comment(artifact, REPO, PR, HEAD_SHA)
+    assert len(plain.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def test_skip_still_deletes_duplicates_for_a_newer_notice():
+    # The reviewer's duplicates-notice repro: two bot evidence comments
+    # for the current head from runs 101 and 99; the failed run 102 only
+    # has a notice, so it writes nothing — but it still deletes the older
+    # duplicate, keeping the winner (newest run 101).
+    existing = _triples([_bot_comment(11, run=101), _bot_comment(12, run=99)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 102, 1, "notice"
+    ) == ("skip", None, [12])
+
+
+def test_skip_still_deletes_duplicates_for_an_older_success():
+    # The reviewer's duplicates-older-success repro: the same leftovers,
+    # and this successful run 100 is older than run 101, so it writes
+    # nothing — but it still deletes the older duplicate.
+    existing = _triples([_bot_comment(11, run=101), _bot_comment(12, run=99)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("skip", None, [12])
+
+
+def test_skip_keeps_same_head_evidence_over_a_newer_notice():
+    # Skip-time winner prefers same-head evidence: the notice never
+    # replaces it, so the evidence stays and the notice goes.
+    existing = _triples(
+        [_bot_comment(11, run=101), _bot_comment(12, run=105, outcome="notice")]
+    )
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 102, 1, "notice"
+    ) == ("skip", None, [12])
+
+
+def test_comment_step_skip_still_deletes_the_older_duplicate(
+    tmp_path, monkeypatch
+):
+    # End to end for both reviewer repros: exit 0 with exactly one DELETE
+    # of the older duplicate and no other write.
+    for run_id, action_args in (
+        ("102", {"build_result": "failure", "push_result": "skipped"}),
+        ("100", {"build_result": "success", "push_result": "success",
+                 "files": {"rendered/comment.md": _evidence_comment() + "body\n"},
+                 "evidence_sha": "c" * 40}),
+    ):
+        listing = [_bot_comment(11, run=101), _bot_comment(12, run=99)]
+        case = tmp_path / f"case-{run_id}"
+        case.mkdir()
+        proc, calls = _run_comment_step(
+            case, monkeypatch, listing=listing, run_id=run_id, **action_args
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert len(calls) == 1, calls
+        assert calls[0]["method"] == "DELETE"
+        url = next(a for a in calls[0]["argv"] if "repos/" in a)
+        assert url.endswith("/12")
+
+
+def test_final_size_check_pins_the_budget_fencepost():
+    # The posted body itself is still guarded at exactly the budget: a
+    # body of exactly MAX_COMMENT_BYTES passes, one byte more refuses.
+    marker = pr_evidence.MARKER
+    body = marker + "x" * (pr_evidence.MAX_COMMENT_BYTES - len(marker.encode()))
+    assert len(body.encode()) == pr_evidence.MAX_COMMENT_BYTES
+    publish_evidence.check_evidence_text(body)
+    try:
+        publish_evidence.check_evidence_text(body + "x")
+    except publish_evidence.PublishError as exc:
+        assert exc.reason == "too_large"
+    else:
+        raise AssertionError("one byte over the budget must refuse")

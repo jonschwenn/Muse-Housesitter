@@ -44,9 +44,11 @@ PR #1 predates the tooling and has no evidence.
   - a truncated (paged) result
   - one or two error cases (e.g. bad password, TLS mismatch)
 - `scripts/pr_evidence.py` runs every scenario on the PR's base (`main`, in
-  a temporary worktree) and on its head. It writes the comment body: a
-  summary table (scenario, changed or unchanged, envelope size as the SDK
-  measures it), then a diff for each changed scenario. Volatile fields
+  a temporary worktree) and on its head. It writes structured results to
+  `results.json` and a local preview to `evidence.md`: a summary table
+  (scenario, changed or unchanged, envelope size as the SDK measures it),
+  then a diff for each changed scenario. The results schema requires every
+  field the renderer reads, with valid UTF-8 strings. Volatile fields
   (`collected_at`, saved ids) are normalised so they don't show up as noise.
 - Each run gets a fresh, empty `HOME` and a minimal environment: the
   variables the SDK gives drop-in commands, plus `PYTHONPATH` and
@@ -60,23 +62,51 @@ PR #1 predates the tooling and has no evidence.
   comment scripts on every PR with a read-only token: all jobs in that
   workflow have `contents: read` and nothing else. It writes the text
   comment body to the job summary and uploads the evidence artifact
-  (`evidence.md` plus the UI PNGs and `ui_manifest.json`, if any). It never
-  pushes and never comments. The `ci-ok` job passes only when `test` and
-  `evidence` both passed or were skipped on purpose.
+  (`results.json`, `evidence.md`, plus the UI PNGs and `ui_manifest.json`,
+  if any). Before uploading, it runs `scripts/evidence_checks.py check` on
+  that file set, using the publisher's refusal checks. A refusal fails
+  `evidence` and turns `ci-ok` red. This catches honest mistakes only: a
+  PR controls its own copy of the checks. The job never pushes or comments.
+  The `ci-ok` job passes only when `test` and `evidence` both passed or
+  were skipped on purpose.
 - A separate privileged workflow, `.github/workflows/evidence-publish.yml`,
   runs on `workflow_run` after each CI run and always executes the file from
   the default branch — never PR code. It resolves the PR number through the
   API from trusted event data (head branch and head repository owner;
   `workflow_run.pull_requests` is empty for forks), verifies the API's
   current head SHA still matches the run's head SHA, validates the artifact
-  as fully untrusted data with main's `ui_evidence.validate_artifact` (via
-  `scripts/publish_evidence.py render`), rebuilds the Web UI section from
-  the validated manifest with main's `pr_evidence` renderer, pushes only the
+  as fully untrusted data via main's `scripts/publish_evidence.py render`,
+  rebuilds the text section from validated `results.json` and the Web UI
+  section from the validated manifest with main's renderers, pushes only the
   validated PNGs to the orphan `pr-evidence` branch (below), and creates or
   edits **one** bot comment. Fork PRs get the comment too, because the
   write token belongs to this workflow, not to the PR. When the artifact is
-  invalid or the run is stale or ambiguous, it publishes nothing: no push,
-  no comment.
+  invalid, it pushes no images and posts a fixed refusal notice containing
+  only main's text and a reason code: `missing`, `too_large`, `bad_png`,
+  `bad_schema`, `stale_head`, `render_error`, or `publish_failed`.
+  These mean missing or unreadable input, a size-limit breach, an invalid
+  screenshot, invalid evidence data, a mismatched artifact head, a render
+  failure, or a publishing failure, respectively. `publish_failed` covers a
+  failed image push or any failure to read or validate the rendered comment
+  or refusal file, including an unknown refusal reason. These failures fall
+  back to the fixed notice under the same publishing checks. A stale or
+  ambiguous PR lookup still publishes nothing. The head is re-checked
+  immediately before every push attempt. The comment job is serialised per
+  PR with the job-level group `evidence-comment-<PR>` and
+  `cancel-in-progress: false`; there is no workflow-level group. Inside that
+  job, the head is checked before the comment lookup and again immediately
+  before writing; a moved head stops without writing. Every evidence or
+  notice body starts with a hidden marker carrying the head SHA, run id,
+  attempt and outcome from trusted event data. Main's `decide-write` reads
+  only the bot's own marker comments: a comment from a newer CI run is kept
+  (ordered by run id, then attempt), whatever head it names. A genuinely
+  newer push gets a newer CI run id, so it can still publish. A notice never
+  replaces same-head evidence. Even when it skips writing, the job removes
+  duplicate bot marker comments, keeping the winner: the newest run, with
+  same-head evidence preferred over notices. GitHub keeps only one pending
+  job per group: a later arrival can replace it. If that later run is stale,
+  it writes nothing; the previous comment stays and names its head SHA.
+  Re-run the publisher to recover the missing update (D34).
 - Each CI `test` job runs pytest with `--junitxml`, writes a results table
   to its job summary page, and uploads `test-results-<matrix python>`.
   The publisher downloads the XML and reads the run attempt's test-job
@@ -99,12 +129,22 @@ PR #1 predates the tooling and has no evidence.
     but not shown. Failure messages and tracebacks are never published.
   - Jon's option A (D21): missing or invalid results or unusable job data
     degrade only the Tests line: `results unavailable`, `no test jobs
-    found`, or `no valid results file`. To fit the comment size budget,
-    failing names are dropped first (counts and verdicts stay), then a
-    fixed short line is used, and if even that doesn't fit, the line is
-    left out. Test data never blocks the publish or hides
-    the screenshots and diffs reviewers need. Invalid UI artifacts still
-    refuse the whole publish.
+    found`, or `no valid results file`. Test data never blocks the publish
+    or hides the screenshots and diffs reviewers need. Invalid UI artifacts
+    still refuse the evidence and produce the fixed notice.
+- CI and the publisher use the same fitting code and one 60,000-byte budget
+  for the whole comment as posted. The measurement allows for the longest
+  hidden marker and counts image links with their final 40-character commit
+  SHA, including the growth from replacing each placeholder. When the body
+  is too long, it drops failing test names first (counts and verdicts stay),
+  then uses a fixed short Tests line, then drops that line. Next it reduces
+  screenshot details from the full section to a table with a notice, then
+  to a pointer. Only then does it remove whole text scenario sections.
+  Omission notices count toward the same budget; they name at most five
+  omitted scenarios, followed by "and N more" for the rest. If the remaining
+  body still cannot fit, the evidence is refused. The workflow's final
+  check also enforces 60,000 bytes on the stamped body with final image
+  links before posting.
 - Trust model (the fine print that makes the above honest). The `CI`
   workflow runs on `pull_request`, so its file comes from the PR: a PR that
   edits `ci.yml` controls that run's jobs, including what the artifact
@@ -205,7 +245,14 @@ PR #1 predates the tooling and has no evidence.
   comment. In Google Chrome on the CI runner, the stress fixture's
   full-height shots were ~9 MB each, so main's publisher refused the whole
   evidence upload. A visual change only below the first 8,000 px of a page
-  will not appear in the screenshots or the pixel diff.
+  will not appear in the screenshots or the pixel diff. If the PNG total
+  exceeds the 40 MB push cap, full-page captures are shortened further,
+  largest capture first, through 8,000, 6,000, 4,000 and 3,000 px. Base,
+  head and diff images are shortened together where needed; e-ink is never
+  cropped. The manifest records `crop_px`, and the comment warns at that
+  height that "changes below this line are not shown." Under the cap,
+  this extra cropping leaves images unchanged. If the minimum still does
+  not fit, the evidence job fails.
 - The same script runs the UI checks, and any failure fails the `evidence`
   job: a console error or warning, a page error, a CSP or Trusted Types
   violation, a dialog, horizontal page overflow, internal clipping (an
@@ -235,15 +282,17 @@ PR #1 predates the tooling and has no evidence.
   validated `ui_manifest.json` — it never pastes pre-rendered markdown
   files from the artifact, and the `evidence` job's `evidence.md` carries
   the text section only. The comment carries only known boilerplate plus a
-  table and images built from the re-validated manifest: capture names
-  against the capture regex, status against the
+  table and images built from the re-validated manifest. The `<details>`
+  summary is fixed text, "Screenshots"; fixture labels appear only in code
+  spans. The renderer checks capture names against the capture regex,
+  status against the
   added/removed/changed/unchanged enum, view against the known views,
   problems escaped (code spans) and length-capped, browser channel against
   an allow-list (`chromium` → Playwright's bundled Chromium, `chrome` →
   Google Chrome, `chrome-beta` → Google Chrome Beta, `msedge` → Microsoft
   Edge), and browser version against 1–4 dot-separated groups of digits,
   at most 32 characters. The manifest must be an object with a `captures`
-  list, or the artifact is invalid and nothing is published. Each capture's
+  list, or the evidence is refused with a fixed notice. Each capture's
   image fields must fit its status (added: only an after image; removed:
   only a before image; unchanged: none), only a changed capture without a
   diff image may carry a diff error, and removed must carry no check
@@ -261,7 +310,10 @@ PR #1 predates the tooling and has no evidence.
   when at least one entry fails validation. The two never appear together.
   Image URLs always match
   `https://raw.githubusercontent.com/<repo>/__HOUSESITTER_EVIDENCE_SHA__/pr/<n>/<head-sha>/<capture-name>`
-  exactly. Scenario titles and ids in the text section go through code spans
+  exactly. The text section is also rebuilt by main; `evidence.md` is
+  never read by the publisher. Command output stays inside fenced code
+  blocks, and the header says it comes from the PR's own CI run.
+  Scenario titles and ids in the text section go through code spans
   the same way. This protects against accidents and hostile *data*; a
   hostile PR author controls the PR-side building scripts, but those scripts
   never run in the publisher (see the trust model above).
@@ -274,15 +326,21 @@ PR #1 predates the tooling and has no evidence.
   which then needs no SHA. The repo is public, so
   `https://raw.githubusercontent.com/<owner>/<repo>/<sha>/<path>` works.
 - Trust model, publisher side: the publisher treats the screenshot artifact
-  as untrusted data produced by PR code. It validates file names, PNG magic
-  bytes, size and count caps, rejects symlinks and subdirectories, refuses
-  to push or post anything when validation fails, and pushes only to the
+  as untrusted data produced by PR code. It validates file names, PNG
+  structure (chunk lengths, CRCs and dimensions), allows only IHDR, IDAT
+  and IEND chunks, refuses palette chunks (PLTE) and palette images, and
+  requires consecutive IDAT chunks. It requires a complete compressed stream
+  with no trailing data, decoding to exactly the size declared by IHDR. Each
+  scanline's filter byte must be 0–4. It checks size and count caps,
+  rejects symlinks and subdirectories, posts only a fixed notice when
+  validation fails, and pushes only to the
   orphan `pr-evidence` branch — then posts the pixels as the author's claim,
   exactly like the text diffs. Validation passing means the files are PNGs
-  of a sane size, not that the pixels are truthful. The validator is main's
-  `ui_evidence.validate_artifact`, called by main's publisher script, so
-  there is no second copy to drift; `tests/test_ui_evidence.py` pins the
-  wiring (which script entry points the workflow calls).
+  of a sane size, not that the pixels are truthful. Main's publisher calls
+  `ui_evidence.validate_artifact` and `evidence_checks.validate_png`; the
+  evidence job uses those same checks from its own tree, so there is no
+  separate validator implementation to drift. `tests/test_ui_evidence.py`
+  pins the wiring (which script entry points the workflow calls).
 - Retention: the `pr-evidence` branch only grows (one directory per head
   SHA). Only added, removed, or changed captures are pushed; unchanged
   captures are listed in the table only, and runs that bring no PNGs push

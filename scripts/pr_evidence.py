@@ -34,15 +34,102 @@ from pathlib import Path
 
 MARKER = "<!-- housesitter-evidence -->"
 SCENARIOS = Path("tests/evidence/scenarios.json")
-MAX_COMMENT_BYTES = 60_000  # GitHub's limit is 65,536 characters; CI refuses > 65,000 bytes
+MAX_COMMENT_BYTES = 60_000  # GitHub's cap is 65,536; posts stay under 60,000
+# Longest comment marker the publisher ever stamps (review round 3,
+# finding 3): the 40-hex head SHA, the longest outcome word, and 19 digits
+# each of CI run id and attempt — far beyond GitHub's ~10-digit run ids,
+# so any real marker fits. Every fitting budget below reserves the growth
+# from the bare marker to this maximum, so a body that fits the budget
+# still fits after the publisher stamps it. The CI-side check
+# (evidence_checks.check, which renders without run ids) uses the same
+# reservation, so both sides agree; the final size check still guards the
+# posted body itself.
+STAMPED_MARKER_MAX_BYTES = len(
+    "<!-- housesitter-evidence head="
+    + "0" * 40
+    + " run="
+    + "0" * 19
+    + " attempt="
+    + "0" * 19
+    + " outcome=evidence -->"
+)
+MARKER_GROWTH_RESERVE = STAMPED_MARKER_MAX_BYTES - len(MARKER.encode())
 RUN_TIMEOUT_S = 60
 VOLATILE = "<volatile>"
+SHA_PLACEHOLDER = "__HOUSESITTER_EVIDENCE_SHA__"  # must equal ui_evidence's
+
+# A posted evidence SHA is always 40 hex; every image URL carries one
+# placeholder until the comment step pins it.
+SHA_FINAL_LEN = 40
+PLACEHOLDER_GROWTH = SHA_FINAL_LEN - len(SHA_PLACEHOLDER.encode())
+
+
+def final_len(body: str) -> int:
+    """Byte length of the body exactly as it will be posted.
+
+    The marker is stamped with the longest possible marker (see
+    STAMPED_MARKER_MAX_BYTES), and every image placeholder counts at its
+    posted length, so a body that fits MAX_COMMENT_BYTES here still fits
+    after the publisher stamps it and the comment step pins the SHA. For
+    an already-stamped body the reserve overestimates slightly, which is
+    the safe direction.
+    """
+    return (
+        len(body.encode())
+        + MARKER_GROWTH_RESERVE
+        + PLACEHOLDER_GROWTH * body.count(SHA_PLACEHOLDER)
+    )
+
+
+# Omission notices name the dropped sections, so their length is bounded by
+# construction: at most this many headings, then "and N more". Every
+# fitting decision below measures the notice itself (see final_len), so an
+# unbounded heading list can never eat the marker reserve (review round 4,
+# finding 1).
+MAX_OMITTED_SHOWN = 5
+
+
+def omission_notice(omitted: list[str]) -> str:
+    """Bounded notice naming the dropped sections."""
+    shown = omitted[:MAX_OMITTED_SHOWN]
+    text = "**Omitted to fit a GitHub comment:** " + ", ".join(shown)
+    if len(omitted) > len(shown):
+        text += f", and {len(omitted) - len(shown)} more"
+    return "\n" + text + ". Run `scripts/pr_evidence.py` locally to see them.\n"
+
+
+def _section_heading(section: str) -> str:
+    return section.split("\n", 1)[0].removeprefix("### ")
+
+
+def assemble_text(top: str, sections: list[str], keep: int) -> str:
+    """The top plus the first ``keep`` sections and the omission notice."""
+    body = top + "\n".join(sections[:keep])
+    if keep != len(sections):
+        omitted = [_section_heading(s) for s in sections[keep:]]
+        body += omission_notice(omitted)
+    return body
+
+
+def fit_text_sections(top: str, sections: list[str]) -> str:
+    """Keep the longest section prefix whose final-form length fits.
+
+    Whole sections only, so a cut never leaves a code fence open. The
+    omission notice is part of the measured body, so what is returned
+    always fits MAX_COMMENT_BYTES unless even the top plus the notice is
+    over budget — then the over-budget body is returned and the caller
+    refuses it.
+    """
+    for keep in range(len(sections), -1, -1):
+        body = assemble_text(top, sections, keep)
+        if final_len(body) <= MAX_COMMENT_BYTES:
+            return body
+    return body
 
 # UI section (F4): built here from ui_manifest.json, never pasted from a
 # pre-rendered markdown file. The name pattern must stay identical to
 # scripts/ui_evidence.py CAPTURE_RE (pinned by test), so only allow-listed
 # capture files can become <img> tags.
-SHA_PLACEHOLDER = "__HOUSESITTER_EVIDENCE_SHA__"  # must equal ui_evidence's
 UI_STATUSES = ("added", "removed", "changed", "unchanged")
 UI_CAPTURE_RE = re.compile(
     r"[a-z0-9](?:[a-z0-9-]|_(?!_)){0,47}"
@@ -80,6 +167,11 @@ UI_BROWSER_NAMES = {
 }
 UI_BROWSER_VERSION_RE = re.compile(r"[0-9]+(\.[0-9]+){0,3}")
 UI_BROWSER_VERSION_MAX_LEN = 32
+# Valid ``crop_px`` heights a manifest may record (Decision 5): ui_evidence
+# crops full-page shots down these steps when the push cap would refuse
+# them. Must equal ui_evidence.CROP_STEPS[1:] (pinned by test); this module
+# never imports ui_evidence, so it keeps its own copy.
+UI_CROP_HEIGHTS = (6000, 4000, 3000)
 
 
 class Refused(Exception):
@@ -189,10 +281,31 @@ def code_span(text: str) -> str:
     return f"{ticks}{pad}{text}{pad}{ticks}"
 
 
+def _longest_run(text: str, char: str) -> int:
+    """Length of the longest run of ``char`` in ``text`` (one linear pass)."""
+    best = run = 0
+    for ch in text:
+        if ch == char:
+            run += 1
+            if run > best:
+                best = run
+        else:
+            run = 0
+    return best
+
+
 def fence(text: str, lang: str = "") -> str:
-    ticks = "```"
-    while ticks in text:
-        ticks += "`"
+    # One linear pass for the fence: one tick longer than the longest
+    # backtick run (at least three) is exactly what the old search loop
+    # computed, without its quadratic rescanning of ever-longer strings.
+    ticks = "`" * max(3, _longest_run(text, "`") + 1)
+    # The closing fence must start its own CommonMark line, or it becomes
+    # part of the last content line and a later opening fence closes the
+    # block instead: PR text would then render as Markdown. CommonMark
+    # recognises LF, CRLF and lone CR as line endings, so only a text
+    # without any of those endings needs one added.
+    if text and not text.endswith(("\n", "\r")):
+        text += "\n"
     return f"{ticks}{lang}\n{text}{ticks}\n"
 
 
@@ -317,6 +430,12 @@ def select_ui_captures(manifest: dict) -> tuple:
         if diff_error is not None and not isinstance(diff_error, str):
             dropped += 1
             continue
+        crop_px = cap.get("crop_px")
+        if crop_px is not None and (
+            type(crop_px) is not int or crop_px not in UI_CROP_HEIGHTS
+        ):
+            dropped += 1
+            continue
         need = {"added": ("head",), "removed": ("base",), "changed": ("base", "head")}.get(
             status, ()
         )
@@ -427,7 +546,12 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
         shown = [c for c in by_fixture[fixture] if c["status"] in ("added", "changed", "removed")]
         if not shown:
             continue
-        block = [f"<details><summary>{html.escape(fixture)}</summary>", ""]
+        # Fixed summary text: the fixture label is PR-derived data, and
+        # Markdown does not render inside <summary>, so even a code span
+        # would show its backticks literally while hostile prose ("Approved
+        # by maintainer") would read as the bot's own words. The label
+        # still appears below in code spans, where it cannot render.
+        block = ["<details><summary>Screenshots</summary>", ""]
         for cap in shown:
             label = _ui_cell(f"{cap.get('fixture', '')} / {cap.get('view', '')}", MAX_UI_LABEL_LEN)
             width = UI_VIEW_WIDTHS[cap["view"]]
@@ -459,7 +583,15 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
                     )
                     # A code span, like the table: no markdown or HTML renders.
                     block.append("Diff unavailable: " + code_span(reason) + ".")
-                block += [""]
+            if cap.get("crop_px") is not None:
+                # select_ui_captures above kept only valid heights, so this
+                # int is safe to format: fixed words plus the recorded
+                # height. A cropped shot shows only the top of the page.
+                block.append(
+                    f"Cropped at {cap['crop_px']:,} px to fit the size limit; "
+                    "changes below this line are not shown."
+                )
+            block += [""]
         block += ["</details>", ""]
         details.append((fixture, "\n".join(block)))
 
@@ -470,6 +602,38 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
     for _, block in details:
         full += ("\n" if not full.endswith("\n\n") else "") + block
     return full, table_section, failures
+
+
+# Fixed suffixes for the Web UI shrink tiers (review round 4): the table
+# fallback says the screenshot details were omitted, the pointer says the
+# whole section was. The publisher tries them after the full section, in
+# this order, measured on the final form (see final_len).
+UI_DETAILS_OMITTED_SUFFIX = (
+    "\n**Web UI details omitted to fit a GitHub comment:** "
+    "run `scripts/ui_evidence.py` locally to see them.\n"
+)
+UI_SECTION_OMITTED_SUFFIX = (
+    "\n**Web UI evidence omitted to fit a GitHub comment:** "
+    "run `scripts/ui_evidence.py` locally to see it.\n"
+)
+
+
+def ui_tiers(
+    manifest: dict, repo: str, pr: int, head_sha: str
+) -> tuple:
+    """The Web UI suffixes, richest first: full section, table plus the
+    details-omitted notice, and the section-omitted pointer.
+
+    Returns (suffixes, check-failure count). The publisher walks the
+    suffixes in order against one final-form budget, so screenshots survive
+    everything except a comment that cannot fit them after the Tests line
+    has already degraded away (review round 4, finding 2).
+    """
+    full, table, failures = render_ui_section(manifest, repo, pr, head_sha)
+    return (
+        ["\n" + full, "\n" + table + UI_DETAILS_OMITTED_SUFFIX, UI_SECTION_OMITTED_SUFFIX],
+        failures,
+    )
 
 
 def append_ui_section(
@@ -490,20 +654,212 @@ def append_ui_section(
     manifest = load_ui_manifest(ui_dir)
     if manifest is None or repo is None or pr is None or head_sha is None:
         return body
-    room = MAX_COMMENT_BYTES - len(body.encode()) - 400
-    full, table, _ = render_ui_section(manifest, repo, pr, head_sha)
-    if len(("\n" + full).encode()) <= room:
-        return body + "\n" + full
-    fallback = (
-        "\n" + table + "\n**Web UI details omitted to fit a GitHub comment:** "
-        "run `scripts/ui_evidence.py` locally to see them.\n"
-    )
-    if len(fallback.encode()) <= room:
-        return body + fallback
-    return (
-        body + "\n**Web UI evidence omitted to fit a GitHub comment:** "
-        "run `scripts/ui_evidence.py` locally to see it.\n"
-    )
+    suffixes, _ = ui_tiers(manifest, repo, pr, head_sha)
+    for suffix in suffixes[:2]:
+        if final_len(body + suffix) <= MAX_COMMENT_BYTES:
+            return body + suffix
+    return body + suffixes[2]
+
+
+def collect_runs(base_tree: Path, head_tree: Path) -> tuple:
+    """Run every head scenario against both trees. Returns
+    (scenarios, volatile, base_scenarios, base_ok, runs) where runs is a list
+    of (scenario, before, after); before is None when the base has no
+    package. Both comment builders below share this, so the text comment
+    and the structured results describe the same runs."""
+    scenarios, volatile_keys = load_scenarios(head_tree)
+    volatile = set(volatile_keys)
+    base_scenarios = load_scenarios(base_tree)[0]
+    base_ok = has_package(base_tree)
+    runs = []
+    for scenario in scenarios:
+        before = run_scenario(base_tree, scenario) if base_ok else None
+        after = run_scenario(head_tree, scenario)
+        runs.append((scenario, before, after))
+    return scenarios, volatile, base_scenarios, base_ok, runs
+
+
+def build_results(
+    base_tree: Path, head_tree: Path, head_sha: str | None = None
+) -> dict:
+    """Run every scenario and return the structured results (Decision 13,
+    option A). The privileged publisher validates this against a strict
+    schema and renders the comment itself; the PR's markdown is never
+    posted. ``before``/``after`` hold the normalised texts ``render``
+    produces (the same strings the comment diffs); ``before`` is None when
+    the base has no package to run against."""
+    scenarios, volatile, base_scenarios, base_ok, runs = collect_runs(base_tree, head_tree)
+    return _results_from_runs(scenarios, volatile, base_scenarios, base_ok, runs, head_sha)
+
+
+def _results_from_runs(
+    scenarios: list,
+    volatile: set,
+    base_scenarios: list,
+    base_ok: bool,
+    runs: list,
+    head_sha: str | None,
+) -> dict:
+    base_ids = {s["id"] for s in base_scenarios}
+    head_ids = {s["id"] for s in scenarios}
+    entries = []
+    for scenario, before, after in runs:
+        before_text = render(before, volatile) if before is not None else None
+        after_text = render(after, volatile)
+        new = before is None or scenario["id"] not in base_ids
+        entries.append(
+            {
+                "id": scenario["id"],
+                "title": scenario.get("title", ""),
+                "command": ["housesitter", *scenario["argv"]],
+                "exit_before": before["exit"] if before is not None else None,
+                "exit_after": after["exit"],
+                "expected_exit": scenario.get("expect_exit", 0),
+                "size_before": before["sdk_size"] if before is not None else None,
+                "size_after": after["sdk_size"],
+                "changed": new or before_text != after_text,
+                "new_in_pr": scenario["id"] not in base_ids,
+                "before": before_text,
+                "after": after_text,
+            }
+        )
+    metadata: dict = {"generator": "scripts/pr_evidence.py", "base_has_package": base_ok}
+    if head_sha is not None:
+        metadata["head_sha"] = head_sha
+    return {
+        "version": 1,
+        "metadata": metadata,
+        "scenarios": entries,
+        "removed": sorted(base_ids - head_ids),
+    }
+
+
+def neutralise(text: object) -> str:
+    """Break up @mentions and <tags> in PR-supplied text.
+
+    Fenced code blocks already stop GitHub rendering mentions, links, and
+    HTML, but this breaks them up anyway (an invisible separator after each
+    ``@`` and ``<``), so the raw bytes cannot ping or tag even if a fence
+    is ever dropped. Idempotent and invisible in the rendered comment.
+    """
+    return str(text).replace("@", "@\u200b").replace("<", "<\u200b")
+
+
+def _inline(text: object) -> str:
+    """Single-line form of PR-supplied text for headings and table cells."""
+    return neutralise(" ".join(str(text).split()))
+
+
+def render_text_from_results(results: dict, head_sha: str) -> str:
+    """Rebuild the text section from validated structured results (main's
+    code: the privileged publisher calls this, never PR code).
+
+    The caller must have validated ``results`` (unknown keys rejected,
+    types and caps checked, ids known or marked new). Every PR-supplied
+    string appears only inside fenced code blocks (whose fence outgrows any
+    backtick run in the content) or single-line code spans, neutralised, so
+    a forged "Approved by maintainer" can never render as a heading,
+    prose, link, or image. The fixed header says the outputs came from the
+    PR's own CI run: they are author-attested, not trusted fact.
+    """
+    top, sections = text_parts_from_results(results, head_sha)
+    return fit_text_sections(top, sections)
+
+
+def text_parts_from_results(results: dict, head_sha: str) -> tuple:
+    """Build the text section's (top, sections) before any budget fitting.
+
+    The publisher's shrink order fits these parts together with the Tests
+    line and the Web UI section against one final-form budget (see
+    publish_evidence.render_comment); this wrapper fits them alone for
+    callers that only need the text.
+    """
+    scenarios = results["scenarios"]
+    removed = results.get("removed", [])
+    base_ok = results.get("metadata", {}).get("base_has_package", True)
+
+    def size(value: object) -> str:
+        return "—" if value is None else f"{value:,} B"
+
+    def exit_(value: object) -> str:
+        return "—" if value is None else str(value)
+
+    rows, sections, unexpected = [], [], []
+    for entry in scenarios:
+        before_text = entry["before"] if entry["before"] is not None else "(not present)\n"
+        after_text = entry["after"]
+        before_text, after_text = neutralise(before_text), neutralise(after_text)
+        if entry.get("new_in_pr"):
+            status = "new"
+        elif not entry["changed"]:
+            status = "unchanged"
+        else:
+            status = "changed"
+        if entry["exit_after"] != entry["expected_exit"]:
+            unexpected.append(
+                f"{code_span(_inline(entry['id']))} exited "
+                f"{entry['exit_after']}, expected {entry['expected_exit']}"
+            )
+        rows.append(
+            f"| {code_span(_inline(entry['id']))} | {status} "
+            f"| {exit_(entry['exit_before'])} → {exit_(entry['exit_after'])} "
+            f"| {size(entry['size_before'])} → {size(entry['size_after'])} |"
+        )
+        if status == "unchanged":
+            continue
+        diff = "".join(
+            difflib.unified_diff(
+                before_text.splitlines(keepends=True),
+                after_text.splitlines(keepends=True),
+                fromfile="before",
+                tofile="after",
+            )
+        )
+        heading = f"### {code_span(_inline(entry['id']))}"
+        if entry.get("title", ""):
+            heading += f": {code_span(_inline(entry['title']))}"
+        command = " ".join(_inline(arg) for arg in entry["command"])
+        sections.append(
+            heading + "\n\n"
+            + code_span(command)
+            + "\n\n"
+            + fence(diff, "diff")
+            + "\n<details><summary>Full before</summary>\n\n"
+            + fence(before_text)
+            + "\n</details>\n<details><summary>Full after</summary>\n\n"
+            + fence(after_text)
+            + "\n</details>\n"
+        )
+    for ident in removed:
+        rows.append(f"| {code_span(_inline(ident))} | removed | — | — |")
+
+    head = [
+        MARKER,
+        "## Before / after evidence",
+        "",
+        "Fixture house only. Rebuilt by main's publisher from the PR's structured "
+        "results (`results.json`); see docs/REVIEW.md, \"Evidence\". The outputs below "
+        f"were produced by the PR's own CI run at `{head_sha}` from the PR's own code: "
+        "they are author-attested, like the screenshots, not trusted fact. "
+        "Size is the Muse SDK's measure of stdout (limit 96 KiB; budget 88 KiB).",
+        "",
+    ]
+    if not base_ok:
+        head += ["The base has no `housesitter` package yet, so every scenario is new.", ""]
+    if not scenarios:
+        head += ["**The head has no scenarios.** Every PR must keep at least one.", ""]
+    for line in unexpected:
+        head += [f"**Unexpected exit:** {line}.", ""]
+    head += [
+        "| Scenario | Status | Exit before → after | Size before → after |",
+        "|----------|--------|---------------------|---------------------|",
+        *rows,
+        "",
+    ]
+    if not sections and not any("| removed |" in r for r in rows):
+        head += ["**No output change.**", ""]
+    top = "\n".join(head) + "\n"
+    return top, sections
 
 
 def build_comment(
@@ -515,12 +871,27 @@ def build_comment(
     pr: int | None = None,
     head_sha: str | None = None,
 ) -> str:
-    scenarios, volatile_keys = load_scenarios(head_tree)
-    volatile = set(volatile_keys)
-    base_scenarios = load_scenarios(base_tree)[0]
+    scenarios, volatile, base_scenarios, base_ok, runs = collect_runs(base_tree, head_tree)
+    return _comment_from_runs(
+        scenarios, volatile, base_scenarios, base_ok, runs, ui_dir,
+        repo=repo, pr=pr, head_sha=head_sha,
+    )
+
+
+def _comment_from_runs(
+    scenarios: list,
+    volatile: set,
+    base_scenarios: list,
+    base_ok: bool,
+    runs: list,
+    ui_dir: Path | None,
+    *,
+    repo: str | None = None,
+    pr: int | None = None,
+    head_sha: str | None = None,
+) -> str:
     base_ids = {s["id"] for s in base_scenarios}
     head_ids = {s["id"] for s in scenarios}
-    base_ok = has_package(base_tree)
     ui_manifest = load_ui_manifest(ui_dir)
     ui_failures = 0
     if ui_manifest is not None and repo is not None:
@@ -533,9 +904,7 @@ def build_comment(
         return "—" if r is None else str(r["exit"])
 
     rows, sections, unexpected = [], [], []
-    for scenario in scenarios:
-        before = run_scenario(base_tree, scenario) if base_ok else None
-        after = run_scenario(head_tree, scenario)
+    for scenario, before, after in runs:
         before_text, after_text = render(before, volatile), render(after, volatile)
         if before is None or scenario["id"] not in base_ids:
             status = "new"
@@ -616,22 +985,8 @@ def build_comment(
     top = "\n".join(head) + "\n"
 
     # Keep whole sections only, so a cut never leaves a code fence open.
-    kept, omitted = [], []
-    budget = MAX_COMMENT_BYTES - len(top.encode()) - 400
-    for section in sections:
-        cost = len(section.encode()) + 1
-        if cost <= budget:
-            kept.append(section)
-            budget -= cost
-        else:
-            omitted.append(section.split("\n", 1)[0].removeprefix("### "))
-    body = top + "\n".join(kept)
-    if omitted:
-        body += (
-            "\n**Omitted to fit a GitHub comment:** "
-            + ", ".join(omitted)
-            + ". Run `scripts/pr_evidence.py` locally to see them.\n"
-        )
+    # The omission notice is part of the measured final form (see final_len).
+    body = fit_text_sections(top, sections)
     return append_ui_section(body, ui_dir, repo=repo, pr=pr, head_sha=head_sha)
 
 
@@ -655,6 +1010,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--head-sha", default=None, help="head commit SHA, 40 hex (with --ui-artifacts)"
     )
+    parser.add_argument(
+        "--results-out",
+        type=Path,
+        default=None,
+        help="write the structured scenario results here as JSON "
+        "(Decision 13, option A: the publisher renders from this, never from --out)",
+    )
     args = parser.parse_args(argv)
     if args.ui_artifacts is not None and not (args.repo and args.pr and args.head_sha):
         parser.error("--repo, --pr, and --head-sha are required with --ui-artifacts")
@@ -663,6 +1025,38 @@ def main(argv: list[str] | None = None) -> int:
     except Refused as exc:
         print(f"pr_evidence: refused: {exc}", file=sys.stderr)
         return 2
+    if args.results_out is not None:
+        # One shared collection run feeds both outputs, so the text comment
+        # (for the old publisher, while this rolls out) and the structured
+        # results (for the new one) describe the same runs.
+        scenarios, volatile, base_scenarios, base_ok, runs = collect_runs(
+            args.base_tree, args.head_tree
+        )
+        args.out.write_text(
+            _comment_from_runs(
+                scenarios,
+                volatile,
+                base_scenarios,
+                base_ok,
+                runs,
+                args.ui_artifacts,
+                repo=args.repo,
+                pr=args.pr,
+                head_sha=args.head_sha,
+            ),
+            encoding="utf-8",
+        )
+        args.results_out.write_text(
+            json.dumps(
+                _results_from_runs(
+                    scenarios, volatile, base_scenarios, base_ok, runs, args.head_sha
+                ),
+                indent=1,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return 0
     args.out.write_text(
         build_comment(
             args.base_tree,

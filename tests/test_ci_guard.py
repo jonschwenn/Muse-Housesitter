@@ -39,6 +39,8 @@ SPEC.loader.exec_module(ci_guard)
         "scripts/ci_guard.py",
         "scripts/hygiene_scan.py",
         "scripts/test_results.py",
+        "scripts/evidence_checks.py",
+        "tests/test_evidence_checks.py",
         "tests/test_test_results.py",
         "tests/core/helpers.py",
         "tests/fixtures/unifi_wifi/conformance.json",
@@ -1026,3 +1028,50 @@ def test_main_newline_in_file_name_cannot_inject_annotations(
     # The injected text stays inside the one real annotation, escaped.
     assert lines[0].startswith(NOTICE if expected_code == 0 else "::error::")
     assert ".github/x%0A" + NOTICE + "ci_guard: ok%0D%250A.yml" in lines[0]
+
+
+# Review round 1, finding 2: the validator's own protection -------------------
+#
+# scripts/evidence_checks.py shapes what the privileged publisher accepts,
+# and tests/test_evidence_checks.py could mask a weakened copy, so both are
+# protected paths and the test file re-runs in CI's isolated protected
+# suites. The import test below keeps this closed as scripts gain helpers:
+# anything a protected script imports is itself protected.
+
+
+def test_local_imports_of_protected_scripts_are_protected():
+    scripts = ROOT / "scripts"
+    protected_scripts = sorted(
+        path
+        for path in ci_guard.EXACT_PROTECTED
+        if path.startswith("scripts/") and path.endswith(".py")
+    )
+    assert protected_scripts, "no protected scripts to check"
+    for rel in protected_scripts:
+        tree = ast.parse((ROOT / rel).read_text(), filename=rel)
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        for name in sorted(imported):
+            if (scripts / f"{name}.py").is_file():
+                assert ci_guard.is_protected(f"scripts/{name}.py") is not None, (
+                    f"{rel} imports scripts/{name}.py, which is not protected"
+                )
+
+
+def test_protected_test_files_rerun_in_isolated_suites():
+    # ci.yml re-runs the protected suites in a pytest process that never
+    # imports an unprotected test module (D16). Every protected test file
+    # must be named in that isolated run, or its pinning is decorative.
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    protected_tests = sorted(
+        path
+        for path in ci_guard.EXACT_PROTECTED
+        if path.startswith("tests/test_") and path.endswith(".py")
+    )
+    assert protected_tests, "no protected test files to check"
+    for path in protected_tests:
+        assert path in workflow, f"{path} is protected but missing from ci.yml"

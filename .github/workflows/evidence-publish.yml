@@ -9,12 +9,19 @@
 # Trust model:
 # - The artifact is fully untrusted. A fork PR can rewrite `ci.yml`, and a
 #   same-repo PR controls its own `ci.yml` run, so the artifact may be
-#   anything. Nothing from it is executed or sourced: `render` reads
-#   evidence.md as text, validates every PNG and the manifest with main's
-#   `ui_evidence.validate_artifact` (names, PNG magic bytes, size and count
+#   anything. Nothing from it is executed or sourced: `render` validates
+#   the structured results (strict schema against main's scenario list)
+#   and rebuilds the text section from them with main's `pr_evidence`
+#   renderer (PR text appears only inside fenced code blocks, never as
+#   prose), validates every PNG and the manifest with main's
+#   `ui_evidence.validate_artifact` (names, PNG structure, size and count
 #   caps, no symlinks or subdirectories), ignores any pre-rendered markdown,
-#   and rebuilds the Web UI section from the validated manifest with main's
-#   `pr_evidence` renderer (which escapes hostile values).
+#   and rebuilds the Web UI section from the validated manifest (which
+#   escapes hostile values). The PR's markdown (evidence.md) is never read.
+# - A refusal is never silent: `render` records a fixed reason code and the
+#   `comment` job posts main's fixed notice (reason code only, no PR
+#   content) instead of the comment. PR-derived values never reach a shell
+#   command line: the reason travels in a file and is validated in Python.
 # - The PR number never comes from the artifact. `resolve` looks it up
 #   through the API from trusted event data (`head_branch` and the head
 #   repository owner), keeps only runs of the real CI workflow file
@@ -34,6 +41,19 @@ on:
     types: [completed]
 
 permissions: {}
+
+# Deliberately no workflow-level concurrency group here (review round 1,
+# findings 7-8, Claude's design decision): GitHub keeps one pending run per
+# group and a newer arrival displaces it by queue order, not commit
+# freshness, so a late stale run could displace the current head's pending
+# publisher and then write nothing, losing the current evidence. The
+# owner-plus-branch key is ambiguous too (alice/bob-fix and alice-bob/fix
+# collide, and group names are case-insensitive), so unrelated PRs could
+# displace each other. Instead, every write below re-checks freshness
+# first, so a stale run never writes; the comment job alone is serialised
+# per PR (see its `concurrency` below) and applies the marker rules there.
+# The pr-evidence push keeps its fetch-and-retry for concurrent pushes to
+# the branch.
 
 jobs:
   resolve:
@@ -93,7 +113,8 @@ jobs:
 
   build:
     # Download the untrusted artifact, validate it with main's code, and
-    # render the final comment (still carrying the push-SHA placeholder).
+    # render the final comment (still carrying the push-SHA placeholder),
+    # or record the refusal reason when the artifact is invalid.
     needs: resolve
     if: needs.resolve.outputs.found == 'true'
     name: build
@@ -107,12 +128,16 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      # A missing artifact is a refusal ("missing"), not a silent skip:
+      # the render below records the reason and the comment job posts the
+      # fixed notice, so every refusal still reaches the PR.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: evidence
           path: artifact
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
+        continue-on-error: true
       # Test-result XML is PR-produced data, validated below with main's
       # code; a missing or bad file degrades only the Tests line (D21,
       # option A), never the whole publish.
@@ -148,12 +173,20 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ needs.resolve.outputs.pr }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           python scripts/publish_evidence.py render \
             --artifact-dir artifact --out-dir rendered \
             --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
             --test-results-dir test-results --jobs-json jobs.json
+      # Always upload: on refusal the render step fails after writing
+      # refusal.json, and the comment job below needs that file to post
+      # the fixed notice. (Render always writes comment.md plus the pushable
+      # files, or refusal.json, before it exits.)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
           name: validated-evidence
           path: rendered
@@ -178,6 +211,14 @@ jobs:
         with:
           name: validated-evidence
           path: rendered
+      # Main's check-head script for the freshness re-checks below. This
+      # checks out trusted main code only (never PR code); the push itself
+      # still happens in a fresh git directory holding just the files.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          path: main
       - name: Push validated PNGs to pr-evidence
         id: push
         env:
@@ -185,12 +226,24 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ needs.resolve.outputs.pr }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          CHECK_PY: ${{ github.workspace }}/main/scripts/publish_evidence.py
         run: |
           set -euo pipefail
           case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
           if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "bad head SHA: $HEAD_SHA"; exit 1
           fi
+          # Freshness, re-checked immediately before every push below: the
+          # PR may have moved during the fetch, so a check made earlier is
+          # stale by push time. check-head exit 1 means "moved": stop
+          # without writing and let the newer run publish instead.
+          require_fresh_head() {
+            rc=0
+            python3 "$CHECK_PY" check-head \
+              --repo "$REPO" --pr "$PR" --expected "$HEAD_SHA" || rc=$?
+            if [ "$rc" = 1 ]; then exit 0; fi
+            if [ "$rc" != 0 ]; then exit "$rc"; fi
+          }
           # No checkout of any code happens here: a fresh git directory that
           # only ever contains the validated files main's renderer selected.
           rm -rf push && mkdir push && cd push
@@ -248,6 +301,7 @@ jobs:
             else
               git commit -q -m "$msg"
             fi
+            require_fresh_head
             if ! git push origin pr-evidence; then
               # Someone else pushed first. Re-base by moving onto the new tip
               # and re-adding only our directory (a rebase can't work across
@@ -256,6 +310,7 @@ jobs:
               git reset -q FETCH_HEAD
               git add "$dest"
               git diff --cached --quiet || git commit -q -m "$msg"
+              require_fresh_head
               git push origin pr-evidence
             fi
             EVIDENCE_SHA="$(git rev-parse HEAD)"
@@ -266,10 +321,39 @@ jobs:
   comment:
     # The only job that can comment. Pins the placeholder to the push SHA,
     # re-checks the marker and size, and edits only the bot's own comment.
+    # It posts on every outcome — the rendered comment, the fixed refusal
+    # notice, or the fixed publish_failed notice — never silence. A corrupt
+    # rendered file falls back to the publish_failed notice the same way.
+    # The decision of what to post lives in main's Python (decide-comment,
+    # see scripts/publish_evidence.py); the shell only carries out its word.
     needs: [resolve, build, push]
+    # Build failed means render refused (or crashed before uploading, so the
+    # download below finds nothing); push failed means the images may not
+    # be on the branch. Both still post their fixed notice. A stale head is
+    # the only silent stop, checked in-step below.
+    if: >-
+      always() &&
+      needs.resolve.outputs.found == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'failure') &&
+      (needs.push.result == 'success' || needs.push.result == 'failure' ||
+        needs.push.result == 'skipped')
     name: comment
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Serialise the comment-writing jobs per PR (review round 2,
+    # finding 2): the group key comes from resolve's outputs (PR digits
+    # validated from the API, never from the artifact), and a queued run
+    # waits instead of displacing the one writing now, so the comment
+    # lookup below sees every earlier write. No workflow-level group
+    # exists: GitHub keeps one pending run per group and a newer arrival
+    # would displace the current head's pending publisher by queue order,
+    # not commit freshness. Residual: a pending comment job can still be
+    # displaced by a later arrival for the same PR; if the displacing run
+    # is stale it writes nothing and the PR keeps the previous comment,
+    # which states its head SHA — re-running the publisher fixes it.
+    concurrency:
+      group: evidence-comment-${{ needs.resolve.outputs.pr }}
+      cancel-in-progress: false
     permissions:
       contents: read
       actions: read
@@ -283,31 +367,188 @@ jobs:
         with:
           name: validated-evidence
           path: rendered
+        # A build that died before uploading leaves nothing to download;
+        # stay alive so the publish_failed notice below can still post.
+        continue-on-error: true
       - name: Post or update the evidence comment
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.resolve.outputs.pr }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           EVIDENCE_SHA: ${{ needs.push.outputs.evidence_sha }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUSH_RESULT: ${{ needs.push.result }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           set -euo pipefail
           case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
-          python3 scripts/publish_evidence.py substitute \
-            --comment rendered/comment.md --sha "$EVIDENCE_SHA"
-          marker='<!-- housesitter-evidence -->'
-          if [ "$(head -c ${#marker} rendered/comment.md)" != "$marker" ]; then
-            echo "comment does not start with the marker; not posting"; exit 1
+          case "$RUN_ID" in ''|*[!0-9]*) echo "bad run id: $RUN_ID"; exit 1;; esac
+          case "$RUN_ATTEMPT" in ''|*[!0-9]*) echo "bad run attempt: $RUN_ATTEMPT"; exit 1;; esac
+          # A build that died before uploading leaves no rendered/
+          # directory (the download above then finds nothing): create it
+          # so the publish_failed notice below can still be written and
+          # posted instead of failing this step with no comment.
+          mkdir -p rendered
+          # Fixed fallback (review round 3, finding 2): any failure to
+          # read or validate the rendered comment or refusal file posts
+          # main's fixed publish_failed notice — main's text plus trusted
+          # event data only, never PR content — instead of ending with no
+          # comment. Subject to the same freshness and ordering rules
+          # below; the shell only carries out these fixed words.
+          write_publish_failed_notice() {
+            outcome="notice"
+            printf '{"reason": "publish_failed"}\n' > rendered/refusal.json
+            python3 scripts/publish_evidence.py refusal \
+              --reason-file rendered/refusal.json \
+              --head-sha "$HEAD_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+              > rendered/comment.md
+          }
+          # The posted body itself is guarded at exactly the comment
+          # budget (review round 4): the renderer fits the final form to
+          # 60,000 bytes, and this checks the substituted bytes GitHub gets.
+          comment_is_postable() {
+            [ "$(head -c ${#marker} rendered/comment.md 2>/dev/null)" = "$marker" ] && \
+            [ "$(wc -c < rendered/comment.md 2>/dev/null)" -le 60000 ]
+          }
+          flags=""
+          if [ -f rendered/refusal.json ]; then flags="$flags --has-refusal"; fi
+          if [ -f rendered/comment.md ]; then flags="$flags --has-comment"; fi
+          # $flags holds only fixed flag words built above; the printed
+          # action is one fixed word from main's code, never PR content.
+          # shellcheck disable=SC2086
+          action=$(python3 scripts/publish_evidence.py decide-comment \
+            --build-result "$BUILD_RESULT" --push-result "$PUSH_RESULT" $flags)
+          outcome=""
+          case "$action" in
+            nothing)
+              echo "nothing to post"
+              exit 0
+              ;;
+            refusal-notice)
+              # Refused: the notice is main's fixed text plus the validated
+              # reason code (read from the file in Python, never from the
+              # shell), so no PR content can reach the comment through it.
+              # The marker below is stamped from trusted event data only.
+              # A corrupt or unknown refusal file falls back to the fixed
+              # publish_failed notice instead of ending with no comment.
+              outcome="notice"
+              if ! python3 scripts/publish_evidence.py refusal \
+                --reason-file rendered/refusal.json \
+                --head-sha "$HEAD_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+                > rendered/comment.md; then
+                write_publish_failed_notice
+              fi
+              ;;
+            publish-failed)
+              # The push failed, or the rendered artifact is missing or
+              # corrupt: post the fixed notice built only from main's text.
+              outcome="notice"
+              printf '{"reason": "publish_failed"}\n' > rendered/refusal.json
+              python3 scripts/publish_evidence.py refusal \
+                --reason-file rendered/refusal.json \
+                --head-sha "$HEAD_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+                > rendered/comment.md
+              ;;
+            comment)
+              outcome="evidence"
+              # A corrupt rendered comment falls back to the fixed
+              # publish_failed notice instead of ending with no comment.
+              if ! python3 scripts/publish_evidence.py substitute \
+                --comment rendered/comment.md --sha "$EVIDENCE_SHA"; then
+                write_publish_failed_notice
+              fi
+              ;;
+            *)
+              echo "unknown comment action: $action"
+              exit 1
+              ;;
+          esac
+          marker='<!-- housesitter-evidence'
+          # A rendered comment that fails validation (wrong marker, over
+          # the size cap) falls back the same way; if even the fixed
+          # notice failed, main's own text is broken: stop loudly.
+          if ! comment_is_postable; then
+            write_publish_failed_notice
           fi
-          if [ "$(wc -c < rendered/comment.md)" -gt 65000 ]; then
-            echo "comment is too large; not posting"; exit 1
+          if ! comment_is_postable; then
+            echo "fixed notice failed validation; not posting"; exit 1
           fi
-          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" \
-            | head -n 1)
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@rendered/comment.md > /dev/null
-            echo "Updated comment $id"
-          else
-            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@rendered/comment.md > /dev/null
-            echo "Posted a new comment"
-          fi
+          # Freshness re-check, after all preparation above and before the
+          # lookup below: the PR may have moved while this step ran.
+          # Stopping without writing beats posting for a superseded commit;
+          # the newer run publishes. A second re-check follows the lookup
+          # (which itself takes time), immediately before writing.
+          fresh_rc=0
+          python3 scripts/publish_evidence.py check-head \
+            --repo "$REPO" --pr "$PR" --expected "$HEAD_SHA" || fresh_rc=$?
+          if [ "$fresh_rc" = 1 ]; then exit 0; fi
+          if [ "$fresh_rc" != 0 ]; then exit "$fresh_rc"; fi
+          # The job is serialised per PR (concurrency above), so this lookup
+          # sees every earlier write. Main's Python applies the monotonic
+          # rules — never write over any marker comment from a newer run,
+          # whatever head it is for (ordering is cross-head by CI run id),
+          # and a notice never replaces same-head evidence — and prints one
+          # plan (a skip still carries the duplicate deletions); the shell
+          # below only carries out its fixed words and its digit-only ids
+          # (each re-validated before use).
+          plan=$(python3 scripts/publish_evidence.py decide-write \
+            --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --outcome "$outcome")
+          first=$(printf '%s\n' "$plan" | sed -n '1p')
+          second=$(printf '%s\n' "$plan" | sed -n '2p')
+          id=""
+          case "$first" in
+            SKIP)
+              # A skip writes nothing, but it still carries the duplicate
+              # cleanup below (review round 3, finding 4): every bot
+              # marker comment except the winner is deleted.
+              echo "keeping the existing comment"
+              ;;
+            POST)
+              ;;
+            PATCH\ *)
+              id=${first#PATCH }
+              case "$id" in ''|*[!0-9]*) echo "bad comment id: $id"; exit 1;; esac
+              ;;
+            *)
+              echo "unknown write plan: $first"
+              exit 1
+              ;;
+          esac
+          drops=""
+          case "$second" in
+            '')
+              ;;
+            DELETE|DELETE\ *)
+              drops=${second#DELETE}
+              ;;
+            *)
+              echo "unknown write plan line: $second"
+              exit 1
+              ;;
+          esac
+          # Second freshness re-check, immediately before writing: the head
+          # may have moved during the lookup above. The earlier check stays:
+          # it caught moves during the build and push steps.
+          fresh_rc=0
+          python3 scripts/publish_evidence.py check-head \
+            --repo "$REPO" --pr "$PR" --expected "$HEAD_SHA" || fresh_rc=$?
+          if [ "$fresh_rc" = 1 ]; then exit 0; fi
+          if [ "$fresh_rc" != 0 ]; then exit "$fresh_rc"; fi
+          case "$first" in
+            POST)
+              gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@rendered/comment.md > /dev/null
+              echo "Posted a new comment"
+              ;;
+            PATCH*)
+              gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@rendered/comment.md > /dev/null
+              echo "Updated comment $id"
+              ;;
+          esac
+          for drop in $drops; do
+            case "$drop" in ''|*[!0-9]*) echo "bad comment id: $drop"; exit 1;; esac
+            gh api -X DELETE "repos/$REPO/issues/comments/$drop" > /dev/null
+            echo "Deleted comment $drop"
+          done

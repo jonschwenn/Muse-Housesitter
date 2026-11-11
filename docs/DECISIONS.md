@@ -100,6 +100,10 @@ handoff's "license not chosen; don't publish."
   rendered before/after images specifically for GUI work.
 - **Constraint:** the images use fixture data only, never a real house
   (AGENTS rule 7).
+- **Amended (2026-11-11, Jon):** main's publisher rebuilds the text
+  section from `results.json`; it never posts PR-built markdown. The
+  comment identifies the outputs as coming from the PR's own CI run.
+  D33–D35 record the trust, refusal and crop decisions in PR #57.
 
 ### D12. Minimal GitHub-only CI, with `main` locked by a ruleset (2026-11-04, Jon)
 - **CI:** one workflow, `.github/workflows/ci.yml`, with three jobs
@@ -248,16 +252,19 @@ handoff's "license not chosen; don't publish."
   D12):**
   - `ci.yml` is unprivileged: every job has `contents: read` only. It
     builds the text evidence, uploads the artifact, and aggregates `ci-ok`.
-    UI check failures still fail CI.
+    UI check failures, crop failures and the shared artifact checks fail CI.
   - `evidence-publish.yml` on `workflow_run` always runs the file from the
     default branch. It resolves the PR number through the API from trusted
     event data (never from the artifact), verifies the head SHA still
     matches, validates the artifact with main's `validate_artifact` (via
-    main's `scripts/publish_evidence.py`, which also rebuilds the Web UI
-    section with main's renderer), pushes only validated PNGs to the orphan
+    main's `scripts/publish_evidence.py`, which rebuilds the text and Web UI
+    sections with main's renderers), pushes only validated PNGs to the orphan
     `pr-evidence` branch, and posts or edits the single bot comment. Fork
-    PRs get comments too. An invalid, stale, or ambiguous run publishes
-    nothing.
+    PRs get comments too. Artifact refusals and publish failures produce a
+    fixed notice with a reason code; stale or ambiguous PR lookups publish
+    nothing. Freshness and comment ordering protect current evidence;
+    [REVIEW.md, "Evidence"](REVIEW.md#evidence-before-and-after-every-pr)
+    describes the mechanics and D34 records the trade-offs.
   - `ci-guard.yml` on `pull_request_target` runs from the base commit and
     never touches PR code. `scripts/ci_guard.py` (stdlib only, unit-tested)
     lists the PR's changed files through the API — paginated, failing
@@ -275,12 +282,14 @@ handoff's "license not chosen; don't publish."
   `tests/conformance/**` (the module conformance suite);
   `tests/test_pr_evidence.py`, `tests/test_ui_evidence.py`,
   `tests/test_publish_evidence.py`, `tests/test_test_results.py`,
+  `tests/test_evidence_checks.py`,
   `tests/test_ci_guard.py` (the tests that pin the builders, validators,
   publisher, test-results parser and renderers, and guard);
   `tests/evidence/**` (the scenario list — removing a scenario hides a
   regression the same way editing the builder does);
   `scripts/pr_evidence.py`, `scripts/ui_evidence.py`,
-  `scripts/publish_evidence.py`, `scripts/test_results.py`,
+  `scripts/publish_evidence.py`, `scripts/evidence_checks.py`,
+  `scripts/test_results.py`,
   `scripts/ci_guard.py` (evidence builders, validators, privileged publisher,
   test-results parser and renderers, guard);
   `pyproject.toml` (pytest/ruff config, dependency pins, entry points); and
@@ -342,6 +351,12 @@ handoff's "license not chosen; don't publish."
   the trusted hygiene scan and widens the protected list; D32 also requires
   a same-repository head. See [REVIEW.md](REVIEW.md), "Trusted hygiene
   scan," for the mechanics and remaining review responsibilities.
+- **Amended (2026-11-11, Jon):** updated the current-state workflow list
+  above: shared checks fail the evidence job, main rebuilds both comment
+  sections, and refusals and publish failures mean a fixed notice. PNG
+  validation is structural, not just a file signature check. Freshness
+  checks and ordered comment writes protect current evidence. Permissions
+  are unchanged. See D33–D35 and REVIEW.md, "Evidence."
 
 ### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
 - **Decision:** use C's overall design, A's per-radio and per-client detail,
@@ -414,12 +429,10 @@ handoff's "license not chosen; don't publish."
   messages and tracebacks are never published.
 - **Bad data (option A):** a missing or invalid results file, or unusable
   job data, degrades only the Tests line: `results unavailable`,
-  `no test jobs found`, or `no valid results file`. To fit the comment size
-  budget, failing names are dropped first (counts and verdicts stay), then
-  a fixed short line is used, and if even that doesn't fit, the line is left
-  out. Test data never blocks the publish. The rest
-  of the evidence comment still publishes. Invalid UI artifacts still
-  refuse the whole publish.
+  `no test jobs found`, or `no valid results file`. Test data never blocks
+  the publish: its line gives way before screenshot details or text diffs
+  when space is short. Invalid UI artifacts still refuse the evidence and
+  produce a fixed notice. REVIEW.md, "Evidence," gives the fitting order.
 - **Why:** the test summary is a one-line add-on whose pass/fail already
   comes from the trusted API. Refusing everything for bad test data would
   hide the screenshots and diffs a reviewer needs.
@@ -427,6 +440,11 @@ handoff's "license not chosen; don't publish."
   - Refusing the whole publish on bad test data, like the UI artifact.
   - Taking pass/fail from the XML instead of the API: PR-produced counts
     cannot establish whether the test job passed.
+- **Amended (2026-11-11, Jon):** invalid UI evidence now produces a fixed
+  refusal notice (D34). Bad test data still degrades only the Tests line.
+  CI and the publisher share one fitting function and a 60,000-byte budget
+  for the final comment, including its hidden marker and final image links,
+  so evidence accepted by CI fits when posted. See REVIEW.md, "Evidence."
 
 ### D22. Optional deep red-team review on a different model family (2026-11-08, Jon)
 - **Decision:** explicitly consider an optional deep review on a different
@@ -678,3 +696,53 @@ handoff's "license not chosen; don't publish."
 - **Rejected:** Jon approving the exact head commit. That needs more
   machinery, and approval is easy to give on autopilot.
 - **Status:** implemented in PR #56.
+
+### D33. Rebuild evidence text under the bot's name (2026-11-11, Jon)
+- **Decision:** option A of evidence Decision 13: main's publisher rebuilds
+  the text section from the PR's validated `results.json`, never its
+  markdown. Every field the renderer reads is required, and strings must
+  be valid UTF-8. Command output appears only inside code blocks. The
+  comment says the outputs come from the PR's own CI run and remain
+  author-attested.
+- **Why:** the old publisher posted PR-built markdown under the bot's name.
+  A PR could make the bot appear to say "Approved by maintainer" or any
+  other forged sentence.
+- **Rejected:** option B, escaping mentions and links in PR-built markdown:
+  a forged sentence still reads as the bot's own words.
+- **Status:** in effect from PR #57.
+
+### D34. Fail CI on refused evidence and post a notice (2026-11-11, Jon)
+- **Decision:** both options of evidence Decision 4. The evidence job runs
+  the publisher's checks on its artifact; refusal fails `evidence` and
+  `ci-ok`. This catches honest mistakes only, because a PR controls its
+  own copy. Main's publisher posts a fixed notice on artifact refusal or
+  publish failure, using only its own text and a fixed reason code.
+  Freshness checks and ordered comment writes protect current evidence;
+  only the comment job is serialised, so the rest of the publisher can run
+  independently. See [REVIEW.md, "Evidence"](REVIEW.md#evidence-before-and-after-every-pr)
+  for the refusal reasons and publishing mechanics.
+- **Why:** PR #43's 40.3 MB of screenshots exceeded the 40 MB cap. The
+  publisher refused twice while CI stayed green; it merged without evidence.
+- **Rejected:** CI checks alone (a hostile PR can edit them); notices alone
+  (the publisher is not a required check, so the PR could still merge).
+  A workflow-level concurrency group was also rejected: GitHub keeps only
+  one pending run per group, and a late stale run can replace the current
+  head's pending run regardless of commit age, losing its evidence. An
+  owner-and-branch key can also collide across PRs.
+- **Accepted edge case:** GitHub can replace a pending comment job with a
+  stale run, leaving the previous comment and its head SHA visible until
+  the publisher is re-run.
+- **Status:** in effect from PR #57.
+
+### D35. Crop oversized screenshot sets to fit (2026-11-11, Jon)
+- **Decision:** evidence Decision 5: over the 40 MB push cap, shorten
+  full-page captures step by step, largest first, through 8,000, 6,000,
+  4,000 and 3,000 px. Keep e-ink captures intact. Record `crop_px` and warn
+  beside the images at that height: "changes below this line are not
+  shown." If the minimum still cannot fit, fail the evidence job. Under
+  the cap, the extra cropping changes nothing.
+- **Why:** Jon expects future designs to be shorter. Cropped images with a
+  warning are more useful than no images.
+- **Rejected:** raising the cap (the `pr-evidence` branch grows forever);
+  posting no images over the cap (the PR most needing pictures gets none).
+- **Status:** in effect from PR #57.

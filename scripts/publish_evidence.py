@@ -23,9 +23,10 @@ Subcommands (called by the workflow, in order across its jobs):
         Pin the placeholder to the evidence push SHA. Validates the SHA.
 
 Exit codes: 0 ok; 1 the artifact is invalid, including unreadable or
-malformed artifact files (render: skip the publish, no push, no comment);
-2 bad caller arguments (render), or an unreadable or invalid comment file
-or SHA (substitute).
+malformed artifact files (render: write refusal.json with the fixed reason
+code, skip the push, and let the workflow post the fixed notice instead of
+the comment); 2 bad caller arguments (render), or an unreadable or invalid
+comment file, SHA, or refusal file (substitute, refusal).
 """
 
 from __future__ import annotations
@@ -35,11 +36,13 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import evidence_checks  # noqa: E402  (main's code: this script runs from main only)
 import pr_evidence  # noqa: E402  (main's code: this script runs from main only)
 import test_results  # noqa: E402  (main's code: validates PR-produced XML)
 import ui_evidence  # noqa: E402
@@ -74,28 +77,68 @@ TEST_HEADING = "## Before / after evidence"
 
 
 class PublishError(Exception):
-    """The artifact failed validation: skip the publish, post nothing."""
+    """The artifact failed validation: skip the publish, post a fixed notice.
+
+    ``reason`` is one of evidence_checks.REFUSAL_REASONS; cmd_render writes
+    it to refusal.json so the workflow can post the fixed notice.
+    """
+
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
 
 
-def read_text_capped(path: Path, cap: int, what: str) -> str:
+def read_text_capped(path: Path, cap: int, what: str, reason: str) -> str:
     try:
         size = path.stat().st_size
     except OSError as exc:
-        raise PublishError(f"cannot read {what}: {exc}") from exc
+        raise PublishError(f"cannot read {what}: {exc}", reason) from exc
     if size > cap:
-        raise PublishError(f"{what} is {size} bytes, over the {cap} cap")
+        raise PublishError(f"{what} is {size} bytes, over the {cap} cap", "too_large")
     try:
         return path.read_text(encoding="utf-8")
     except (OSError, ValueError) as exc:
-        raise PublishError(f"cannot read {what}: {exc}") from exc
+        raise PublishError(f"cannot read {what}: {exc}", reason) from exc
 
 
 def check_evidence_text(text: str) -> None:
     """Refuse a comment body that lacks the marker or exceeds the budget."""
-    if not text.startswith(pr_evidence.MARKER):
-        raise PublishError("evidence.md does not start with the marker")
+    if not text.startswith(pr_evidence.MARKER) and parse_marker(text) is None:
+        raise PublishError("comment does not start with the marker", "bad_schema")
     if len(text.encode()) > pr_evidence.MAX_COMMENT_BYTES:
-        raise PublishError("evidence.md is too large for a comment")
+        raise PublishError("comment is too large for a comment", "too_large")
+
+
+def main_scenario_ids() -> set[str]:
+    """Scenario ids in MAIN's list: the spec the results are checked against.
+
+    The publisher runs from the main checkout, so this file is main's copy
+    and these ids are trusted; the PR only supplies results claiming to
+    match them (or marked new-in-this-PR).
+    """
+    path = Path(__file__).resolve().parent.parent / "tests" / "evidence" / "scenarios.json"
+    try:
+        return evidence_checks.load_known_scenario_ids(path)
+    except (OSError, ValueError, KeyError) as exc:
+        raise PublishError(f"cannot read main's scenarios list: {exc}", "missing") from exc
+
+
+def read_results(artifact: Path) -> dict:
+    """Read and parse the structured results (Decision 13, option A).
+
+    The PR's markdown (evidence.md) is ignored entirely: the comment is
+    rebuilt from this file, which is validated strictly before anything
+    renders.
+    """
+    path = artifact / evidence_checks.RESULTS_FILENAME
+    text = read_text_capped(path, evidence_checks.RESULTS_MAX_BYTES, "results.json", "missing")
+    try:
+        doc = json.loads(text)
+    except RecursionError as exc:
+        raise PublishError(f"results.json is nested too deeply: {exc}", "bad_schema") from exc
+    except ValueError as exc:
+        raise PublishError(f"results.json is not valid JSON: {exc}", "bad_schema") from exc
+    return doc
 
 
 def failure_notice(count: int) -> str:
@@ -274,26 +317,6 @@ def _test_inputs(
     return jobs, results
 
 
-def fit_test_line(evidence_text: str, test_line: str, brief_line: str) -> str:
-    """Insert the Tests line, shrinking it when the comment is over budget.
-
-    Drops the failing names first (counts and verdicts stay), then falls
-    back to a fixed short line, and leaves the line out entirely when even
-    that doesn't fit. Only evidence that is already over budget on its own
-    is refused by the caller; test data never refuses.
-    """
-    text = insert_test_line(evidence_text, test_line)
-    if len(text.encode()) <= pr_evidence.MAX_COMMENT_BYTES:
-        return text
-    text = insert_test_line(evidence_text, brief_line)
-    if len(text.encode()) <= pr_evidence.MAX_COMMENT_BYTES:
-        return text
-    text = insert_test_line(evidence_text, TEST_LINE_FALLBACK)
-    if len(text.encode()) <= pr_evidence.MAX_COMMENT_BYTES:
-        return text
-    return evidence_text
-
-
 def render_comment(
     artifact: Path,
     repo: str,
@@ -301,6 +324,8 @@ def render_comment(
     head_sha: str,
     test_results_dir: str | None = None,
     jobs_json: str | None = None,
+    run_id: int | None = None,
+    run_attempt: int | None = None,
 ) -> str:
     """Validate the artifact and build the final comment text.
 
@@ -308,67 +333,155 @@ def render_comment(
     pushes and posts nothing), ValueError when the caller's own
     repo/pr/head-sha arguments are malformed.
     """
-    text = read_text_capped(artifact / "evidence.md", EVIDENCE_MAX_BYTES, "evidence.md")
-    check_evidence_text(text)
-    # Test data must never break the publish (decision D21 option A): after
-    # inserting the Tests line, shrink it (drop names, then a fixed short
-    # line) when the comment would go over budget. Only evidence that is
-    # already over budget on its own refuses above.
-    evidence_only = text
-    if test_results_dir is not None or jobs_json is not None:
-        jobs, results = _test_inputs(test_results_dir, jobs_json)
-        text = fit_test_line(
-            text,
-            test_results.render_comment_line(jobs, results),
-            test_results.render_comment_line(jobs, results, include_names=False),
+    if not pr_evidence.UI_REPO_RE.fullmatch(repo or ""):
+        raise ValueError(f"bad repo: {repo!r}")
+    if not isinstance(pr, int) or pr <= 0:
+        raise ValueError(f"bad PR number: {pr!r}")
+    if not pr_evidence.UI_SHA_RE.fullmatch(head_sha or ""):
+        raise ValueError(f"bad head SHA: {head_sha!r}")
+
+    def evidence(body: str) -> str:
+        """Stamp the evidence marker (the workflow always passes run ids)."""
+        if run_id is None and run_attempt is None:
+            return body
+        if run_id is None or run_attempt is None:
+            raise ValueError("run_id and run_attempt go together")
+        return stamp_marker(body, head_sha, run_id, run_attempt, "evidence")
+    results = read_results(artifact)
+    errors = evidence_checks.validate_results(results, main_scenario_ids())
+    if errors:
+        raise PublishError(
+            "results.json failed validation: " + "; ".join(errors[:10]), "bad_schema"
         )
+    claimed = results.get("metadata", {}).get("head_sha")
+    if claimed is not None and claimed != head_sha:
+        raise PublishError(
+            f"results.json is for head {claimed}, not the published run {head_sha}",
+            "stale_head",
+        )
+    # The text section is rebuilt here from the validated results; the
+    # PR-supplied markdown (evidence.md) is never read, let alone posted.
+    top, sections = pr_evidence.text_parts_from_results(results, head_sha)
+    # Test data must never break the publish (decision D21 option A): the
+    # Tests line degrades (names dropped, then a fixed short line, then
+    # nothing) instead of refusing it.
+    if test_results_dir is not None or jobs_json is not None:
+        jobs, test_data = _test_inputs(test_results_dir, jobs_json)
+        tests_lines: list = [
+            test_results.render_comment_line(jobs, test_data),
+            test_results.render_comment_line(jobs, test_data, include_names=False),
+            TEST_LINE_FALLBACK,
+            None,
+        ]
+    else:
+        tests_lines = [None]
     ui_dir = artifact / "ui_out"
     manifest_path = ui_dir / ui_evidence.MANIFEST_NAME
     if os.path.lexists(manifest_path) and not has_manifest(ui_dir):
         # A symlink or directory in the manifest's place is a broken or
         # hostile artifact, not "no UI evidence": refuse, don't drop the
         # Web UI section quietly.
-        raise PublishError(f"{ui_evidence.MANIFEST_NAME} is not a regular file")
-    if not ui_dir.exists() or not has_manifest(ui_dir):
+        raise PublishError(
+            f"{ui_evidence.MANIFEST_NAME} is not a regular file", "bad_schema"
+        )
+    ui_suffixes, failures = [""], 0
+    if ui_dir.exists() and has_manifest(ui_dir):
         # No manifest (the capture died before writing one): the text
         # comment still publishes. No web/ on either side is not this case:
         # that manifest has an empty captures list and gets a Web UI section.
-        return text
-    errors = ui_evidence.validate_artifact(ui_dir)
-    if errors:
-        raise PublishError("artifact validation failed: " + "; ".join(errors[:10]))
-    try:
-        manifest = pr_evidence.load_ui_manifest(ui_dir)
-    except (OSError, ValueError, RecursionError) as exc:
-        # The validator and the loader must agree, but if they ever drift
-        # (or the file changes between the two reads), an artifact problem
-        # is still an invalid artifact (exit 1), never a bad argument.
-        # json.JSONDecodeError subclasses ValueError, so this covers a
-        # corrupt manifest too. render_ui_section's ValueError (bad
-        # repo/pr/head-sha) is deliberately left to propagate as exit 2.
-        raise PublishError(f"artifact validation failed: {exc}") from exc
-    if manifest is None:
-        return text
-    _, _, failures = pr_evidence.render_ui_section(manifest, repo, pr, head_sha)
+        errors = ui_evidence.validate_artifact(ui_dir)
+        if errors:
+            raise PublishError(
+                "artifact validation failed: " + "; ".join(errors[:10]),
+                evidence_checks.artifact_refusal_reason(errors),
+            )
+        png_errors = validate_png_files(ui_dir)
+        if png_errors:
+            raise PublishError(
+                "screenshot validation failed: " + "; ".join(png_errors[:10]),
+                "bad_png",
+            )
+        try:
+            manifest = pr_evidence.load_ui_manifest(ui_dir)
+        except (OSError, ValueError, RecursionError) as exc:
+            # The validator and the loader must agree, but if they ever drift
+            # (or the file changes between the two reads), an artifact problem
+            # is still an invalid artifact (exit 1), never a bad argument.
+            # json.JSONDecodeError subclasses ValueError, so this covers a
+            # corrupt manifest too. render_ui_section's ValueError (bad
+            # repo/pr/head-sha) is deliberately left to propagate as exit 2.
+            raise PublishError(
+                f"artifact validation failed: {exc}", "bad_schema"
+            ) from exc
+        if manifest is not None:
+            ui_suffixes, failures = pr_evidence.ui_tiers(
+                manifest, repo, pr, head_sha
+            )
 
-    def with_ui(base: str) -> str:
-        body = pr_evidence.append_ui_section(
-            base, ui_dir, repo=repo, pr=pr, head_sha=head_sha
-        )
-        if failures and "Web UI checks failed" not in body:
+    def assemble(keep: int, line: str | None, suffix: str) -> str:
+        body = pr_evidence.assemble_text(top, sections, keep)
+        if line is not None:
+            body = insert_test_line(body, line)
+        body += suffix
+        if failures:
             lines = body.split("\n")
             lines.insert(1, failure_notice(failures))
             lines.insert(2, "")
             body = "\n".join(lines)
         return body
 
-    body = with_ui(text)
-    if text != evidence_only and len(body.encode()) > pr_evidence.MAX_COMMENT_BYTES:
-        # The Tests line is what tipped it over: drop it rather than let
-        # test data refuse the publish (D21 option A).
-        body = with_ui(evidence_only)
-    check_evidence_text(body)
-    return body
+    # One shrink order, measured on the final form (review round 4): the
+    # Tests line degrades completely — names, then the line itself — before
+    # any screenshot detail is dropped, and text sections shorten last.
+    # Every candidate is measured with pr_evidence.final_len — stamped with
+    # the longest possible marker and every image placeholder counted at
+    # its posted length — so a candidate that fits here still fits after
+    # the marker is stamped and the comment step pins the SHA.
+    combos = [(line, ui_suffixes[0]) for line in tests_lines]
+    combos += [(None, suffix) for suffix in ui_suffixes[1:]]
+    for line, suffix in combos:
+        body = assemble(len(sections), line, suffix)
+        if pr_evidence.final_len(body) <= pr_evidence.MAX_COMMENT_BYTES:
+            body = evidence(body)
+            check_evidence_text(body)
+            return body
+    for keep in range(len(sections) - 1, -1, -1):
+        body = assemble(keep, None, ui_suffixes[-1])
+        if pr_evidence.final_len(body) <= pr_evidence.MAX_COMMENT_BYTES:
+            body = evidence(body)
+            check_evidence_text(body)
+            return body
+    raise PublishError("comment is too large for a comment", "too_large")
+
+
+def validate_png_files(ui_dir: Path) -> list[str]:
+    """Run the structural PNG check over every capture-named file.
+
+    ``validate_artifact`` checks names, caps, and magic bytes; this parses
+    the structure (S5: chunk lengths, CRC of every chunk, IHDR caps, IEND
+    placement, bounded IDAT decompression). Render calls it before building
+    the comment and copy calls it again before pushing (defense in depth:
+    the directory is re-read, never trusted from the earlier pass).
+    """
+    problems: list[str] = []
+    try:
+        entries = sorted(ui_dir.iterdir())
+    except OSError as exc:
+        raise PublishError(f"cannot list UI directory: {exc}", "missing") from exc
+    for entry in entries:
+        if entry.name == ui_evidence.MANIFEST_NAME:
+            continue
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        if not ui_evidence.CAPTURE_RE.fullmatch(entry.name):
+            continue  # validate_artifact already refuses these
+        try:
+            data = entry.read_bytes()
+        except OSError as exc:
+            raise PublishError(f"cannot read {entry.name}: {exc}", "missing") from exc
+        for problem in evidence_checks.validate_png(data):
+            problems.append(f"{entry.name}: {problem}")
+    return problems
 
 
 def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
@@ -391,11 +504,18 @@ def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
             (ui_dir / ui_evidence.MANIFEST_NAME).read_text(encoding="utf-8")
         )
     except (OSError, ValueError, RecursionError) as exc:
-        raise PublishError(f"manifest is unreadable: {exc}") from exc
+        raise PublishError(f"manifest is unreadable: {exc}", "bad_schema") from exc
     captures = data.get("captures") if isinstance(data, dict) else None
     if not isinstance(captures, list) or not all(isinstance(c, dict) for c in captures):
-        raise PublishError("manifest must be an object with a list of capture objects")
+        raise PublishError(
+            "manifest must be an object with a list of capture objects", "bad_schema"
+        )
     kept, _ = pr_evidence.select_ui_captures(data)
+    png_errors = validate_png_files(ui_dir)
+    if png_errors:
+        raise PublishError(
+            "screenshot validation failed: " + "; ".join(png_errors[:10]), "bad_png"
+        )
     referenced: set[str] = set()
     for _, files in kept:
         referenced.update(files)
@@ -426,9 +546,20 @@ def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
                 unlisted.append(name)
     if unlisted:
         raise PublishError(
-            f"unlisted files would be pushed: {', '.join(sorted(unlisted))}"
+            f"unlisted files would be pushed: {', '.join(sorted(unlisted))}", "bad_schema"
         )
     return copied
+
+
+REFUSAL_FILENAME = "refusal.json"
+
+
+def _write_refusal(out: Path, reason: str) -> None:
+    """Record the fixed refusal reason so the workflow can post the notice."""
+    out.mkdir(parents=True, exist_ok=True)
+    (out / REFUSAL_FILENAME).write_text(
+        json.dumps({"reason": reason}) + "\n", encoding="utf-8"
+    )
 
 
 def cmd_render(args: argparse.Namespace) -> int:
@@ -442,9 +573,33 @@ def cmd_render(args: argparse.Namespace) -> int:
             args.head_sha,
             test_results_dir=args.test_results_dir,
             jobs_json=args.jobs_json,
+            run_id=args.run_id,
+            run_attempt=args.run_attempt,
         )
     except PublishError as exc:
         print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
+        # Decision 4, option B: never go silent. Record the fixed reason
+        # code so the workflow can post the fixed notice; the message above
+        # stays in the job log for debugging and never reaches the comment.
+        _write_refusal(out, exc.reason)
+        return 1
+    except UnicodeEncodeError as exc:
+        # Artifact text the schema missed (a lone surrogate in a manifest
+        # string the UI validator does not encode-check): still hostile
+        # data, never a caller bug. UnicodeEncodeError subclasses
+        # ValueError, so this must come before the re-raise below.
+        print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
+        _write_refusal(out, "render_error")
+        return 1
+    except ValueError:
+        # Malformed repo/pr/head-sha arguments: a caller bug, still exit 2.
+        raise
+    except Exception as exc:
+        # Any other surprise while handling artifact data (a KeyError past
+        # a validator gap, a TypeError on a hostile manifest type, deep
+        # nesting): refuse with a fixed reason instead of dying silent.
+        print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
+        _write_refusal(out, "render_error")
         return 1
     out.mkdir(parents=True, exist_ok=True)
     (out / "comment.md").write_text(body, encoding="utf-8")
@@ -455,6 +610,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             names = copy_pushable_files(ui_dir, files)
         except PublishError as exc:
             print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
+            _write_refusal(out, exc.reason)
             return 1
         pngs = [n for n in names if n.endswith(".png")]
         print(f"publish_evidence: rendered comment with {len(pngs)} PNG(s)")
@@ -467,7 +623,7 @@ def cmd_render(args: argparse.Namespace) -> int:
 def cmd_substitute(args: argparse.Namespace) -> int:
     path = Path(args.comment)
     try:
-        text = read_text_capped(path, EVIDENCE_MAX_BYTES, "comment.md")
+        text = read_text_capped(path, EVIDENCE_MAX_BYTES, "comment.md", "bad_schema")
     except PublishError as exc:
         print(f"publish_evidence: {exc}", file=sys.stderr)
         return 2
@@ -477,6 +633,417 @@ def cmd_substitute(args: argparse.Namespace) -> int:
         print(f"publish_evidence: {exc}", file=sys.stderr)
         return 2
     path.write_text(text, encoding="utf-8")
+    return 0
+
+
+def cmd_refusal(args: argparse.Namespace) -> int:
+    """Print the fixed refusal notice for a refusal.json file (exit 0).
+
+    The workflow posts this as the evidence comment when render refused.
+    The reason is read from the file and validated here in Python (never
+    interpolated from the shell), and the notice itself is main's fixed
+    text: no PR-supplied content can reach the comment through it. With
+    the marker arguments the notice carries the parameterized marker
+    (outcome notice); without them it keeps the bare marker.
+    """
+    try:
+        doc = json.loads(Path(args.reason_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"publish_evidence: cannot read refusal file: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(doc, dict):
+        print("publish_evidence: refusal file must be an object", file=sys.stderr)
+        return 2
+    try:
+        notice = evidence_checks.refusal_notice(doc.get("reason"))
+    except ValueError as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
+    meta = (args.head_sha, args.run_id, args.run_attempt)
+    if all(value is None for value in meta):
+        print(notice, end="")
+        return 0
+    if any(value is None for value in meta):
+        print(
+            "publish_evidence: --head-sha, --run-id and --run-attempt go together",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        notice = stamp_marker(notice, args.head_sha, args.run_id, args.run_attempt, "notice")
+    except ValueError as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
+    print(notice, end="")
+    return 0
+
+
+# Comment-job decision (review round 1, finding 4) -------------------------------
+#
+# The comment job must post even when the build or the push failed: a failed
+# push used to skip it, and a build that died before uploading left its
+# download failing. This decision lives here in main's Python so it is
+# unit-tested; the workflow only carries out the printed word. Only the
+# fixed words below ever print: job results are GitHub-provided, never PR
+# content. A stale head is not a failure: the workflow checks freshness
+# separately and writes nothing then.
+
+COMMENT_ACTIONS = ("comment", "refusal-notice", "publish-failed", "nothing")
+
+
+def decide_comment_action(
+    build_result: str, push_result: str, has_refusal: bool, has_comment: bool
+) -> str:
+    """What the comment job should post.
+
+    ``build_result``/``push_result`` are GitHub job results (success,
+    failure, cancelled, skipped); ``has_refusal``/``has_comment`` say
+    whether the (tolerant) download produced those files. Returns one of
+    COMMENT_ACTIONS: post the rendered comment, post the render refusal,
+    post the fixed publish_failed notice, or post nothing.
+    """
+    if build_result not in ("success", "failure"):
+        return "nothing"
+    if push_result not in ("success", "failure", "skipped"):
+        return "nothing"
+    if (
+        build_result == "success"
+        and push_result == "success"
+        and has_comment
+        and not has_refusal
+    ):
+        return "comment"
+    if build_result == "failure" and has_refusal:
+        return "refusal-notice"
+    return "publish-failed"
+
+
+def cmd_decide_comment(args: argparse.Namespace) -> int:
+    print(
+        decide_comment_action(
+            args.build_result, args.push_result, args.has_refusal, args.has_comment
+        )
+    )
+    return 0
+
+
+# Comment identity and concurrent-publisher rules (review round 2, finding 2)
+#
+# Two publisher runs can overlap on one PR: a newer push starts a run while
+# an older attempt still works. The comment job is serialised per PR (a
+# job-level concurrency group keyed by the PR number, cancel-in-progress
+# false), so the lookup below sees every earlier write — but an older
+# attempt can still finish after a newer one, and two same-head runs would
+# otherwise both POST. Every comment body therefore carries a hidden marker
+# built only from trusted event data (head SHA, workflow_run id and
+# attempt, outcome), and the write follows monotonic rules over the
+# existing bot-authored comments: never write when any marker comment is
+# from a newer (run id, attempt), whatever head it is for (review round 3,
+# finding 1: ordering is cross-head and monotonic by CI run, since a
+# genuinely newer push always gets a newer run id). GitHub documents run
+# ids only as unique, not ordered, and a re-run keeps its id while
+# incrementing the attempt — so the (run id, attempt) pair still orders a
+# re-run after its original; a notice never replaces an evidence comment
+# for the same head; a skip still deletes every marker comment except the
+# winner (review round 3, finding 4).
+# Otherwise write, keeping one marker comment and deleting the rest.
+# Marker-looking text in anyone
+# else's comments is ignored. Residual: GitHub keeps one pending run per
+# concurrency group, so a pending comment job can be displaced by a later
+# arrival; if the displacing run is stale it writes nothing and the PR
+# keeps the previous comment, which states its head SHA — re-running the
+# publisher fixes it.
+
+BOT_LOGIN = "github-actions[bot]"
+COMMENT_MARKER_PREFIX = "<!-- housesitter-evidence"
+COMMENT_OUTCOMES = ("evidence", "notice")
+MARKER_RE = re.compile(
+    r"^<!-- housesitter-evidence head=([0-9a-f]{40}) run=([0-9]+)"
+    r" attempt=([0-9]+) outcome=(evidence|notice) -->$"
+)
+
+
+def _checked_marker_parts(head_sha, run_id, run_attempt, outcome):
+    """Validate trusted event data for a comment marker (ValueError: caller bug)."""
+    if not pr_evidence.UI_SHA_RE.fullmatch(head_sha or ""):
+        raise ValueError(f"bad head SHA: {head_sha!r}")
+    for name, value in (("run id", run_id), ("run attempt", run_attempt)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"bad {name}: {value!r}")
+    if outcome not in COMMENT_OUTCOMES:
+        raise ValueError(f"bad comment outcome: {outcome!r}")
+    return head_sha, run_id, run_attempt, outcome
+
+
+def build_marker(head_sha: str, run_id: int, run_attempt: int, outcome: str) -> str:
+    """The hidden first line of every posted comment body."""
+    head_sha, run_id, run_attempt, outcome = _checked_marker_parts(
+        head_sha, run_id, run_attempt, outcome
+    )
+    return (
+        f"<!-- housesitter-evidence head={head_sha} run={run_id} "
+        f"attempt={run_attempt} outcome={outcome} -->"
+    )
+
+
+def parse_marker(body: object) -> dict | None:
+    """Parse the hidden marker from a comment body.
+
+    Returns None when the body carries no marker, ``{"legacy": True}`` for
+    the bare marker from before markers carried metadata, else the metadata
+    dict (head_sha str, run_id/attempt ints, outcome str).
+    """
+    if not isinstance(body, str):
+        return None
+    first = body.split("\n", 1)[0]
+    if first == pr_evidence.MARKER:
+        return {"legacy": True}
+    match = MARKER_RE.match(first)
+    if match is None:
+        return None
+    head_sha, run_id, attempt, outcome = match.groups()
+    return {
+        "head_sha": head_sha,
+        "run_id": int(run_id),
+        "attempt": int(attempt),
+        "outcome": outcome,
+    }
+
+
+def stamp_marker(
+    body: str, head_sha: str, run_id: int, run_attempt: int, outcome: str
+) -> str:
+    """Replace the leading bare marker with the parameterized one."""
+    if not isinstance(body, str) or not body.startswith(pr_evidence.MARKER):
+        raise ValueError("comment body does not start with the bare marker")
+    return (
+        build_marker(head_sha, run_id, run_attempt, outcome)
+        + body[len(pr_evidence.MARKER) :]
+    )
+
+
+def _existing_winner(markers: list, head_sha: str):
+    """The marker comment a skip keeps while deleting the other duplicates.
+
+    Same-head evidence always stands — a notice never replaces it, so it
+    is kept even next to a newer same-head notice. Otherwise the newest
+    (run id, attempt) wins, cross-head ordering being monotonic by CI run
+    (review round 3, findings 1 and 4).
+    """
+    same_evidence = [m for m in markers if m[1] == head_sha and m[3] == "evidence"]
+    if same_evidence:
+        return max(same_evidence, key=lambda m: (m[2], m[0]))
+    return max(markers, key=lambda m: (m[2], m[0]))
+
+
+def _skip(markers: list, head_sha: str) -> tuple:
+    """Skip this run's write but still plan the duplicate cleanup."""
+    winner = _existing_winner(markers, head_sha)
+    delete = sorted(cid for cid, _, _, _ in markers if cid != winner[0])
+    return ("skip", None, delete)
+
+
+def decide_write(
+    comments: list, head_sha: str, run_id: int, run_attempt: int, outcome: str
+) -> tuple:
+    """Apply the monotonic write rules over the existing issue comments.
+
+    ``comments`` are (id, author login, body) triples; only the workflow's
+    own bot comments carrying the marker count. Returns (action, keep_id,
+    delete_ids): "skip" writes nothing but still deletes every marker
+    comment except the winner; "post" adds a comment and deletes every
+    other marker comment; "patch" edits keep_id and deletes the rest.
+    """
+    _checked_marker_parts(head_sha, run_id, run_attempt, outcome)
+    new_key = (run_id, run_attempt)
+    markers = []  # (id, head or None, (run, attempt), outcome)
+    for cid, login, body in comments:
+        if login != BOT_LOGIN:
+            continue
+        parsed = parse_marker(body)
+        if parsed is None:
+            continue
+        if parsed.get("legacy"):
+            markers.append((cid, None, (0, 0), "evidence"))
+        else:
+            markers.append(
+                (
+                    cid,
+                    parsed["head_sha"],
+                    (parsed["run_id"], parsed["attempt"]),
+                    parsed["outcome"],
+                )
+            )
+    if any(key > new_key for _, _, key, _ in markers):
+        # Cross-head ordering (review round 3, finding 1): a newer run
+        # already wrote — whatever head it was for — so this run writes
+        # nothing. A genuinely newer push always gets a newer CI run id,
+        # so it still wins. (This subsumes the old same-head-newer rule.)
+        return _skip(markers, head_sha)
+    same_head = [m for m in markers if m[1] == head_sha]
+    if outcome == "notice" and any(out == "evidence" for _, _, _, out in same_head):
+        return _skip(markers, head_sha)
+    if not markers:
+        return ("post", None, [])
+    pool = same_head or markers
+    keep = max(pool, key=lambda m: (m[2], m[0]))
+    delete = sorted(cid for cid, _, _, _ in markers if cid != keep[0])
+    return ("patch", keep[0], delete)
+
+
+def _parse_json_docs(raw: str) -> list:
+    """Parse one JSON document or several concatenated ones (``gh
+    --paginate`` prints one response body per page)."""
+    try:
+        return [json.loads(raw)]
+    except ValueError:
+        pass
+    docs = []
+    decoder = json.JSONDecoder()
+    index = 0
+    try:
+        while index < len(raw):
+            while index < len(raw) and raw[index].isspace():
+                index += 1
+            if index >= len(raw):
+                break
+            doc, end = decoder.raw_decode(raw, index)
+            docs.append(doc)
+            index = end
+    except ValueError as exc:
+        raise HeadCheckError(
+            f"cannot parse the comments response: {exc}"
+        ) from exc
+    return docs
+
+
+def fetch_issue_comments(repo: str, pr: int) -> list:
+    """(id, author login, body) for the issue's comments, via the gh CLI."""
+    if not pr_evidence.UI_REPO_RE.fullmatch(repo or ""):
+        raise ValueError(f"bad repo: {repo!r}")
+    if isinstance(pr, bool) or not isinstance(pr, int) or pr <= 0:
+        raise ValueError(f"bad PR number: {pr!r}")
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{repo}/issues/{pr}/comments", "--paginate"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HeadCheckError(f"cannot ask the API for comments: {exc}") from exc
+    if proc.returncode != 0:
+        raise HeadCheckError(f"gh api failed with exit {proc.returncode}")
+    if not proc.stdout.strip():
+        return []
+    comments = []
+    for doc in _parse_json_docs(proc.stdout):
+        if not isinstance(doc, list):
+            raise HeadCheckError("unexpected comments response shape")
+        for item in doc:
+            if not isinstance(item, dict):
+                continue
+            user = item.get("user")
+            login = user.get("login") if isinstance(user, dict) else None
+            cid, body = item.get("id"), item.get("body")
+            if type(cid) is int and isinstance(login, str) and isinstance(body, str):
+                comments.append((cid, login, body))
+    return comments
+
+
+def cmd_decide_write(args: argparse.Namespace) -> int:
+    """Print the comment write plan: SKIP, POST, or PATCH <id>, plus an
+    optional DELETE <ids> line. Only fixed words and API-returned digit ids
+    ever print; the shell carries the plan out after re-validating the ids.
+    """
+    try:
+        new = _checked_marker_parts(
+            args.head_sha, args.run_id, args.run_attempt, args.outcome
+        )
+    except ValueError as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
+    try:
+        comments = fetch_issue_comments(args.repo, args.pr)
+    except (ValueError, HeadCheckError) as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
+    action, keep, delete = decide_write(comments, *new)
+    if action == "skip":
+        print("SKIP")
+    elif action == "post":
+        print("POST")
+    else:
+        print(f"PATCH {keep}")
+    if delete:
+        print(f"DELETE {' '.join(str(cid) for cid in delete)}")
+    return 0
+
+
+# Freshness re-check (review round 1, finding 6) -------------------------------
+#
+# The head used to be checked once per job, then the step fetched, prepared
+# and looked up comments: a head that moved mid-step still pushed and
+# posted. The workflow calls check-head immediately before every `git push`
+# (both attempts) and twice in the comment step: once before the comment
+# lookup and again after it, immediately before writing (review round 3,
+# finding 1: the lookup itself takes time, so the earlier check is stale
+# by write time).
+# Exit codes: 0 the head is still fresh; 1 it moved (the caller stops
+# without writing); 2 the check itself failed.
+
+
+class HeadCheckError(Exception):
+    """The PR's head SHA could not be verified through the API."""
+
+
+def fetch_head_sha(repo: str, pr: int) -> str:
+    """The PR's current head SHA from the GitHub API.
+
+    ``repo``/``pr`` are trusted resolve outputs, never artifact data.
+    Raises ValueError for bad arguments, HeadCheckError when gh fails or
+    answers nonsense.
+    """
+    if not pr_evidence.UI_REPO_RE.fullmatch(repo or ""):
+        raise ValueError(f"bad repo: {repo!r}")
+    if not isinstance(pr, int) or pr <= 0:
+        raise ValueError(f"bad PR number: {pr!r}")
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{repo}/pulls/{pr}", "--jq", ".head.sha"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HeadCheckError(f"cannot ask the API for the head: {exc}") from exc
+    if proc.returncode != 0:
+        raise HeadCheckError(f"gh api failed with exit {proc.returncode}")
+    sha = proc.stdout.strip()
+    if not pr_evidence.UI_SHA_RE.fullmatch(sha):
+        raise HeadCheckError(f"API returned a bad head SHA: {sha!r}")
+    return sha
+
+
+def cmd_check_head(args: argparse.Namespace) -> int:
+    if not pr_evidence.UI_SHA_RE.fullmatch(args.expected or ""):
+        print(
+            f"publish_evidence: bad expected head SHA: {args.expected!r}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        current = fetch_head_sha(args.repo, args.pr)
+    except (ValueError, HeadCheckError) as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
+    if current != args.expected:
+        print(
+            f"publish_evidence: head moved ({args.expected} -> {current}); "
+            "stopping without writing",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -499,11 +1066,72 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="jobs-API response file for the run attempt (optional)",
     )
+    render.add_argument(
+        "--run-id",
+        default=None,
+        type=int,
+        help="workflow_run id for the comment marker (optional)",
+    )
+    render.add_argument(
+        "--run-attempt",
+        default=None,
+        type=int,
+        help="workflow_run attempt for the comment marker (optional)",
+    )
     render.set_defaults(func=cmd_render)
     subst = sub.add_parser("substitute", help="pin the placeholder to the push SHA")
     subst.add_argument("--comment", required=True)
     subst.add_argument("--sha", required=True)
     subst.set_defaults(func=cmd_substitute)
+    refusal = sub.add_parser(
+        "refusal", help="print the fixed refusal notice for a refusal.json file"
+    )
+    refusal.add_argument("--reason-file", required=True)
+    refusal.add_argument(
+        "--head-sha",
+        default=None,
+        help="head commit SHA for the comment marker (optional)",
+    )
+    refusal.add_argument(
+        "--run-id",
+        default=None,
+        type=int,
+        help="workflow_run id for the comment marker (optional)",
+    )
+    refusal.add_argument(
+        "--run-attempt",
+        default=None,
+        type=int,
+        help="workflow_run attempt for the comment marker (optional)",
+    )
+    refusal.set_defaults(func=cmd_refusal)
+    decide = sub.add_parser(
+        "decide-comment", help="print what the comment job should post"
+    )
+    decide.add_argument("--build-result", required=True)
+    decide.add_argument("--push-result", required=True)
+    decide.add_argument("--has-refusal", action="store_true")
+    decide.add_argument("--has-comment", action="store_true")
+    decide.set_defaults(func=cmd_decide_comment)
+    write = sub.add_parser(
+        "decide-write", help="print the comment write plan for this run"
+    )
+    write.add_argument("--repo", required=True)
+    write.add_argument("--pr", required=True, type=int)
+    write.add_argument("--head-sha", required=True)
+    write.add_argument("--run-id", required=True, type=int)
+    write.add_argument("--run-attempt", required=True, type=int)
+    write.add_argument(
+        "--outcome", required=True, choices=list(COMMENT_OUTCOMES)
+    )
+    write.set_defaults(func=cmd_decide_write)
+    check_head = sub.add_parser(
+        "check-head", help="exit 0 when the PR head is still fresh"
+    )
+    check_head.add_argument("--repo", required=True)
+    check_head.add_argument("--pr", required=True, type=int)
+    check_head.add_argument("--expected", required=True)
+    check_head.set_defaults(func=cmd_check_head)
     args = parser.parse_args(argv)
     try:
         return args.func(args)

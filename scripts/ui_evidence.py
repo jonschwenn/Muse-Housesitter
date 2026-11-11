@@ -396,6 +396,87 @@ def clip_to_max_height(shot: bytes) -> tuple:
     )
 
 
+# Crop to fit (Decision 5): when the captures would exceed the push cap,
+# full-page shots are cropped shorter step by step, largest first, until
+# the total fits. The steps start at the capture height (MAX_SHOT_HEIGHT_PX)
+# and end at 3,000 px; e-ink shots (never full page) are never cropped.
+CROP_STEPS = (8000, 6000, 4000, 3000)  # first step is MAX_SHOT_HEIGHT_PX
+
+
+def _full_page(view_id: str) -> bool:
+    for vid, _, _, _, _, full, _ in VIEWS:
+        if vid == view_id:
+            return full
+    return False
+
+
+def _crop_png(data: bytes, height: int) -> bytes:
+    """Keep the top rows of a full-page PNG. Raises ValueError when the
+    image data is undecodable (the caller then treats the capture as
+    uncropped and, if nothing else fits, fails the job)."""
+    width, _, rgba = decode_png(data)
+    return encode_png(width, height, 6, rgba[: width * height * 4])
+
+
+def _next_crop_step(height: int) -> int | None:
+    for step in CROP_STEPS:
+        if step < height:
+            return step
+    return None
+
+
+def crop_to_fit(out_dir: Path, manifest: dict, cap: int = MAX_TOTAL_BYTES) -> bool:
+    """Crop full-page captures shorter until the PNG total fits the cap.
+
+    Largest capture first, one step at a time. Cropped captures record
+    ``crop_px`` (the height they were cropped to) in the manifest, so the
+    rebuilt comment can warn that changes below that line are not shown.
+    Files are only rewritten when the total is over the cap: PRs under the
+    cap keep byte-identical shots. Returns True when the total fits (or
+    already fit); False when even the minimum step does not fit, in which
+    case the caller fails the job with a clear message.
+    """
+    captures = manifest.get("captures", [])
+    for _ in range(len(captures) * len(CROP_STEPS) + 1):
+        files = sorted(out_dir.glob("*.png"))
+        total = sum(path.stat().st_size for path in files)
+        if total <= cap:
+            return True
+        # Largest capture first: the one whose files weigh the most and
+        # which still has a shorter step available.
+        ranked = []
+        for capture in captures:
+            if not _full_page(capture.get("view", "")):
+                continue
+            names = [
+                capture.get(key)
+                for key in ("base", "head", "diff")
+                if isinstance(capture.get(key), str)
+            ]
+            paths = [out_dir / name for name in names if (out_dir / name).is_file()]
+            if not paths:
+                continue
+            try:
+                tallest = max(png_size(path.read_bytes())[1] for path in paths)
+            except ValueError:
+                continue  # undecodable: cannot crop, never silently dropped
+            step = _next_crop_step(tallest)
+            if step is None:
+                continue
+            ranked.append((sum(p.stat().st_size for p in paths), capture, paths, step))
+        if not ranked:
+            return False
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        _, capture, paths, step = ranked[0]
+        for path in paths:
+            data = path.read_bytes()
+            _, height = png_size(data)
+            if height > step:
+                path.write_bytes(_crop_png(data, step))
+        capture["crop_px"] = step
+    return False
+
+
 def classify_and_diff(before_png: bytes | None, after_png: bytes | None) -> tuple:
     """Classify a capture pair and keep the diff. Returns (status, diff).
 
@@ -829,6 +910,13 @@ def build_ui_section(
         for cap in shown:
             label = f"{cap['fixture']} / {cap['view']}"
             block += [f"#### `{label}`", ""]
+            if isinstance(cap.get("crop_px"), int):
+                crop_note = (
+                    f"Cropped at {cap['crop_px']:,} px to fit the size limit; "
+                    "changes below this line are not shown."
+                )
+            else:
+                crop_note = None
             if cap["status"] == "added":
                 block += [
                     "New page: no before image (the base doesn't have this page).",
@@ -840,6 +928,8 @@ def build_ui_section(
                     ),
                     "",
                 ]
+                if crop_note is not None:
+                    block += [crop_note, ""]
             elif cap["status"] == "removed":
                 block += [
                     "Removed page: no after image (the head no longer has this page).",
@@ -851,6 +941,8 @@ def build_ui_section(
                     ),
                     "",
                 ]
+                if crop_note is not None:
+                    block += [crop_note, ""]
             else:
                 block += [
                     img_tag(
@@ -877,6 +969,11 @@ def build_ui_section(
                         str(cap.get("diff_error") or "unknown reason")
                     )
                     block += [f"Diff unavailable: {reason}."]
+                if isinstance(cap.get("crop_px"), int):
+                    block += [
+                        f"Cropped at {cap['crop_px']:,} px to fit the size limit; "
+                        "changes below this line are not shown."
+                    ]
                 block += [""]
         block += ["</details>", ""]
         details.append((fixture, "\n".join(block)))
@@ -1036,6 +1133,19 @@ def main(argv: list | None = None) -> int:
     manifest = build_manifest(
         args.base_tree, args.head_tree, args.out_dir, head_records, browser=browser
     )
+    # Crop full-page shots shorter when the push cap would refuse them all
+    # (Decision 5). The manifest records each cropped height, and the
+    # rebuilt comment warns next to those images. When even the minimum
+    # step does not fit, the job fails here with a clear message; the
+    # artifact still uploads below, so the publisher's notice says too_large.
+    cropped = crop_to_fit(args.out_dir, manifest)
+    if not cropped:
+        total = sum(p.stat().st_size for p in args.out_dir.glob("*.png"))
+        print(
+            f"ui_evidence: images total {total} bytes over the "
+            f"{MAX_TOTAL_BYTES} cap even at {CROP_STEPS[-1]:,} px; failing",
+            file=sys.stderr,
+        )
     (args.out_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=1) + "\n")
     budget = 60_000  # pr_evidence.py re-trims against the shared budget on merge
     full, table = build_ui_section(manifest, args.repo, args.pr, args.head_sha, budget, base_web)
@@ -1050,7 +1160,7 @@ def main(argv: list | None = None) -> int:
     for name in sorted(head_records):
         for problem in head_records[name]["problems"]:
             print(f"ui_evidence: FAIL {name}: {problem}")
-    return 1 if failures else 0
+    return 1 if failures or not cropped else 0
 
 
 if __name__ == "__main__":

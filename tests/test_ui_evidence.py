@@ -301,7 +301,11 @@ def test_pr_evidence_builds_ui_section_from_manifest(tmp_path, monkeypatch):
     body = pr_evidence.append_ui_section("text", ui_dir, **kwargs)
     assert "## Web UI" in body
     assert "PWNED" not in body
-    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", 1100)
+    # Tier boundaries are measured on the final form (marker reserve plus
+    # posted placeholder length), so the full section still fits here and
+    # the table fallback needs a tighter budget than the old 400-byte
+    # reserve implied.
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", 900)
     body = pr_evidence.append_ui_section("text", ui_dir, **kwargs)
     assert "## Web UI" in body
     assert "details omitted" in body
@@ -754,6 +758,43 @@ def test_publisher_still_publishes_failed_runs():
     assert '"success"' in workflow
 
 
+def test_publisher_has_no_workflow_concurrency_group():
+    # Deliberately no workflow-level concurrency group (review round 1,
+    # findings 7-8): GitHub keeps one pending run per group and a newer
+    # arrival displaces it by queue order, not commit freshness, so a late
+    # stale run could displace the current head's pending publisher and
+    # then write nothing, losing the current evidence. Only the comment
+    # job is serialised, per PR (review round 2, finding 2).
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    assert workflow.count("concurrency:") == 1
+    comment = workflow[workflow.index("\n  comment:"):]
+    assert "group: evidence-comment-${{ needs.resolve.outputs.pr }}" in comment
+    assert "cancel-in-progress: false" in comment
+
+
+def test_publisher_rechecks_freshness_before_writing():
+    # The head SHA is verified in resolve, then re-checked through main's
+    # check-head immediately before every push (both attempts) and
+    # immediately before the comment lookup and write: a moved head stops
+    # the run without writing, and the newer run publishes. The comment
+    # lookup and the monotonic write rules live in main's Python
+    # (decide-write), so the shell holds no inline copy that could drift.
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    push = workflow[workflow.index("\n  push:\n"):workflow.index("\n  comment:\n")]
+    # Defined once (as require_fresh_head() {) and called immediately
+    # before each of the two pushes.
+    assert push.count("require_fresh_head\n") == 2
+    assert push.index("require_fresh_head\n") < push.index("git push origin pr-evidence")
+    assert push.rindex("require_fresh_head") < push.rindex("git push origin pr-evidence")
+    assert 'gh api "repos/$REPO/pulls/$PR" --jq .head.sha' not in workflow
+    comment = workflow[workflow.index("\n  comment:\n"):]
+    check = comment.index("check-head")
+    plan = comment.index("decide-write")
+    post = comment.index("issues/comments/$id")
+    assert check < plan < post
+    assert 'issues/$PR/comments" --paginate' not in comment
+
+
 def test_publisher_skips_push_when_no_pngs():
     workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
     assert "no PNGs to push for this head SHA" in workflow
@@ -778,6 +819,17 @@ def test_evidence_job_is_text_only():
     # The Web UI section is rebuilt by the publisher from the validated
     # manifest; PR-built markup never reaches the comment.
     assert "--ui-artifacts" not in workflow
+
+
+def test_evidence_job_validates_before_upload():
+    # The evidence job runs the shared checks on its own artifact before
+    # upload and fails when the publisher would refuse (honest mistakes
+    # only: the PR controls this copy, so the publisher's notice still
+    # covers hostile artifacts).
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    job = workflow[workflow.index("\n  evidence:\n"):]
+    assert "evidence_checks.py check" in job
+    assert job.index("evidence_checks.py check") < job.index("upload-artifact")
 
 
 def test_workflows_pin_actions_by_sha():
@@ -1169,3 +1221,128 @@ def test_added_sentence_names_the_page_not_the_web_dir():
     )
     assert ADDED_SENTENCE in full
     assert "the base has no `web/`" not in full
+
+
+# Crop to fit (Decision 5) ----------------------------------------------------
+#
+# When the captures would exceed the push cap, full-page shots are cropped
+# shorter step by step, largest first, until the total fits. PRs under the
+# cap keep byte-identical shots.
+
+
+def _crop_capture(out_dir, fixture, view, height, width=64, status="changed"):
+    """Write base/head PNGs (deterministic noise: incompressible) and a manifest entry."""
+    import random
+
+    rng = random.Random(1234)
+    pixels = bytes(rng.randrange(256) for _ in range(width * height * 3))
+    shot = ui_evidence.encode_png(width, height, 2, pixels)
+    names = {}
+    for side in ("base", "head"):
+        name = f"{fixture}__{view}__{side}.png"
+        (out_dir / name).write_bytes(shot)
+        names[side] = name
+    return {
+        "fixture": fixture,
+        "view": view,
+        "status": status,
+        "base": names["base"],
+        "head": names["head"],
+        "diff": None,
+        "head_problems": [],
+    }
+
+
+def test_crop_to_fit_keeps_small_sets_byte_identical(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    capture = _crop_capture(out_dir, "small", "index-desktop", 200)
+    before = (out_dir / capture["base"]).read_bytes()
+    manifest = {"version": 1, "captures": [capture]}
+    assert ui_evidence.crop_to_fit(out_dir, manifest) is True
+    assert (out_dir / capture["base"]).read_bytes() == before
+    assert "crop_px" not in capture
+
+
+def test_crop_to_fit_crops_largest_first_until_fit(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    big = _crop_capture(out_dir, "big", "index-desktop", 5000)
+    small = _crop_capture(out_dir, "small", "index-desktop", 5000, width=16)
+    manifest = {"version": 1, "captures": [big, small]}
+    small_total = (out_dir / small["base"]).stat().st_size * 2
+    # A cap that fits only once the big capture steps down once.
+    step = ui_evidence._crop_png((out_dir / big["base"]).read_bytes(), 4000)
+    cap = len(step) * 2 + small_total + 100
+    assert ui_evidence.crop_to_fit(out_dir, manifest, cap=cap) is True
+    # The big capture was cropped (recorded height), the small one untouched.
+    assert big["crop_px"] == 4000
+    assert "crop_px" not in small
+    _, height = ui_evidence.png_size((out_dir / big["base"]).read_bytes())
+    assert height == 4000
+    total = sum(p.stat().st_size for p in out_dir.glob("*.png"))
+    assert total <= cap
+
+
+def test_crop_to_fit_steps_down_to_the_minimum(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    capture = _crop_capture(out_dir, "big", "index-desktop", 5000, width=8)
+    manifest = {"version": 1, "captures": [capture]}
+    data = (out_dir / capture["base"]).read_bytes()
+    smallest = ui_evidence._crop_png(data, ui_evidence.CROP_STEPS[-1])
+    # A cap that fits only at the minimum step.
+    assert ui_evidence.crop_to_fit(out_dir, manifest, cap=len(smallest) * 2 + 100) is True
+    assert capture["crop_px"] == ui_evidence.CROP_STEPS[-1]
+    _, height = ui_evidence.png_size((out_dir / capture["base"]).read_bytes())
+    assert height == ui_evidence.CROP_STEPS[-1]
+
+
+def test_crop_to_fit_fails_when_the_minimum_still_does_not_fit(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    capture = _crop_capture(out_dir, "big", "index-desktop", 8000, width=8)
+    manifest = {"version": 1, "captures": [capture]}
+    assert ui_evidence.crop_to_fit(out_dir, manifest, cap=10) is False
+
+
+def test_crop_to_fit_never_crops_eink(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    shot = ui_evidence.encode_png(800, 480, 2, b"\x00" * 800 * 480 * 3)
+    name = "typical__eink__head.png"
+    (out_dir / name).write_bytes(shot)
+    capture = {
+        "fixture": "typical",
+        "view": "eink",
+        "status": "added",
+        "base": None,
+        "head": name,
+        "diff": None,
+        "head_problems": [],
+    }
+    manifest = {"version": 1, "captures": [capture]}
+    assert ui_evidence.crop_to_fit(out_dir, manifest, cap=10) is False
+    assert "crop_px" not in capture
+    assert (out_dir / name).read_bytes() == shot
+
+
+def test_comment_job_covers_failed_builds_and_pushes():
+    # A failed push or a build that died before uploading must still post
+    # the fixed notice (finding 4): the job runs on all three outcomes and
+    # asks main's Python what to post, falling back to publish_failed.
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    job = workflow[workflow.index("\n  comment:\n"):]
+    assert "needs.build.result == 'failure'" in job
+    assert "needs.push.result == 'failure'" in job
+    assert "needs.push.result == 'success'" in job
+    assert "decide-comment" in job
+    assert "publish_failed" in job
+
+
+def test_comment_job_tolerates_a_missing_rendered_artifact():
+    # The download cannot fail the job before it can post: it is tolerant
+    # and the notice fallback below covers a missing comment and refusal.
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    job = workflow[workflow.index("\n  comment:\n"):]
+    assert "continue-on-error: true" in job
