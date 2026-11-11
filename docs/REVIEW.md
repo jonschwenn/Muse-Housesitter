@@ -90,10 +90,19 @@ PR #1 predates the tooling and has no evidence.
   a failed image push or a missing or corrupt rendered artifact. Refusals
   and publish failures post fixed notices. A stale or ambiguous PR lookup
   still publishes nothing. The head is re-checked immediately before every
-  push attempt and immediately before posting, after finding the existing
-  comment; a moved head stops without writing. Runs for the same head write
-  the same content. A newer head's run starts only after that head is
-  pushed, so it writes last.
+  push attempt. The comment job is serialised per PR with the job-level
+  group `evidence-comment-<PR>` and `cancel-in-progress: false`; there is no
+  workflow-level group. Inside that job, the head check runs before the
+  comment lookup; a moved head stops without writing. Every evidence or
+  notice body starts with a hidden marker carrying the head SHA, run id,
+  attempt and outcome from trusted event data. Main's `decide-write` reads
+  only the bot's own marker comments: a newer run's comment for the same
+  head is kept (ordered by run id, then attempt), and a notice never replaces
+  evidence for that head. When writing, it keeps one bot marker comment and
+  removes duplicates. GitHub keeps only one pending job per group: a later
+  arrival can replace it. If that later run is stale, it writes nothing;
+  the previous comment stays and names its head SHA. Re-run the publisher
+  to recover the missing update (D34).
 - Each CI `test` job runs pytest with `--junitxml`, writes a results table
   to its job summary page, and uploads `test-results-<matrix python>`.
   The publisher downloads the XML and reads the run attempt's test-job
@@ -253,9 +262,10 @@ PR #1 predates the tooling and has no evidence.
   `https://raw.githubusercontent.com/<owner>/<repo>/<sha>/<path>` works.
 - Trust model, publisher side: the publisher treats the screenshot artifact
   as untrusted data produced by PR code. It validates file names, PNG
-  structure (chunk lengths, CRCs and dimensions), allows only IHDR, PLTE,
-  IDAT and IEND chunks, and requires a complete compressed stream with no
-  trailing data, decoding to exactly the size declared by IHDR. Each
+  structure (chunk lengths, CRCs and dimensions), allows only IHDR, IDAT
+  and IEND chunks, refuses palette chunks (PLTE) and palette images, and
+  requires consecutive IDAT chunks. It requires a complete compressed stream
+  with no trailing data, decoding to exactly the size declared by IHDR. Each
   scanline's filter byte must be 0–4. It checks size and count caps,
   rejects symlinks and subdirectories, posts only a fixed notice when
   validation fails, and pushes only to the

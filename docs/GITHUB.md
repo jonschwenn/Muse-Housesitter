@@ -47,14 +47,23 @@ after the PR. Merged branches clean themselves up.
      download the test-results artifacts and read job conclusions from the
      API; no permission was widened.
 
-The publisher re-checks the head immediately before every push attempt and
-immediately before posting, after finding the existing comment. A moved
-head writes nothing; runs for the same head write the same content. A newer
-head's run starts only after that head is pushed, so it writes last.
+The publisher re-checks the head immediately before every push attempt.
+Only the comment job is serialised, with the per-PR job-level group
+`evidence-comment-<PR>` and `cancel-in-progress: false`; there is no
+workflow-level group. Inside that job, the head check precedes the comment
+lookup. A moved head writes nothing. Every evidence or notice body has a
+hidden marker with the head SHA, run id, attempt and outcome from trusted
+event data. Only the bot's own marker comments count: a newer run's comment
+for the same head is kept, and a notice never replaces same-head evidence.
+A write keeps one bot marker comment and removes duplicates. GitHub keeps
+only one pending job per group; a later arrival can replace it. If that run
+is stale, the previous comment stays, naming its head SHA. Re-run the
+publisher to recover the missing update (D34).
+
 Artifact refusals and publish failures produce a fixed notice with a
 reason code; `publish_failed` covers a failed image push or a missing or
 corrupt rendered artifact. Stale or ambiguous PR lookups still stop without
-writing. These controls add no permissions (D34).
+writing. These controls add no permissions.
 
 Click **Save** in each section.
 

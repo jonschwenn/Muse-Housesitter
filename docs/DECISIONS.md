@@ -263,10 +263,11 @@ handoff's "license not chosen; don't publish."
     PRs get comments too. Artifact refusals and publish failures produce a
     fixed notice with a reason code; stale or ambiguous PR lookups publish
     nothing. The head is re-checked immediately before every push attempt
-    and immediately before posting, after finding the existing comment.
-    A moved head writes nothing; same-head runs write the same content.
-    A newer head's run starts only after that head is pushed, so it writes
-    last.
+    and, inside the serialised per-PR comment job, before comment lookup.
+    A moved head writes nothing. Trusted markers keep newer same-head
+    comments and prevent notices replacing same-head evidence; writes
+    remove duplicate bot marker comments. There is no workflow-level group.
+    D34 records the ordering rules and remaining pending-job limit.
   - `ci-guard.yml` on `pull_request_target` runs from the base commit and
     never touches PR code. `scripts/ci_guard.py` (stdlib only, unit-tested)
     lists the PR's changed files through the API — paginated, failing
@@ -343,10 +344,12 @@ handoff's "license not chosen; don't publish."
   above: shared checks fail the evidence job, main rebuilds both comment
   sections, and refusals and publish failures mean a fixed notice. PNG
   validation checks chunk lengths, CRCs and dimensions, allows only IHDR,
-  PLTE, IDAT and IEND chunks, and requires a complete compressed stream
-  with no trailing data, decoding to exactly the size declared by IHDR.
+  IDAT and IEND chunks, refuses palette chunks (PLTE) and palette images,
+  and requires consecutive IDAT chunks. It requires a complete compressed
+  stream with no trailing data, decoding to exactly the size declared by IHDR.
   Each scanline's filter byte must be 0–4. The head is re-checked immediately
-  before every push attempt and before posting, after comment lookup.
+  before every push attempt and, inside the serialised comment job, before
+  comment lookup.
   Permissions are unchanged. See D33–D35.
 
 ### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
@@ -689,11 +692,23 @@ handoff's "license not chosen; don't publish."
   publisher refused twice while CI stayed green; it merged without evidence.
 - **Rejected:** CI checks alone (a hostile PR can edit them); notices alone
   (the publisher is not a required check, so the PR could still merge).
-  A concurrency group was also rejected: GitHub keeps only one pending run
-  per group, and a late stale run can replace the current head's pending
-  run regardless of commit age, losing its evidence. An owner-and-branch
-  key can also collide across PRs. Write-time freshness checks avoid that
-  queue; same-head runs write the same content, and newer heads write last.
+  A workflow-level concurrency group was also rejected: GitHub keeps only
+  one pending run per group, and a late stale run can replace the current
+  head's pending run regardless of commit age, losing its evidence. An
+  owner-and-branch key can also collide across PRs.
+- **Comment ordering:** only the comment job is serialised, using the
+  per-PR job-level group `evidence-comment-<PR>` with
+  `cancel-in-progress: false`, so comment lookup sees earlier writes. The
+  head check runs first. Every evidence or notice body carries a hidden
+  marker with the head SHA, run id, attempt and outcome from trusted event
+  data. Only the bot's own marker comments count. A newer same-head comment
+  is kept (ordered by run id, then attempt); a notice never replaces
+  same-head evidence. A write keeps one bot marker comment and removes
+  duplicates. This prevents overlapping comment writes without queuing the
+  whole publisher. GitHub still keeps only one pending job per group: a
+  later arrival can replace a pending comment job. If that later run is
+  stale, it writes nothing and the previous comment stays, naming its head
+  SHA. Re-running the publisher recovers the missing update.
 - **Status:** in effect from PR #57.
 
 ### D35. Crop oversized screenshot sets to fit (2026-11-11, Jon)
