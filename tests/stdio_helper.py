@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -531,6 +532,41 @@ def _env_seconds(name, default):
     return value if value > 0 else default
 
 
+def _log_seal_watchdog(path):
+    """Test-only: record when the CLI's watchdog timers arm and fire.
+
+    Appends ``armed <epoch>`` / ``fired <epoch>`` lines to ``path`` so a
+    test can measure the real watchdog interval inside this process,
+    independent of process start-up or parent scheduling. Only the CLI
+    module's view of ``threading`` is shadowed; nothing else changes.
+    """
+
+    def _note(label):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, f"{label} {time.time():.6f}\n".encode())
+        finally:
+            os.close(fd)
+
+    real_timer = threading.Timer
+
+    class _LoggedTimer(real_timer):
+        def __init__(self, interval, function, args=None, kwargs=None):
+            def _fire(*a, **k):
+                _note("fired")
+                return function(*a, **k)
+
+            super().__init__(interval, _fire, args, kwargs)
+
+        def start(self):
+            _note("armed")
+            super().start()
+
+    shadow = types.SimpleNamespace(**vars(threading))
+    shadow.Timer = _LoggedTimer
+    cli.threading = shadow
+
+
 def _run_serve_probe(home_dir):
     """Stubbed ``serve``: the console must be exactly as on ``main``.
 
@@ -640,6 +676,9 @@ def main(argv):
     cli._SEAL_WATCHDOG_S = _env_seconds(
         "HOUSESITTER_STDIO_WATCHDOG_S", cli._SEAL_WATCHDOG_S
     )
+    watchdog_log = os.environ.get("HOUSESITTER_STDIO_WATCHDOG_LOG")
+    if watchdog_log:
+        _log_seal_watchdog(watchdog_log)
     # D3: hold > 1100 fds open BEFORE the guard starts, so the guard's
     # own fds land above FD_SETSIZE. Kept alive in this frame for the
     # whole run. None means the platform refused: skip with exit 3.

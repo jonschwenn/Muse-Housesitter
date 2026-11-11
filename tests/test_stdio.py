@@ -2705,6 +2705,10 @@ class TestGuardDownProductionBound:
         # environment cannot shorten this run.
         monkeypatch.delenv("HOUSESITTER_STDIO_WATCHDOG_S", raising=False)
         monkeypatch.delenv("HOUSESITTER_STDIO_SLOW_S", raising=False)
+        # The helper logs, inside the child, when the watchdog timer arms
+        # and fires, so the interval is measured where it happens.
+        wd_log = tmp_path / "watchdog.log"
+        monkeypatch.setenv("HOUSESITTER_STDIO_WATCHDOG_LOG", str(wd_log))
         read_fd, write_fd = os.pipe()
         try:
             _set_pipe_capacity(read_fd, write_fd, 4096)
@@ -2718,9 +2722,18 @@ class TestGuardDownProductionBound:
             elapsed = time.monotonic() - start
             assert proc.returncode == 1
             # The 5 s watchdog fired: bounded, not instant, not a hang.
-            # The lower bound proves the production timing really ran.
-            assert elapsed >= 4
             assert elapsed < 12
+            # Measured in the child, from arming to firing: the real
+            # production interval, whatever start-up or scheduling cost.
+            events = [
+                line.split()
+                for line in wd_log.read_text().splitlines()
+            ]
+            armed = [float(t) for label, t in events if label == "armed"]
+            fired = [float(t) for label, t in events if label == "fired"]
+            assert armed and fired
+            interval = fired[0] - armed[0]
+            assert 4.9 <= interval < 8
         finally:
             if write_fd >= 0:
                 try:
