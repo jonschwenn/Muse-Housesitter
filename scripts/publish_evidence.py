@@ -323,16 +323,19 @@ def fit_test_line(evidence_text: str, test_line: str, brief_line: str) -> str:
     Drops the failing names first (counts and verdicts stay), then falls
     back to a fixed short line, and leaves the line out entirely when even
     that doesn't fit. Only evidence that is already over budget on its own
-    is refused by the caller; test data never refuses.
+    is refused by the caller; test data never refuses. The fitting cap
+    reserves the stamped marker's growth (review round 3, finding 3), so
+    the body still fits after the marker is stamped.
     """
+    cap = pr_evidence.MAX_COMMENT_BYTES - pr_evidence.MARKER_GROWTH_RESERVE
     text = insert_test_line(evidence_text, test_line)
-    if len(text.encode()) <= pr_evidence.MAX_COMMENT_BYTES:
+    if len(text.encode()) <= cap:
         return text
     text = insert_test_line(evidence_text, brief_line)
-    if len(text.encode()) <= pr_evidence.MAX_COMMENT_BYTES:
+    if len(text.encode()) <= cap:
         return text
     text = insert_test_line(evidence_text, TEST_LINE_FALLBACK)
-    if len(text.encode()) <= pr_evidence.MAX_COMMENT_BYTES:
+    if len(text.encode()) <= cap:
         return text
     return evidence_text
 
@@ -451,9 +454,11 @@ def render_comment(
         return body
 
     body = with_ui(text)
-    if text != evidence_only and len(body.encode()) > pr_evidence.MAX_COMMENT_BYTES:
+    fit_cap = pr_evidence.MAX_COMMENT_BYTES - pr_evidence.MARKER_GROWTH_RESERVE
+    if text != evidence_only and len(body.encode()) > fit_cap:
         # The Tests line is what tipped it over: drop it rather than let
-        # test data refuse the publish (D21 option A).
+        # test data refuse the publish (D21 option A). The cap reserves the
+        # stamped marker's growth (review round 3, finding 3).
         body = with_ui(evidence_only)
     body = evidence(body)
     check_evidence_text(body)

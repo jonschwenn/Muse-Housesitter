@@ -35,6 +35,25 @@ from pathlib import Path
 MARKER = "<!-- housesitter-evidence -->"
 SCENARIOS = Path("tests/evidence/scenarios.json")
 MAX_COMMENT_BYTES = 60_000  # GitHub's limit is 65,536 characters; CI refuses > 65,000 bytes
+# Longest comment marker the publisher ever stamps (review round 3,
+# finding 3): the 40-hex head SHA, the longest outcome word, and 19 digits
+# each of CI run id and attempt — far beyond GitHub's ~10-digit run ids,
+# so any real marker fits. Every fitting budget below reserves the growth
+# from the bare marker to this maximum, so a body that fits the budget
+# still fits after the publisher stamps it. The CI-side check
+# (evidence_checks.check, which renders without run ids) uses the same
+# reservation, so both sides agree; the final size check still guards the
+# posted body itself.
+STAMPED_MARKER_MAX_BYTES = len(
+    "<!-- housesitter-evidence head="
+    + "0" * 40
+    + " run="
+    + "0" * 19
+    + " attempt="
+    + "0" * 19
+    + " outcome=evidence -->"
+)
+MARKER_GROWTH_RESERVE = STAMPED_MARKER_MAX_BYTES - len(MARKER.encode())
 RUN_TIMEOUT_S = 60
 VOLATILE = "<volatile>"
 
@@ -535,7 +554,7 @@ def append_ui_section(
     manifest = load_ui_manifest(ui_dir)
     if manifest is None or repo is None or pr is None or head_sha is None:
         return body
-    room = MAX_COMMENT_BYTES - len(body.encode()) - 400
+    room = MAX_COMMENT_BYTES - len(body.encode()) - 400 - MARKER_GROWTH_RESERVE
     full, table, _ = render_ui_section(manifest, repo, pr, head_sha)
     if len(("\n" + full).encode()) <= room:
         return body + "\n" + full
@@ -739,8 +758,9 @@ def render_text_from_results(results: dict, head_sha: str) -> str:
     top = "\n".join(head) + "\n"
 
     # Keep whole sections only, so a cut never leaves a code fence open.
+    # The stamped marker's growth is reserved (see MARKER_GROWTH_RESERVE).
     kept, omitted = [], []
-    budget = MAX_COMMENT_BYTES - len(top.encode()) - 400
+    budget = MAX_COMMENT_BYTES - len(top.encode()) - 400 - MARKER_GROWTH_RESERVE
     for section in sections:
         cost = len(section.encode()) + 1
         if cost <= budget:
@@ -881,8 +901,9 @@ def _comment_from_runs(
     top = "\n".join(head) + "\n"
 
     # Keep whole sections only, so a cut never leaves a code fence open.
+    # The stamped marker's growth is reserved (see MARKER_GROWTH_RESERVE).
     kept, omitted = [], []
-    budget = MAX_COMMENT_BYTES - len(top.encode()) - 400
+    budget = MAX_COMMENT_BYTES - len(top.encode()) - 400 - MARKER_GROWTH_RESERVE
     for section in sections:
         cost = len(section.encode()) + 1
         if cost <= budget:

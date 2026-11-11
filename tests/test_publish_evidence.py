@@ -1339,8 +1339,11 @@ def test_fit_test_line_shrink_ladder(monkeypatch):
     assert len(full) > len(brief) > len(fallback)
 
     def room_for(line, spare):
-        # Evidence size leaving `spare` bytes of room after inserting `line`.
-        return cap - len(line.encode()) - 1 - spare
+        # Evidence size leaving `spare` bytes of room after inserting
+        # `line`, under the fitting cap (the budget minus the stamped
+        # marker's reserved growth).
+        reserve = pr_evidence.MARKER_GROWTH_RESERVE
+        return cap - reserve - len(line.encode()) - 1 - spare
 
     # Room for the full line: it is kept.
     body = publish_evidence.fit_test_line(_exact_evidence_text(room_for(full, 5)), full, brief)
@@ -2315,3 +2318,73 @@ def test_comment_step_falls_back_to_notice_on_rejected_refusal_reason(
     body = _posted_notice_body(calls)
     assert "`publish_failed`" in body
     assert "nope" not in body
+
+
+# Review round 3, finding 3: the marker's length is reserved. ---------------
+#
+# The fitting budgets used to ignore the hidden marker the publisher
+# stamps last: one changed `version` scenario plus a Tests line fit in
+# 60,000 bytes unstamped, the CI-side check accepted it, and then stamping
+# pushed the body over budget and the publish was refused `too_large` —
+# test data breaking the whole publish (D21). Every fitting budget now
+# reserves the longest stamped marker, so both sides agree.
+
+
+def _ten_failure_inputs(tmp_path):
+    results_dir = _results_tree(
+        tmp_path,
+        {"3.9": _junit(failures=10, failing=[f"test_case_{i:02d}" for i in range(10)])},
+    )
+    jobs = _jobs_doc(_job("test (3.9)", "failure"))
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(json.dumps(jobs))
+    return str(results_dir), str(jobs_path)
+
+
+def test_render_with_tests_line_publishes_at_the_old_cliff(tmp_path):
+    # The reviewer's repro: before="before\n", after="X"*29304+"\n", valid
+    # XML with ten failures, run 100 attempt 1. The unstamped body with the
+    # Tests line was 59,920 bytes (accepted by the CI-side check) but the
+    # stamped body was refused `too_large`. Now the publish succeeds and
+    # the stamped body fits the budget.
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    doc = _results()
+    doc["scenarios"][0].update(changed=True, before="before\n", after="X" * 29304 + "\n")
+    (artifact / "results.json").write_text(json.dumps(doc))
+    results_dir, jobs_json = _ten_failure_inputs(tmp_path)
+    body = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA,
+        test_results_dir=results_dir, jobs_json=jobs_json,
+        run_id=100, run_attempt=1,
+    )
+    assert len(body.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+    assert "10 failing" in body
+
+
+def test_render_without_tests_matches_ci_side_check_at_the_old_cliff(tmp_path):
+    # The CI-side check renders without test data or run ids; it accepted
+    # this artifact while the publisher (with both) refused it. Both sides
+    # now use the same reservation, so agreement holds at the cliff.
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    doc = _results()
+    doc["scenarios"][0].update(changed=True, before="before\n", after="X" * 29304 + "\n")
+    (artifact / "results.json").write_text(json.dumps(doc))
+    plain = publish_evidence.render_comment(artifact, REPO, PR, HEAD_SHA)
+    assert len(plain.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def test_final_size_check_pins_the_budget_fencepost():
+    # The posted body itself is still guarded at exactly the budget: a
+    # body of exactly MAX_COMMENT_BYTES passes, one byte more refuses.
+    marker = pr_evidence.MARKER
+    body = marker + "x" * (pr_evidence.MAX_COMMENT_BYTES - len(marker.encode()))
+    assert len(body.encode()) == pr_evidence.MAX_COMMENT_BYTES
+    publish_evidence.check_evidence_text(body)
+    try:
+        publish_evidence.check_evidence_text(body + "x")
+    except publish_evidence.PublishError as exc:
+        assert exc.reason == "too_large"
+    else:
+        raise AssertionError("one byte over the budget must refuse")
