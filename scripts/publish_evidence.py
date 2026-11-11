@@ -133,6 +133,8 @@ def read_results(artifact: Path) -> dict:
     text = read_text_capped(path, evidence_checks.RESULTS_MAX_BYTES, "results.json", "missing")
     try:
         doc = json.loads(text)
+    except RecursionError as exc:
+        raise PublishError(f"results.json is nested too deeply: {exc}", "bad_schema") from exc
     except ValueError as exc:
         raise PublishError(f"results.json is not valid JSON: {exc}", "bad_schema") from exc
     return doc
@@ -543,6 +545,14 @@ def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
 REFUSAL_FILENAME = "refusal.json"
 
 
+def _write_refusal(out: Path, reason: str) -> None:
+    """Record the fixed refusal reason so the workflow can post the notice."""
+    out.mkdir(parents=True, exist_ok=True)
+    (out / REFUSAL_FILENAME).write_text(
+        json.dumps({"reason": reason}) + "\n", encoding="utf-8"
+    )
+
+
 def cmd_render(args: argparse.Namespace) -> int:
     artifact = Path(args.artifact_dir)
     out = Path(args.out_dir)
@@ -560,10 +570,25 @@ def cmd_render(args: argparse.Namespace) -> int:
         # Decision 4, option B: never go silent. Record the fixed reason
         # code so the workflow can post the fixed notice; the message above
         # stays in the job log for debugging and never reaches the comment.
-        out.mkdir(parents=True, exist_ok=True)
-        (out / REFUSAL_FILENAME).write_text(
-            json.dumps({"reason": exc.reason}) + "\n", encoding="utf-8"
-        )
+        _write_refusal(out, exc.reason)
+        return 1
+    except UnicodeEncodeError as exc:
+        # Artifact text the schema missed (a lone surrogate in a manifest
+        # string the UI validator does not encode-check): still hostile
+        # data, never a caller bug. UnicodeEncodeError subclasses
+        # ValueError, so this must come before the re-raise below.
+        print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
+        _write_refusal(out, "render_error")
+        return 1
+    except ValueError:
+        # Malformed repo/pr/head-sha arguments: a caller bug, still exit 2.
+        raise
+    except Exception as exc:
+        # Any other surprise while handling artifact data (a KeyError past
+        # a validator gap, a TypeError on a hostile manifest type, deep
+        # nesting): refuse with a fixed reason instead of dying silent.
+        print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
+        _write_refusal(out, "render_error")
         return 1
     out.mkdir(parents=True, exist_ok=True)
     (out / "comment.md").write_text(body, encoding="utf-8")
@@ -574,6 +599,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             names = copy_pushable_files(ui_dir, files)
         except PublishError as exc:
             print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
+            _write_refusal(out, exc.reason)
             return 1
         pngs = [n for n in names if n.endswith(".png")]
         print(f"publish_evidence: rendered comment with {len(pngs)} PNG(s)")

@@ -54,6 +54,11 @@ SCENARIO_KNOWN_KEYS = frozenset(
         "after",
     }
 )
+# Every field the comment renderer reads directly. ``new_in_pr`` stays
+# optional (the renderer only asks for it with a default); a scenario
+# missing any other field would raise KeyError mid-render instead of
+# refusing with a fixed reason.
+SCENARIO_REQUIRED_KEYS = SCENARIO_KNOWN_KEYS - {"new_in_pr"}
 
 ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -61,7 +66,14 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 # Fixed refusal reasons (Decision 4, option B). When the publisher refuses
 # an artifact it posts a notice built only from main's text plus one of
 # these codes: no PR-supplied content may reach the comment.
-REFUSAL_REASONS = ("missing", "too_large", "bad_png", "bad_schema", "stale_head")
+REFUSAL_REASONS = (
+    "missing",
+    "too_large",
+    "bad_png",
+    "bad_schema",
+    "stale_head",
+    "render_error",
+)
 REFUSAL_SENTENCES = {
     "missing": "the CI artifact was missing or unreadable, so there is nothing to show.",
     "too_large": "the evidence exceeded its size limit, so the whole artifact was refused.",
@@ -70,6 +82,10 @@ REFUSAL_SENTENCES = {
     "stale_head": (
         "the evidence is not for the PR's current head commit; "
         "a newer run will publish."
+    ),
+    "render_error": (
+        "the evidence data broke the publisher while rendering, "
+        "so the whole artifact was refused."
     ),
 }
 REFUSAL_MARKER = "<!-- housesitter-evidence -->"
@@ -143,6 +159,15 @@ def _has_controls(text: str) -> bool:
     return any(ord(char) < 0x20 for char in text)
 
 
+def _is_encodable(text: str) -> bool:
+    """Whether ``text`` encodes as UTF-8 (a lone surrogate encodes nowhere)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def validate_results(doc: object, known_ids: set[str]) -> list[str]:
     """Check the structured results against the strict schema.
 
@@ -205,6 +230,11 @@ def validate_results(doc: object, known_ids: set[str]) -> list[str]:
         unknown_keys = set(entry) - SCENARIO_KNOWN_KEYS
         if unknown_keys:
             errors.append(f"{where} has unknown keys: {sorted(unknown_keys)}")
+        missing = SCENARIO_REQUIRED_KEYS - set(entry)
+        if missing:
+            errors.append(f"{where} is missing keys: {sorted(missing)}")
+            continue
+
         ident = entry.get("id")
         if (
             not isinstance(ident, str)
@@ -213,6 +243,8 @@ def validate_results(doc: object, known_ids: set[str]) -> list[str]:
         ):
             errors.append(f"{where}.id must match {ID_RE.pattern}, got: {str(ident)[:80]}")
             continue
+        if not _is_encodable(ident):
+            errors.append(f"{where}.id must be encodable as UTF-8")
         if ident in seen:
             errors.append(f"duplicate scenario id: {ident}")
         seen.add(ident)
@@ -225,6 +257,8 @@ def validate_results(doc: object, known_ids: set[str]) -> list[str]:
             or _has_controls(title)
         ):
             errors.append(f"{where}.title must be a short single-line string")
+        if isinstance(title, str) and not _is_encodable(title):
+            errors.append(f"{where}.title must be encodable as UTF-8")
         command = entry.get("command")
         if (
             not isinstance(command, list)
@@ -238,6 +272,11 @@ def validate_results(doc: object, known_ids: set[str]) -> list[str]:
             or sum(len(arg) for arg in command) > RESULTS_MAX_COMMAND_TOTAL
         ):
             errors.append(f"{where}.command must be a short list of short strings")
+        if isinstance(command, list):
+            for arg in command:
+                if isinstance(arg, str) and not _is_encodable(arg):
+                    errors.append(f"{where}.command must be encodable as UTF-8")
+                    break
         if not _is_exit(entry.get("exit_before")) and entry.get("exit_before") is not None:
             errors.append(f"{where}.exit_before must be an exit code, timeout, or null")
         if not _is_exit(entry.get("exit_after")):
@@ -260,9 +299,13 @@ def validate_results(doc: object, known_ids: set[str]) -> list[str]:
             not isinstance(before, str) or len(before) > RESULTS_MAX_TEXT
         ):
             errors.append(f"{where}.before must be a capped string or null")
+        if isinstance(before, str) and not _is_encodable(before):
+            errors.append(f"{where}.before must be encodable as UTF-8")
         after = entry.get("after")
         if not isinstance(after, str) or len(after) > RESULTS_MAX_TEXT:
             errors.append(f"{where}.after must be a capped string")
+        if isinstance(after, str) and not _is_encodable(after):
+            errors.append(f"{where}.after must be encodable as UTF-8")
     return errors
 
 

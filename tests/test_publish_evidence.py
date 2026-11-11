@@ -1481,3 +1481,61 @@ def test_insert_test_line_without_heading_goes_after_the_marker():
     text = pr_evidence.MARKER + "\nno heading here\n"
     out = publish_evidence.insert_test_line(text, "**Tests:** x")
     assert out.split("\n")[:3] == [pr_evidence.MARKER, "**Tests:** x", "no heading here"]
+
+
+# Review round 1, finding 3: no malformed artifact ends silently. ------------
+#
+# Missing fields, hostile nesting, lone surrogates and unexpected manifest
+# types used to escape render with a traceback (KeyError, RecursionError,
+# UnicodeEncodeError-as-caller-error, TypeError) and no refusal.json, so no
+# notice. Every case below must exit non-zero with a refusal file.
+
+
+def test_refusal_bad_schema_when_before_is_missing(tmp_path):
+    doc = _results()
+    del doc["scenarios"][0]["before"]
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+
+
+def test_refusal_bad_schema_for_deeply_nested_results(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").write_text("[" * 2000 + "]" * 2000)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+
+
+def test_refusal_bad_schema_for_a_lone_surrogate(tmp_path):
+    doc = _results()
+    doc["scenarios"][0]["after"] = "ok\ud800tail"
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").write_text(json.dumps(doc))
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+
+
+def test_refusal_render_error_for_an_unexpected_manifest_type(tmp_path):
+    base = "typical__index-phone__base.png"
+    head = "typical__index-phone__head.png"
+    manifest = {
+        "version": 1,
+        "captures": [
+            {
+                "fixture": "typical",
+                "view": [],
+                "status": "changed",
+                "base": base,
+                "head": head,
+                "diff": None,
+                "head_problems": [],
+            }
+        ],
+    }
+    artifact = _artifact(tmp_path, pngs=(base, head), manifest=manifest)
+    rc, out = _render(tmp_path, artifact)
+    assert rc != 0
+    assert _refusal_reason(tmp_path, out) == "render_error"

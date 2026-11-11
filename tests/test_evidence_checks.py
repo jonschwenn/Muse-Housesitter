@@ -191,6 +191,7 @@ def test_refusal_reasons_are_a_fixed_enum():
         "bad_png",
         "bad_schema",
         "stale_head",
+        "render_error",
     }
 
 
@@ -527,3 +528,49 @@ def test_png_limits_are_pinned():
     assert evidence_checks.PNG_MAX_WIDTH == 4096
     assert evidence_checks.PNG_MAX_HEIGHT == 120_000
     assert evidence_checks.PNG_MAX_PIXELS == 16_777_216
+
+
+# Review round 1, finding 3: the schema must require every rendered field.
+#
+# A scenario without `before` passed validation and then raised KeyError in
+# the renderer (no refusal.json, no notice). Every field the renderer reads
+# is required here with its exact type, and rendered strings must encode as
+# UTF-8 (a lone surrogate encodes nowhere: it used to surface as a caller
+# error at comment-write time).
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "id",
+        "title",
+        "command",
+        "exit_before",
+        "exit_after",
+        "expected_exit",
+        "size_before",
+        "size_after",
+        "changed",
+        "before",
+        "after",
+    ],
+)
+def test_missing_rendered_field_is_rejected(key):
+    entry = _scenario()
+    del entry[key]
+    assert evidence_checks.validate_results(_doc(entry), KNOWN_IDS) != []
+
+
+def test_lone_surrogate_in_text_is_rejected():
+    entry = _scenario(after="ok\ud800tail")
+    assert evidence_checks.validate_results(_doc(entry), KNOWN_IDS) != []
+    entry = _scenario(title="ok\ud800tail")
+    assert evidence_checks.validate_results(_doc(entry), KNOWN_IDS) != []
+    entry = _scenario(command=["housesitter", "ok\ud800tail"])
+    assert evidence_checks.validate_results(_doc(entry), KNOWN_IDS) != []
+
+
+def test_render_error_reason_is_fixed_text():
+    notice = evidence_checks.refusal_notice("render_error")
+    assert notice.startswith("<!-- housesitter-evidence -->\n")
+    assert "`render_error`" in notice
