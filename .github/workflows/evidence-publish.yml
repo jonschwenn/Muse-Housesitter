@@ -405,9 +405,12 @@ jobs:
               --head-sha "$HEAD_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
               > rendered/comment.md
           }
+          # The posted body itself is guarded at exactly the comment
+          # budget (review round 4): the renderer fits the final form to
+          # 60,000 bytes, and this checks the substituted bytes GitHub gets.
           comment_is_postable() {
             [ "$(head -c ${#marker} rendered/comment.md 2>/dev/null)" = "$marker" ] && \
-            [ "$(wc -c < rendered/comment.md 2>/dev/null)" -le 65000 ]
+            [ "$(wc -c < rendered/comment.md 2>/dev/null)" -le 60000 ]
           }
           flags=""
           if [ -f rendered/refusal.json ]; then flags="$flags --has-refusal"; fi

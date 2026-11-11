@@ -301,7 +301,11 @@ def test_pr_evidence_builds_ui_section_from_manifest(tmp_path, monkeypatch):
     body = pr_evidence.append_ui_section("text", ui_dir, **kwargs)
     assert "## Web UI" in body
     assert "PWNED" not in body
-    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", 1100)
+    # Tier boundaries are measured on the final form (marker reserve plus
+    # posted placeholder length), so the full section still fits here and
+    # the table fallback needs a tighter budget than the old 400-byte
+    # reserve implied.
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", 900)
     body = pr_evidence.append_ui_section("text", ui_dir, **kwargs)
     assert "## Web UI" in body
     assert "details omitted" in body

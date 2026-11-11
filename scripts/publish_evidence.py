@@ -317,29 +317,6 @@ def _test_inputs(
     return jobs, results
 
 
-def fit_test_line(evidence_text: str, test_line: str, brief_line: str) -> str:
-    """Insert the Tests line, shrinking it when the comment is over budget.
-
-    Drops the failing names first (counts and verdicts stay), then falls
-    back to a fixed short line, and leaves the line out entirely when even
-    that doesn't fit. Only evidence that is already over budget on its own
-    is refused by the caller; test data never refuses. The fitting cap
-    reserves the stamped marker's growth (review round 3, finding 3), so
-    the body still fits after the marker is stamped.
-    """
-    cap = pr_evidence.MAX_COMMENT_BYTES - pr_evidence.MARKER_GROWTH_RESERVE
-    text = insert_test_line(evidence_text, test_line)
-    if len(text.encode()) <= cap:
-        return text
-    text = insert_test_line(evidence_text, brief_line)
-    if len(text.encode()) <= cap:
-        return text
-    text = insert_test_line(evidence_text, TEST_LINE_FALLBACK)
-    if len(text.encode()) <= cap:
-        return text
-    return evidence_text
-
-
 def render_comment(
     artifact: Path,
     repo: str,
@@ -384,19 +361,20 @@ def render_comment(
         )
     # The text section is rebuilt here from the validated results; the
     # PR-supplied markdown (evidence.md) is never read, let alone posted.
-    text = pr_evidence.render_text_from_results(results, head_sha)
-    # Test data must never break the publish (decision D21 option A): after
-    # inserting the Tests line, shrink it (drop names, then a fixed short
-    # line) when the comment would go over budget. Only text that is
-    # already over budget on its own refuses below.
-    evidence_only = text
+    top, sections = pr_evidence.text_parts_from_results(results, head_sha)
+    # Test data must never break the publish (decision D21 option A): the
+    # Tests line degrades (names dropped, then a fixed short line, then
+    # nothing) instead of refusing it.
     if test_results_dir is not None or jobs_json is not None:
-        jobs, results = _test_inputs(test_results_dir, jobs_json)
-        text = fit_test_line(
-            text,
-            test_results.render_comment_line(jobs, results),
-            test_results.render_comment_line(jobs, results, include_names=False),
-        )
+        jobs, test_data = _test_inputs(test_results_dir, jobs_json)
+        tests_lines: list = [
+            test_results.render_comment_line(jobs, test_data),
+            test_results.render_comment_line(jobs, test_data, include_names=False),
+            TEST_LINE_FALLBACK,
+            None,
+        ]
+    else:
+        tests_lines = [None]
     ui_dir = artifact / "ui_out"
     manifest_path = ui_dir / ui_evidence.MANIFEST_NAME
     if os.path.lexists(manifest_path) and not has_manifest(ui_dir):
@@ -406,63 +384,74 @@ def render_comment(
         raise PublishError(
             f"{ui_evidence.MANIFEST_NAME} is not a regular file", "bad_schema"
         )
-    if not ui_dir.exists() or not has_manifest(ui_dir):
+    ui_suffixes, failures = [""], 0
+    if ui_dir.exists() and has_manifest(ui_dir):
         # No manifest (the capture died before writing one): the text
         # comment still publishes. No web/ on either side is not this case:
         # that manifest has an empty captures list and gets a Web UI section.
-        # The text is freshly rebuilt (not pre-checked like the old
-        # evidence.md), so the budget check applies here too.
-        text = evidence(text)
-        check_evidence_text(text)
-        return text
-    errors = ui_evidence.validate_artifact(ui_dir)
-    if errors:
-        raise PublishError(
-            "artifact validation failed: " + "; ".join(errors[:10]),
-            evidence_checks.artifact_refusal_reason(errors),
-        )
-    png_errors = validate_png_files(ui_dir)
-    if png_errors:
-        raise PublishError(
-            "screenshot validation failed: " + "; ".join(png_errors[:10]), "bad_png"
-        )
-    try:
-        manifest = pr_evidence.load_ui_manifest(ui_dir)
-    except (OSError, ValueError, RecursionError) as exc:
-        # The validator and the loader must agree, but if they ever drift
-        # (or the file changes between the two reads), an artifact problem
-        # is still an invalid artifact (exit 1), never a bad argument.
-        # json.JSONDecodeError subclasses ValueError, so this covers a
-        # corrupt manifest too. render_ui_section's ValueError (bad
-        # repo/pr/head-sha) is deliberately left to propagate as exit 2.
-        raise PublishError(f"artifact validation failed: {exc}", "bad_schema") from exc
-    if manifest is None:
-        text = evidence(text)
-        check_evidence_text(text)
-        return text
-    _, _, failures = pr_evidence.render_ui_section(manifest, repo, pr, head_sha)
+        errors = ui_evidence.validate_artifact(ui_dir)
+        if errors:
+            raise PublishError(
+                "artifact validation failed: " + "; ".join(errors[:10]),
+                evidence_checks.artifact_refusal_reason(errors),
+            )
+        png_errors = validate_png_files(ui_dir)
+        if png_errors:
+            raise PublishError(
+                "screenshot validation failed: " + "; ".join(png_errors[:10]),
+                "bad_png",
+            )
+        try:
+            manifest = pr_evidence.load_ui_manifest(ui_dir)
+        except (OSError, ValueError, RecursionError) as exc:
+            # The validator and the loader must agree, but if they ever drift
+            # (or the file changes between the two reads), an artifact problem
+            # is still an invalid artifact (exit 1), never a bad argument.
+            # json.JSONDecodeError subclasses ValueError, so this covers a
+            # corrupt manifest too. render_ui_section's ValueError (bad
+            # repo/pr/head-sha) is deliberately left to propagate as exit 2.
+            raise PublishError(
+                f"artifact validation failed: {exc}", "bad_schema"
+            ) from exc
+        if manifest is not None:
+            ui_suffixes, failures = pr_evidence.ui_tiers(
+                manifest, repo, pr, head_sha
+            )
 
-    def with_ui(base: str) -> str:
-        body = pr_evidence.append_ui_section(
-            base, ui_dir, repo=repo, pr=pr, head_sha=head_sha
-        )
-        if failures and "Web UI checks failed" not in body:
+    def assemble(keep: int, line: str | None, suffix: str) -> str:
+        body = pr_evidence.assemble_text(top, sections, keep)
+        if line is not None:
+            body = insert_test_line(body, line)
+        body += suffix
+        if failures:
             lines = body.split("\n")
             lines.insert(1, failure_notice(failures))
             lines.insert(2, "")
             body = "\n".join(lines)
         return body
 
-    body = with_ui(text)
-    fit_cap = pr_evidence.MAX_COMMENT_BYTES - pr_evidence.MARKER_GROWTH_RESERVE
-    if text != evidence_only and len(body.encode()) > fit_cap:
-        # The Tests line is what tipped it over: drop it rather than let
-        # test data refuse the publish (D21 option A). The cap reserves the
-        # stamped marker's growth (review round 3, finding 3).
-        body = with_ui(evidence_only)
-    body = evidence(body)
-    check_evidence_text(body)
-    return body
+    # One shrink order, measured on the final form (review round 4): the
+    # Tests line degrades completely — names, then the line itself — before
+    # any screenshot detail is dropped, and text sections shorten last.
+    # Every candidate is measured with pr_evidence.final_len — stamped with
+    # the longest possible marker and every image placeholder counted at
+    # its posted length — so a candidate that fits here still fits after
+    # the marker is stamped and the comment step pins the SHA.
+    combos = [(line, ui_suffixes[0]) for line in tests_lines]
+    combos += [(None, suffix) for suffix in ui_suffixes[1:]]
+    for line, suffix in combos:
+        body = assemble(len(sections), line, suffix)
+        if pr_evidence.final_len(body) <= pr_evidence.MAX_COMMENT_BYTES:
+            body = evidence(body)
+            check_evidence_text(body)
+            return body
+    for keep in range(len(sections) - 1, -1, -1):
+        body = assemble(keep, None, ui_suffixes[-1])
+        if pr_evidence.final_len(body) <= pr_evidence.MAX_COMMENT_BYTES:
+            body = evidence(body)
+            check_evidence_text(body)
+            return body
+    raise PublishError("comment is too large for a comment", "too_large")
 
 
 def validate_png_files(ui_dir: Path) -> list[str]:
@@ -751,9 +740,12 @@ def cmd_decide_comment(args: argparse.Namespace) -> int:
 # existing bot-authored comments: never write when any marker comment is
 # from a newer (run id, attempt), whatever head it is for (review round 3,
 # finding 1: ordering is cross-head and monotonic by CI run, since a
-# genuinely newer push always gets a newer run id); a notice never replaces
-# an evidence comment for the same head; a skip still deletes every
-# marker comment except the winner (review round 3, finding 4).
+# genuinely newer push always gets a newer run id). GitHub documents run
+# ids only as unique, not ordered, and a re-run keeps its id while
+# incrementing the attempt — so the (run id, attempt) pair still orders a
+# re-run after its original; a notice never replaces an evidence comment
+# for the same head; a skip still deletes every marker comment except the
+# winner (review round 3, finding 4).
 # Otherwise write, keeping one marker comment and deleting the rest.
 # Marker-looking text in anyone
 # else's comments is ignored. Residual: GitHub keeps one pending run per

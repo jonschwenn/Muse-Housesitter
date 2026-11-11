@@ -34,7 +34,7 @@ from pathlib import Path
 
 MARKER = "<!-- housesitter-evidence -->"
 SCENARIOS = Path("tests/evidence/scenarios.json")
-MAX_COMMENT_BYTES = 60_000  # GitHub's limit is 65,536 characters; CI refuses > 65,000 bytes
+MAX_COMMENT_BYTES = 60_000  # GitHub's cap is 65,536; posts stay under 60,000
 # Longest comment marker the publisher ever stamps (review round 3,
 # finding 3): the 40-hex head SHA, the longest outcome word, and 19 digits
 # each of CI run id and attempt — far beyond GitHub's ~10-digit run ids,
@@ -56,12 +56,80 @@ STAMPED_MARKER_MAX_BYTES = len(
 MARKER_GROWTH_RESERVE = STAMPED_MARKER_MAX_BYTES - len(MARKER.encode())
 RUN_TIMEOUT_S = 60
 VOLATILE = "<volatile>"
+SHA_PLACEHOLDER = "__HOUSESITTER_EVIDENCE_SHA__"  # must equal ui_evidence's
+
+# A posted evidence SHA is always 40 hex; every image URL carries one
+# placeholder until the comment step pins it.
+SHA_FINAL_LEN = 40
+PLACEHOLDER_GROWTH = SHA_FINAL_LEN - len(SHA_PLACEHOLDER.encode())
+
+
+def final_len(body: str) -> int:
+    """Byte length of the body exactly as it will be posted.
+
+    The marker is stamped with the longest possible marker (see
+    STAMPED_MARKER_MAX_BYTES), and every image placeholder counts at its
+    posted length, so a body that fits MAX_COMMENT_BYTES here still fits
+    after the publisher stamps it and the comment step pins the SHA. For
+    an already-stamped body the reserve overestimates slightly, which is
+    the safe direction.
+    """
+    return (
+        len(body.encode())
+        + MARKER_GROWTH_RESERVE
+        + PLACEHOLDER_GROWTH * body.count(SHA_PLACEHOLDER)
+    )
+
+
+# Omission notices name the dropped sections, so their length is bounded by
+# construction: at most this many headings, then "and N more". Every
+# fitting decision below measures the notice itself (see final_len), so an
+# unbounded heading list can never eat the marker reserve (review round 4,
+# finding 1).
+MAX_OMITTED_SHOWN = 5
+
+
+def omission_notice(omitted: list[str]) -> str:
+    """Bounded notice naming the dropped sections."""
+    shown = omitted[:MAX_OMITTED_SHOWN]
+    text = "**Omitted to fit a GitHub comment:** " + ", ".join(shown)
+    if len(omitted) > len(shown):
+        text += f", and {len(omitted) - len(shown)} more"
+    return "\n" + text + ". Run `scripts/pr_evidence.py` locally to see them.\n"
+
+
+def _section_heading(section: str) -> str:
+    return section.split("\n", 1)[0].removeprefix("### ")
+
+
+def assemble_text(top: str, sections: list[str], keep: int) -> str:
+    """The top plus the first ``keep`` sections and the omission notice."""
+    body = top + "\n".join(sections[:keep])
+    if keep != len(sections):
+        omitted = [_section_heading(s) for s in sections[keep:]]
+        body += omission_notice(omitted)
+    return body
+
+
+def fit_text_sections(top: str, sections: list[str]) -> str:
+    """Keep the longest section prefix whose final-form length fits.
+
+    Whole sections only, so a cut never leaves a code fence open. The
+    omission notice is part of the measured body, so what is returned
+    always fits MAX_COMMENT_BYTES unless even the top plus the notice is
+    over budget — then the over-budget body is returned and the caller
+    refuses it.
+    """
+    for keep in range(len(sections), -1, -1):
+        body = assemble_text(top, sections, keep)
+        if final_len(body) <= MAX_COMMENT_BYTES:
+            return body
+    return body
 
 # UI section (F4): built here from ui_manifest.json, never pasted from a
 # pre-rendered markdown file. The name pattern must stay identical to
 # scripts/ui_evidence.py CAPTURE_RE (pinned by test), so only allow-listed
 # capture files can become <img> tags.
-SHA_PLACEHOLDER = "__HOUSESITTER_EVIDENCE_SHA__"  # must equal ui_evidence's
 UI_STATUSES = ("added", "removed", "changed", "unchanged")
 UI_CAPTURE_RE = re.compile(
     r"[a-z0-9](?:[a-z0-9-]|_(?!_)){0,47}"
@@ -536,6 +604,38 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
     return full, table_section, failures
 
 
+# Fixed suffixes for the Web UI shrink tiers (review round 4): the table
+# fallback says the screenshot details were omitted, the pointer says the
+# whole section was. The publisher tries them after the full section, in
+# this order, measured on the final form (see final_len).
+UI_DETAILS_OMITTED_SUFFIX = (
+    "\n**Web UI details omitted to fit a GitHub comment:** "
+    "run `scripts/ui_evidence.py` locally to see them.\n"
+)
+UI_SECTION_OMITTED_SUFFIX = (
+    "\n**Web UI evidence omitted to fit a GitHub comment:** "
+    "run `scripts/ui_evidence.py` locally to see it.\n"
+)
+
+
+def ui_tiers(
+    manifest: dict, repo: str, pr: int, head_sha: str
+) -> tuple:
+    """The Web UI suffixes, richest first: full section, table plus the
+    details-omitted notice, and the section-omitted pointer.
+
+    Returns (suffixes, check-failure count). The publisher walks the
+    suffixes in order against one final-form budget, so screenshots survive
+    everything except a comment that cannot fit them after the Tests line
+    has already degraded away (review round 4, finding 2).
+    """
+    full, table, failures = render_ui_section(manifest, repo, pr, head_sha)
+    return (
+        ["\n" + full, "\n" + table + UI_DETAILS_OMITTED_SUFFIX, UI_SECTION_OMITTED_SUFFIX],
+        failures,
+    )
+
+
 def append_ui_section(
     body: str,
     ui_dir: Path | None,
@@ -554,20 +654,11 @@ def append_ui_section(
     manifest = load_ui_manifest(ui_dir)
     if manifest is None or repo is None or pr is None or head_sha is None:
         return body
-    room = MAX_COMMENT_BYTES - len(body.encode()) - 400 - MARKER_GROWTH_RESERVE
-    full, table, _ = render_ui_section(manifest, repo, pr, head_sha)
-    if len(("\n" + full).encode()) <= room:
-        return body + "\n" + full
-    fallback = (
-        "\n" + table + "\n**Web UI details omitted to fit a GitHub comment:** "
-        "run `scripts/ui_evidence.py` locally to see them.\n"
-    )
-    if len(fallback.encode()) <= room:
-        return body + fallback
-    return (
-        body + "\n**Web UI evidence omitted to fit a GitHub comment:** "
-        "run `scripts/ui_evidence.py` locally to see it.\n"
-    )
+    suffixes, _ = ui_tiers(manifest, repo, pr, head_sha)
+    for suffix in suffixes[:2]:
+        if final_len(body + suffix) <= MAX_COMMENT_BYTES:
+            return body + suffix
+    return body + suffixes[2]
 
 
 def collect_runs(base_tree: Path, head_tree: Path) -> tuple:
@@ -671,6 +762,18 @@ def render_text_from_results(results: dict, head_sha: str) -> str:
     prose, link, or image. The fixed header says the outputs came from the
     PR's own CI run: they are author-attested, not trusted fact.
     """
+    top, sections = text_parts_from_results(results, head_sha)
+    return fit_text_sections(top, sections)
+
+
+def text_parts_from_results(results: dict, head_sha: str) -> tuple:
+    """Build the text section's (top, sections) before any budget fitting.
+
+    The publisher's shrink order fits these parts together with the Tests
+    line and the Web UI section against one final-form budget (see
+    publish_evidence.render_comment); this wrapper fits them alone for
+    callers that only need the text.
+    """
     scenarios = results["scenarios"]
     removed = results.get("removed", [])
     base_ok = results.get("metadata", {}).get("base_has_package", True)
@@ -756,26 +859,7 @@ def render_text_from_results(results: dict, head_sha: str) -> str:
     if not sections and not any("| removed |" in r for r in rows):
         head += ["**No output change.**", ""]
     top = "\n".join(head) + "\n"
-
-    # Keep whole sections only, so a cut never leaves a code fence open.
-    # The stamped marker's growth is reserved (see MARKER_GROWTH_RESERVE).
-    kept, omitted = [], []
-    budget = MAX_COMMENT_BYTES - len(top.encode()) - 400 - MARKER_GROWTH_RESERVE
-    for section in sections:
-        cost = len(section.encode()) + 1
-        if cost <= budget:
-            kept.append(section)
-            budget -= cost
-        else:
-            omitted.append(section.split("\n", 1)[0].removeprefix("### "))
-    body = top + "\n".join(kept)
-    if omitted:
-        body += (
-            "\n**Omitted to fit a GitHub comment:** "
-            + ", ".join(omitted)
-            + ". Run `scripts/pr_evidence.py` locally to see them.\n"
-        )
-    return body
+    return top, sections
 
 
 def build_comment(
@@ -901,23 +985,8 @@ def _comment_from_runs(
     top = "\n".join(head) + "\n"
 
     # Keep whole sections only, so a cut never leaves a code fence open.
-    # The stamped marker's growth is reserved (see MARKER_GROWTH_RESERVE).
-    kept, omitted = [], []
-    budget = MAX_COMMENT_BYTES - len(top.encode()) - 400 - MARKER_GROWTH_RESERVE
-    for section in sections:
-        cost = len(section.encode()) + 1
-        if cost <= budget:
-            kept.append(section)
-            budget -= cost
-        else:
-            omitted.append(section.split("\n", 1)[0].removeprefix("### "))
-    body = top + "\n".join(kept)
-    if omitted:
-        body += (
-            "\n**Omitted to fit a GitHub comment:** "
-            + ", ".join(omitted)
-            + ". Run `scripts/pr_evidence.py` locally to see them.\n"
-        )
+    # The omission notice is part of the measured final form (see final_len).
+    body = fit_text_sections(top, sections)
     return append_ui_section(body, ui_dir, repo=repo, pr=pr, head_sha=head_sha)
 
 

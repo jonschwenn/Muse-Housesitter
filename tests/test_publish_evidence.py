@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import random
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1254,19 +1256,6 @@ def _padded_results_text(size):
     return doc
 
 
-def _exact_evidence_text(size):
-    """A fixed text body of exactly `size` bytes for fit_test_line unit tests.
-
-    Byte-exact padding is not possible through the self-trimming renderer,
-    so the shrink ladder (full line, brief line, fallback, dropped) is
-    pinned here instead of through rendered artifacts.
-    """
-    assert size >= len(pr_evidence.MARKER) + 30
-    return pr_evidence.MARKER + "\n## Before / after evidence\n\n" + "x" * (
-        size - len(pr_evidence.MARKER) - len("\n## Before / after evidence\n\n")
-    )
-
-
 def _text_only_artifact(tmp_path, size):
     artifact = tmp_path / "artifact"
     artifact.mkdir()
@@ -1325,39 +1314,95 @@ def test_render_text_only_near_cap_many_long_names_stays_in_budget(tmp_path, mon
     assert "20 failing" in body
 
 
-def test_fit_test_line_shrink_ladder(monkeypatch):
-    # Byte-exact evidence sizes pin the D21 shrink order: the full Tests
-    # line first, then the brief line without names, then the fixed short
-    # line, then nothing. Counts and verdicts survive every step that
-    # keeps a line. Pure text: the renderers' real output is covered by
-    # the integration tests above.
+def test_tests_line_shrink_ladder(tmp_path, monkeypatch):
+    # Byte-exact evidence sizes pin the D21 shrink order through the real
+    # renderer: the full Tests line first, then the brief line without
+    # names, then the fixed short line, then nothing. Counts and verdicts
+    # survive every step that keeps a line. (Review round 4: fit_test_line
+    # is gone, folded into render_comment's one shrink order; this pins the
+    # same rungs end to end.)
     cap = 3000
     monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", cap)
-    full = "**Tests:** **failed** on 3.9, 3.10, 3.11 (12 failing: `n1`, `n2`, `n3`)."
-    brief = "**Tests:** **failed** on 3.9, 3.10, 3.11 (12 failing)."
+    payloads = {"3.9": _junit("3.9.25", tests=4, failures=2,
+                              failing=("test_case_00", "test_case_01")),
+                "3.10": _junit("3.10.12", tests=4, failures=2,
+                               failing=("test_case_00", "test_case_01"))}
+    jobs = _jobs_doc(_job("test (3.9)", "failure"), _job("test (3.10)", "failure"))
+    tree = _results_tree(tmp_path, payloads)
+    parsed = publish_evidence.load_test_results(tree)
+    validated = publish_evidence.validate_jobs([jobs])
+    full = _test_results.render_comment_line(validated, parsed)
+    brief = _test_results.render_comment_line(validated, parsed, include_names=False)
     fallback = publish_evidence.TEST_LINE_FALLBACK
     assert len(full) > len(brief) > len(fallback)
 
-    def room_for(line, spare):
-        # Evidence size leaving `spare` bytes of room after inserting
-        # `line`, under the fitting cap (the budget minus the stamped
-        # marker's reserved growth).
-        reserve = pr_evidence.MARKER_GROWTH_RESERVE
-        return cap - reserve - len(line.encode()) - 1 - spare
+    def text_of(after_len):
+        doc = _results(scenarios=[{
+            "id": "version", "title": "", "command": ["housesitter", "--version"],
+            "exit_before": 0, "exit_after": 0, "expected_exit": 0,
+            "size_before": 7, "size_after": after_len,
+            "changed": True, "new_in_pr": False,
+            "before": "$ exit 0\n", "after": "x" * after_len + "\n",
+        }])
+        body = pr_evidence.render_text_from_results(doc, HEAD_SHA)
+        assert "**Omitted to fit a GitHub comment:**" not in body
+        return body
 
-    # Room for the full line: it is kept.
-    body = publish_evidence.fit_test_line(_exact_evidence_text(room_for(full, 5)), full, brief)
+    reserve = pr_evidence.MARKER_GROWTH_RESERVE
+
+    def fits_line(line, after_len):
+        # Whether `line` fits the text of this size in the final-form budget.
+        candidate = publish_evidence.insert_test_line(text_of(after_len), line)
+        return pr_evidence.final_len(candidate) <= cap
+
+    def max_k(line, start):
+        # Largest after-length whose text still fits `line`: the estimate
+        # from the roughly two-bytes-per-after-byte growth is walked to the
+        # exact edge, so digit-length effects in the size column can't skew
+        # the boundary.
+        assert fits_line(line, 0)
+        est = start
+        while fits_line(line, est + 1):
+            est += 1
+        while not fits_line(line, est):
+            est -= 1
+        assert not fits_line(line, est + 1)
+        return est
+
+    t0 = len(text_of(0).encode())
+
+    def rung_k(line):
+        # Largest after-length whose text still fits `line` in the budget.
+        return max_k(line, (cap - reserve - 1 - len(line.encode()) - t0) // 2)
+
+    def render_with(after_len):
+        doc = _results(scenarios=[{
+            "id": "version", "title": "", "command": ["housesitter", "--version"],
+            "exit_before": 0, "exit_after": 0, "expected_exit": 0,
+            "size_before": 7, "size_after": after_len,
+            "changed": True, "new_in_pr": False,
+            "before": "$ exit 0\n", "after": "x" * after_len + "\n",
+        }])
+        artifact = tmp_path / f"ladder-{after_len}"
+        artifact.mkdir(exist_ok=True)
+        (artifact / "results.json").write_text(json.dumps(doc))
+        rc, out = _render_with_results(tmp_path, artifact, tree, jobs)
+        assert rc == 0
+        return (out / "comment.md").read_text()
+
+    # Room for the full line: names are kept.
+    body = render_with(rung_k(full))
     assert full in body
     # Room for the brief line only: names are dropped, counts stay.
-    body = publish_evidence.fit_test_line(_exact_evidence_text(room_for(brief, 5)), full, brief)
-    assert brief in body and "n1" not in body
+    assert rung_k(brief) > rung_k(full)
+    body = render_with(rung_k(full) + 1)
+    assert brief in body and "test_case_00" not in body
     # Room only for the fixed short line.
-    body = publish_evidence.fit_test_line(
-        _exact_evidence_text(room_for(fallback, 2)), full, brief
-    )
-    assert fallback in body and "12 failing" not in body
+    assert rung_k(fallback) > rung_k(brief)
+    body = render_with(rung_k(brief) + 1)
+    assert fallback in body and "failing" not in body
     # No room for any line: it is left out, and the publish stays in budget.
-    body = publish_evidence.fit_test_line(_exact_evidence_text(cap - 10), full, brief)
+    body = render_with(rung_k(fallback) + 1)
     assert "**Tests:**" not in body
     assert len(body.encode()) <= cap
 
@@ -1374,6 +1419,291 @@ def test_render_ui_path_near_cap_tests_line_stays_in_budget(tmp_path, monkeypatc
     assert "## Web UI" in body
     assert "(20 failing)" in body
     assert "n" * 165 not in body
+
+
+# Review round 4: one budget on the final form ---------------------------------
+#
+# Fitting is measured on the body exactly as it will be posted — stamped
+# with the longest possible marker and every image placeholder counted at
+# its posted length — with one shrink order: the Tests line degrades
+# completely (names, then the line) before any screenshot detail is
+# dropped, and text sections shorten last, every omission notice counted
+# and bounded. The CI-side check and the publisher share render_comment,
+# so a body the check accepts is a body the publisher posts, and the
+# workflow's final size check uses the same 60,000-byte budget.
+
+
+def test_omission_notice_caps_names_and_counts_the_rest():
+    notice = pr_evidence.omission_notice([f"`s{i}`" for i in range(8)])
+    assert "**Omitted to fit a GitHub comment:**" in notice
+    for i in range(5):
+        assert f"`s{i}`" in notice
+    assert "`s5`" not in notice
+    assert "and 3 more" in notice
+    assert notice.endswith("locally to see them.\n")
+    short = pr_evidence.omission_notice(["`only`"])
+    assert "`only`" in short and "and " not in short
+
+
+def test_round4_omission_notice_is_bounded_and_counted(tmp_path):
+    # Finding 1: every omitted heading used to be appended without bound,
+    # eating the marker reserve until the stamped body no longer fit — the
+    # CI-side check accepted 59,949 bytes the publisher refused as
+    # too_large. The notice is now capped and measured.
+    seed = _results()["scenarios"][0]
+    doc = _results(scenarios=[dict(seed, changed=True, after="x" * 29100 + "\n")] + [
+        dict(seed, id=f"new-{i}", new_in_pr=True, title="T" * 200,
+             after="x" * 50000 + "\n") for i in range(3)
+    ])
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "results.json").write_text(json.dumps(doc))
+    check = SimpleNamespace(
+        artifact_dir=str(artifact), repo=REPO, pr=PR, head_sha=HEAD_SHA
+    )
+    assert evidence_checks.cmd_check(check) == 0
+    body = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA, run_id=100, run_attempt=1
+    )
+    assert "**Omitted to fit a GitHub comment:**" in body
+    posted = ui_evidence.substitute_sha(body, "c" * 40)
+    assert len(posted.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def test_round4_tests_line_degrades_before_screenshots(tmp_path):
+    # Finding 2: the Tests line with ten failing names used to survive
+    # while all three screenshots were dropped (58,873 bytes, zero
+    # images). Test data now degrades on its own line first.
+    files = [f"typical__index-phone__{side}.png" for side in ("base", "head", "diff")]
+    cap = dict(fixture="typical", view="index-phone", status="changed",
+               head_problems=[],
+               **dict(zip(("base", "head", "diff"), files)))
+    doc = _results()
+    doc["scenarios"][0].update(changed=True, before="before\n", after="x" * 28460 + "\n")
+    artifact = _artifact(
+        tmp_path, pngs=files,
+        manifest={"version": 1, "captures": [cap]}, results=doc)
+    results = _results_tree(tmp_path, {
+        "3.9": _junit(failures=10,
+                      failing=[f"test_case_{i:02d}" for i in range(10)])})
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(json.dumps(_jobs_doc(_job("test (3.9)", "failure"))))
+    plain = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA, run_id=100, run_attempt=1)
+    with_tests = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA, run_id=100, run_attempt=1,
+        test_results_dir=str(results), jobs_json=str(jobs_path))
+    assert plain.count("<img ") == 3
+    assert with_tests.count("<img ") == 3
+    assert "**Tests:**" in with_tests
+    for body in (plain, with_tests):
+        posted = ui_evidence.substitute_sha(body, "c" * 40)
+        assert len(posted.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def test_round4_placeholder_growth_stays_in_budget(tmp_path):
+    # Finding 3: fitting counted each image URL at placeholder length, so
+    # the posted body grew 12 bytes per image past the budget (58,201
+    # accepted, 60,001 posted). Placeholders now count at posted length.
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    ui_out = artifact / "ui_out"
+    ui_out.mkdir()
+    captures = []
+    for i in range(50):
+        fixture = f"f{i:03}"
+        cap = dict(fixture=fixture, view="index-phone", status="changed",
+                   head_problems=[])
+        for side in ("base", "head", "diff"):
+            name = f"{fixture}__index-phone__{side}.png"
+            cap[side] = name
+            (ui_out / name).write_bytes(_png())
+        captures.append(cap)
+    (ui_out / "ui_manifest.json").write_text(
+        json.dumps({"version": 1, "captures": captures}))
+    doc = _results()
+    doc["scenarios"][0].update(
+        changed=True, before="before\n", after="x" * 7662 + "\n")
+    (artifact / "results.json").write_text(json.dumps(doc))
+    body = publish_evidence.render_comment(
+        artifact, REPO, PR, HEAD_SHA, run_id=100, run_attempt=1)
+    # The full section no longer fits once placeholders count at posted
+    # length, so the table tier wins (shrink step (d) comes before text
+    # shortening (e)): the table and its notice survive, details don't.
+    assert "## Web UI" in body
+    assert "**Web UI details omitted to fit a GitHub comment:**" in body
+    assert "<img " not in body
+    posted = ui_evidence.substitute_sha(body, "c" * 40)
+    assert len(posted.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def test_round4_workflow_final_check_uses_comment_budget(tmp_path, monkeypatch):
+    # The comment step's final size check uses the same 60,000-byte budget
+    # as the renderer: a body of exactly the budget posts, one byte more
+    # falls back to the fixed publish_failed notice.
+    marker = pr_evidence.MARKER
+    exact = marker + "x" * (pr_evidence.MAX_COMMENT_BYTES - len(marker.encode()))
+    assert len(exact.encode()) == pr_evidence.MAX_COMMENT_BYTES
+    (tmp_path / "exact").mkdir()
+    (tmp_path / "over").mkdir()
+    proc, calls = _run_comment_step(
+        tmp_path / "exact", monkeypatch, "success", "success",
+        files={"rendered/comment.md": exact}, evidence_sha="c" * 40)
+    assert proc.returncode == 0, proc.stderr
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    assert posts[0]["body"] == exact
+    over = marker + "x" * (pr_evidence.MAX_COMMENT_BYTES + 1 - len(marker.encode()))
+    proc, calls = _run_comment_step(
+        tmp_path / "over", monkeypatch, "success", "success",
+        files={"rendered/comment.md": over}, evidence_sha="c" * 40)
+    assert proc.returncode == 0, proc.stderr
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    assert "`publish_failed`" in posts[0]["body"]
+    assert len(posts[0]["body"].encode()) <= pr_evidence.MAX_COMMENT_BYTES
+
+
+def _round4_random_doc(rng, known_ids):
+    """A random valid results doc: small texts usually, huge ones rarely."""
+    scenarios = []
+    used = set()
+    for _ in range(rng.randint(0, 5)):
+        if rng.random() < 0.5 and len(used) < len(known_ids):
+            ident = rng.choice([i for i in known_ids if i not in used])
+            new = False
+        else:
+            ident = f"new-{rng.randint(0, 9999):04d}"
+            new = True
+        used.add(ident)
+        size_roll = rng.random()
+        if size_roll < 0.7:
+            after = rng.choice(["$ exit 0\n", "line one\nline two\n", "x" * 500 + "\n"])
+        elif size_roll < 0.9:
+            after = "y\n" * rng.randint(100, 2000)
+        else:
+            after = "z" * rng.randint(20000, 90000) + "\n"
+        before = None if rng.random() < 0.2 else rng.choice(["$ exit 0\n", after])
+        scenarios.append({
+            "id": ident, "title": "T" * rng.randint(0, 200),
+            "command": ["housesitter", "--version"],
+            "exit_before": None if before is None else 0,
+            "exit_after": rng.choice([0, 0, 1]),
+            "expected_exit": 0,
+            "size_before": None if before is None else len(before or ""),
+            "size_after": len(after),
+            "changed": True, "new_in_pr": new,
+            "before": before, "after": after,
+        })
+    return _results(scenarios=scenarios,
+                    removed=rng.sample(known_ids, rng.randint(0, min(2, len(known_ids)))))
+
+
+def _round4_random_ui(rng, root):
+    """A random ui_out dir (or None for no UI evidence at all)."""
+    roll = rng.random()
+    if roll < 0.25:
+        return None
+    ui_dir = root / "ui_out"
+    ui_dir.mkdir(exist_ok=True)
+    if roll < 0.4:
+        (ui_dir / "ui_manifest.json").write_text(
+            json.dumps({"version": 1, "captures": []}))
+        return ui_dir
+    captures = []
+    for i in range(rng.randint(1, 4)):
+        fixture = rng.choice(["typical", "admin", "a-b"])
+        view = rng.choice(
+            ["index-phone", "index-desktop", "index-desktop-dark", "eink"])
+        status = rng.choice(["added", "removed", "changed", "unchanged"])
+        cap = {"fixture": f"{fixture}-{i}" if i else fixture, "view": view,
+               "status": status,
+               "head_problems": ["check failed"] if rng.random() < 0.2 else []}
+        if status in ("added", "changed"):
+            name = f"{cap['fixture']}__{view}__head.png"
+            cap["head"] = name
+            (ui_dir / name).write_bytes(_png())
+        if status in ("removed", "changed"):
+            name = f"{cap['fixture']}__{view}__base.png"
+            cap["base"] = name
+            (ui_dir / name).write_bytes(_png())
+        if status == "changed":
+            if rng.random() < 0.7:
+                name = f"{cap['fixture']}__{view}__diff.png"
+                cap["diff"] = name
+                (ui_dir / name).write_bytes(_png((i * 40 + 10, 20, 30)))
+            else:
+                cap["diff_error"] = "no diff recorded"
+        captures.append(cap)
+    (ui_dir / "ui_manifest.json").write_text(
+        json.dumps({"version": 1, "captures": captures}))
+    return ui_dir
+
+
+def test_round4_property_ci_and_publisher_agree(tmp_path):
+    # For random mixes of text, test data and screenshots, the CI-side
+    # check accepts if and only if the publisher posts, and the posted body
+    # (stamped and substituted, exactly as GitHub gets it) never exceeds
+    # the budget. Test data only ever degrades its own line, so it cannot
+    # break the agreement.
+    rng = random.Random(20261111)
+    known_ids = sorted(evidence_checks.load_known_scenario_ids(
+        ROOT / "tests" / "evidence" / "scenarios.json"))
+    full_pythons = {"3.9": "3.9.25", "3.10": "3.10.12", "3.14": "3.14.1",
+                    "3.x": "3.14.1"}
+    for case in range(60):
+        root = tmp_path / f"case-{case}"
+        root.mkdir()
+        artifact = root / "artifact"
+        artifact.mkdir()
+        (artifact / "results.json").write_text(
+            json.dumps(_round4_random_doc(rng, known_ids)))
+        _round4_random_ui(rng, artifact)
+        test_args = []
+        if rng.random() < 0.7:
+            shorts = rng.sample(sorted(full_pythons), rng.randint(1, 2))
+            payloads = {}
+            jobs_list = []
+            for short in shorts:
+                conclusion = rng.choice(["success", "failure", "cancelled"])
+                if rng.random() < 0.85:
+                    count = rng.randint(1, 12)
+                    failing = (
+                        [f"test_case_{i:02d}" for i in range(count)]
+                        if conclusion == "failure" and rng.random() < 0.7
+                        else [])
+                    payloads[short] = _junit(
+                        full_pythons[short], tests=count,
+                        failures=len(failing), failing=failing)
+                else:
+                    payloads[short] = b"<not junit>"
+                jobs_list.append(_job(f"test ({short})", conclusion))
+            results_dir = root / "test-results"
+            for short, payload in payloads.items():
+                sub = results_dir / f"test-results-{short}"
+                sub.mkdir(parents=True)
+                (sub / "junit.xml").write_bytes(payload)
+            jobs_path = root / "jobs.json"
+            jobs_path.write_text(json.dumps(_jobs_doc(*jobs_list)))
+            test_args = ["--test-results-dir", str(results_dir),
+                         "--jobs-json", str(jobs_path)]
+        ci_check = SimpleNamespace(artifact_dir=str(artifact), repo=REPO,
+                                   pr=PR, head_sha=HEAD_SHA)
+        ci_rc = evidence_checks.cmd_check(ci_check)
+        assert ci_rc in (0, 1)
+        out = root / "out"
+        pub_rc = publish_evidence.main(
+            ["render", "--artifact-dir", str(artifact),
+             "--out-dir", str(out), "--repo", REPO, "--pr", str(PR),
+             "--head-sha", HEAD_SHA, "--run-id", "100", "--run-attempt", "1"]
+            + test_args)
+        assert pub_rc in (0, 1)
+        assert (ci_rc == 0) == (pub_rc == 0), f"case {case} disagrees"
+        if pub_rc == 0:
+            posted = ui_evidence.substitute_sha(
+                (out / "comment.md").read_text(), "e" * 40)
+            assert len(posted.encode()) <= pr_evidence.MAX_COMMENT_BYTES, (
+                f"case {case} posted over budget")
 
 
 @pytest.mark.parametrize("order", [["success", "failure"], ["failure", "success"]])
