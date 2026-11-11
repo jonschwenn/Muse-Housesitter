@@ -551,6 +551,13 @@ snapshot. Core config, secret, and TLS checks apply to the connection.
 The tests check:
 
 - Field-by-field normalisation for both flavours.
+- Odd upstream values, one field at a time: each upstream field the module
+  reads (AP, radio table, radio stats, WiFi client, no-AP device, sysinfo)
+  is made missing, null, `""`, a list, an object, `true`, `2**60`, or a
+  20-digit numeric string on one record of the `unifi_os` house. The
+  snapshot still succeeds with the declared types, every other record is
+  unchanged, and the affected output is null, `"unknown"`, or the record
+  dropped or moved as §4 says.
 - No-AP ordering, de-duplication, cap warning, full summary count, identifier
   policy, and unchanged compact form.
 - `get` accepts a snapshot saved without `no_ap_clients`, preserves older

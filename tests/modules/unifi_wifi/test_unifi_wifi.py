@@ -10,10 +10,14 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
+
+import pytest
 
 from core.helpers import Canned, ScriptedServer, canned_handler
 from housesitter.core import envelope, runner
@@ -57,15 +61,41 @@ def typical_routes(flavor):
     }
 
 
-def run_case(tmp_path, routes, config=None, params=None, full_name=None, identifiers="full"):
+class SharedServer:
+    """One loopback ScriptedServer reused across many ``run_case`` calls.
+
+    Closing a ScriptedServer waits for its accept loop (up to 0.5 s), so
+    large parametrised groups share one; each run swaps in its routes.
+    """
+
+    def __init__(self):
+        self.routes = {}
+        self.server = ScriptedServer(canned_handler(self.routes))
+
+    def close(self):
+        self.server.close()
+
+
+def run_case(
+    tmp_path, routes, config=None, params=None, full_name=None,
+    identifiers="full", shared=None,
+):
     """Run one command against a fixture server; return (outcome, run_info).
 
     ``tmp_path`` is the test's pytest ``tmp_path``: each call gets its own
-    fresh HOME inside it, so pytest removes it (no /tmp leak).
+    fresh HOME inside it, so pytest removes it (no /tmp leak). With
+    ``shared`` (a SharedServer), that server answers with ``routes`` and
+    stays open; ``requests`` lists only this run's requests.
     """
     from housesitter.core import http as http_core
 
-    server = ScriptedServer(canned_handler(routes))
+    if shared is None:
+        server = ScriptedServer(canned_handler(routes))
+    else:
+        shared.routes.clear()
+        shared.routes.update(routes)
+        server = shared.server
+    first_request = len(server.requests)
     home = tempfile.mkdtemp(dir=tmp_path)
     base_config = {
         "base_url": f"https://192.0.2.1:{server.port}",
@@ -140,7 +170,7 @@ def run_case(tmp_path, routes, config=None, params=None, full_name=None, identif
         if saved_path.is_file():
             saved_obj = json.loads(saved_path.read_text(encoding="utf-8"))
     info = {
-        "requests": list(server.requests),
+        "requests": list(server.requests[first_request:]),
         "home": home,
         "saved_obj": saved_obj,
         "log_records": list(records),
@@ -150,7 +180,8 @@ def run_case(tmp_path, routes, config=None, params=None, full_name=None, identif
             if outcome.exit_code != 0 else None
         ),
     }
-    server.close()
+    if shared is None:
+        server.close()
     return outcome, info
 
 
@@ -2841,3 +2872,482 @@ def test_get_damaged_when_no_ap_id_is_also_a_wifi_client(tmp_path):
             "That saved snapshot is damaged.")
     finally:
         home.close()
+
+
+# -- Upstream value sweep ---------------------------------------------------
+#
+# A live controller can send any field missing, null, empty, of the wrong
+# type, or absurdly large. One field at a time on one record of the
+# typical unifi_os house, each odd value below must leave the snapshot
+# working (exit 0), well typed, every other record unchanged, and the
+# affected output exactly as docs/modules/unifi_wifi.md §4 says.
+
+_ABSENT = object()
+
+SWEEP_VALUES = (
+    ("absent", _ABSENT),
+    ("null", None),
+    ("empty", ""),
+    ("list", []),
+    ("dict", {}),
+    ("bool", True),
+    ("huge_int", 2**60),
+    ("huge_numeric_str", "9" * 20),
+)
+
+SWEEP_KITCHEN = "02:00:00:00:01:01"      # sta[0]: named WiFi client on AP1
+SWEEP_PIXEL = "02:00:00:00:01:02"        # sta[1]: name "", hostname only
+SWEEP_SUBWOOFER = "02:00:00:00:01:0c"    # sta[13]: no-AP device
+SWEEP_RADIO = 1                    # AP1 wifi1: table channel "100", stats 36
+
+_UNREADABLE_AP = (
+    "1 AP record could not be read or had no valid MAC address "
+    "and was left out"
+)
+_UNREADABLE_CLIENT = (
+    "1 client record could not be read or had no valid MAC address "
+    "and was left out"
+)
+_NO_RADIO_STATS = {
+    "tx_power_dbm": None, "channel_utilization_pct": None,
+    "self_rx_pct": None, "self_tx_pct": None, "client_count": None,
+    "satisfaction_pct": None, "tx_retry_pct_cumulative": None,
+}
+_CLIENT_RADIO_NULLS = {
+    "ap_id": None, "ap_name": None, "band": "unknown", "channel": None,
+    "wifi_standard": None, "wifi_standard_raw": None, "signal_dbm": None,
+    "noise_dbm": None, "tx_rate_mbps": None, "rx_rate_mbps": None,
+    "satisfaction_pct": None, "tx_retry_pct_cumulative": None,
+    "tx_retry_pct_recent": None, "connected_s": None, "idle_s": None,
+    "guest": None,
+}
+
+
+class _Expected:
+    """The baseline snapshot, which one sweep case edits into its expectation."""
+
+    def __init__(self, baseline):
+        data = json.loads(json.dumps(baseline["data"]))
+        self.aps = {item["id"]: item for item in data["aps"]}
+        self.clients = {item["id"]: item for item in data["clients"]}
+        self.no_ap = {item["id"]: item for item in data["no_ap_clients"]}
+        self.warnings = list(baseline["warnings"])
+        self.source = dict(baseline["source"])
+
+    def drop_ap(self, ap_id):
+        # Spec §4.2: a client whose ap_mac matches no AP stays a client,
+        # with ap_id and ap_name null.
+        del self.aps[ap_id]
+        for client in self.clients.values():
+            if client["ap_id"] == ap_id:
+                client["ap_id"] = None
+                client["ap_name"] = None
+
+    def data(self):
+        """Lists in the documented order (§4.4), summary per §4.3."""
+        aps = sorted(self.aps.values(), key=lambda item: (
+            item["name"] is None, item["name"] or "", item["id"]))
+        clients = sorted(self.clients.values(), key=lambda item: (
+            item["ap_name"] is None, item["ap_name"] or "",
+            item["name"] is None, item["name"] or "", item["id"]))
+        no_ap = sorted(self.no_ap.values(), key=lambda item: (
+            item["name"] is None, item["name"] or "", item["id"]))
+        by_ap = {}
+        for client in clients:
+            if client["ap_id"] is not None:
+                entry = by_ap.setdefault(client["ap_id"], {
+                    "ap_id": client["ap_id"], "ap_name": client["ap_name"],
+                    "count": 0})
+                entry["count"] += 1
+        ssids = {}
+        for client in clients:
+            if client["ssid"] is not None:
+                ssids[client["ssid"]] = ssids.get(client["ssid"], 0) + 1
+        by_ssid = [{"ssid": k, "count": v} for k, v in sorted(ssids.items())]
+        null_ssid = sum(1 for client in clients if client["ssid"] is None)
+        if null_ssid:
+            by_ssid.append({"ssid": None, "count": null_ssid})
+        summary = {
+            "ap_count": len(aps),
+            "ap_online_count": sum(1 for item in aps if item["online"]),
+            "client_count": len(clients),
+            "no_ap_client_count": len(no_ap),
+            "clients_by_band": [
+                {"band": band,
+                 "count": sum(1 for c in clients if c["band"] == band)}
+                for band in ("2.4GHz", "5GHz", "6GHz", "unknown")
+            ],
+            "clients_by_ap": [by_ap[key] for key in sorted(by_ap)],
+            "clients_by_ssid": by_ssid,
+        }
+        return {
+            "summary": summary, "aps": aps, "clients": clients,
+            "no_ap_clients": no_ap,
+        }
+
+
+# Effects: each takes (expected, value) and edits the expectation.
+
+def _ap_set(**fields):
+    def effect(exp, value):
+        exp.aps[AP1].update(fields)
+    return effect
+
+
+def _radio_set(**fields):
+    def effect(exp, value):
+        exp.aps[AP1]["radios"][SWEEP_RADIO].update(fields)
+    return effect
+
+
+def _client_set(client_id, **fields):
+    def effect(exp, value):
+        exp.clients[client_id].update(fields)
+    return effect
+
+
+def _no_ap_set(**fields):
+    def effect(exp, value):
+        exp.no_ap[SWEEP_SUBWOOFER].update(fields)
+    return effect
+
+
+def _unchanged(exp, value):
+    pass
+
+
+def _kept_if_text(target, field, fallback, pattern=None):
+    """A non-empty string (matching ``pattern``) is kept, else ``fallback``."""
+    def effect(exp, value):
+        record = target(exp)
+        ok = isinstance(value, str) and value != "" and (
+            pattern is None or re.fullmatch(pattern, value))
+        record[field] = value if ok else fallback(record)
+    return effect
+
+
+def _ap1(exp):
+    return exp.aps[AP1]
+
+
+def _kitchen(exp):
+    return exp.clients[SWEEP_KITCHEN]
+
+
+def _pixel(exp):
+    return exp.clients[SWEEP_PIXEL]
+
+
+def _subwoofer(exp):
+    return exp.no_ap[SWEEP_SUBWOOFER]
+
+
+def _none(record):
+    return None
+
+
+def _unknown(record):
+    return "unknown"
+
+
+def _ap_name(exp, value):
+    _kept_if_text(_ap1, "name", _none)(exp, value)
+    for client in exp.clients.values():
+        if client["ap_id"] == AP1:
+            client["ap_name"] = exp.aps[AP1]["name"]
+
+
+def _ap_dropped_silently(exp, value):
+    exp.drop_ap(AP1)
+
+
+def _ap_dropped_with_warning(exp, value):
+    exp.drop_ap(AP1)
+    exp.warnings.insert(0, _UNREADABLE_AP)
+
+
+def _ssid(target):
+    def effect(exp, value):
+        target(exp)["ssid"] = value if isinstance(value, str) else None
+    return effect
+
+
+def _client_dropped_with_warning(client_id):
+    def effect(exp, value):
+        exp.clients.pop(client_id, None)
+        exp.no_ap.pop(client_id, None)
+        exp.warnings.append(_UNREADABLE_CLIENT)
+    return effect
+
+
+def _wired_drops(client_id, otherwise):
+    def effect(exp, value):
+        if value is True:
+            exp.clients.pop(client_id, None)
+            exp.no_ap.pop(client_id, None)
+        else:
+            otherwise(exp, value)
+    return effect
+
+
+def _kitchen_ap_mac(exp, value):
+    if value is _ABSENT or value is None or value == "":
+        # §4.2: missing, null, or blank ap_mac is a no-AP device.
+        client = exp.clients.pop(SWEEP_KITCHEN)
+        exp.no_ap[SWEEP_KITCHEN] = {
+            key: client[key]
+            for key in ("id", "ip", "name", "vendor", "private_mac", "ssid")
+        }
+        exp.no_ap[SWEEP_KITCHEN]["is_wired"] = False
+    else:
+        # Any other value keeps it a WiFi client with a null join.
+        exp.clients[SWEEP_KITCHEN].update(ap_id=None, ap_name=None)
+
+
+def _subwoofer_ap_mac(exp, value):
+    if value is _ABSENT or value is None or value == "":
+        return
+    # A present, non-blank ap_mac makes it a WiFi client with no radio data.
+    record = exp.no_ap.pop(SWEEP_SUBWOOFER)
+    client = {key: record[key] for key in (
+        "id", "ip", "name", "vendor", "private_mac", "ssid")}
+    client.update(_CLIENT_RADIO_NULLS)
+    exp.clients[SWEEP_SUBWOOFER] = client
+
+
+def _guest(exp, value):
+    exp.clients[SWEEP_KITCHEN]["guest"] = value if isinstance(value, bool) else None
+
+
+def _controller_version(exp, value):
+    ok = isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", value)
+    exp.source["controller_version"] = value if ok else None
+
+
+def _all_radios_lose_stats(exp, value):
+    # Channel in use falls back to a numeric table channel (§4.1).
+    for radio in exp.aps[AP1]["radios"]:
+        radio.update(_NO_RADIO_STATS)
+        setting = radio["channel_setting"]
+        radio["channel"] = int(setting) if setting.isdigit() else None
+
+
+_MODEL_PATTERN = r"[A-Za-z0-9._+-]{1,64}"
+_JOIN_LOST = _radio_set(channel=100, **_NO_RADIO_STATS)
+
+#: (case id, endpoint, upstream path, effect). The path starts at the
+#: endpoint's ``data`` list; every field normalise.py reads is listed.
+SWEEP_FIELDS = (
+    # stat/device: AP1 ("Living Room")
+    ("ap.type", "device", (0, "type"), _ap_dropped_silently),
+    ("ap.mac", "device", (0, "mac"), _ap_dropped_with_warning),
+    ("ap.name", "device", (0, "name"), _ap_name),
+    ("ap.model", "device", (0, "model"),
+     _kept_if_text(_ap1, "model", _none, _MODEL_PATTERN)),
+    ("ap.version", "device", (0, "version"),
+     _kept_if_text(_ap1, "firmware", _none, _MODEL_PATTERN)),
+    ("ap.state", "device", (0, "state"), _ap_set(online=False)),
+    ("ap.uptime", "device", (0, "uptime"), _ap_set(uptime_s=None)),
+    ("ap.num_sta", "device", (0, "num_sta"), _ap_set(client_count=None)),
+    ("ap.satisfaction", "device", (0, "satisfaction"),
+     _ap_set(satisfaction_pct=None)),
+    ("ap.uplink", "device", (0, "uplink"),
+     _ap_set(uplink_type=None, uplink_speed_mbps=None)),
+    ("ap.uplink.type", "device", (0, "uplink", "type"),
+     _ap_set(uplink_type=None)),
+    ("ap.uplink.speed", "device", (0, "uplink", "speed"),
+     _ap_set(uplink_speed_mbps=None)),
+    ("ap.radio_table", "device", (0, "radio_table"), _ap_set(radios=[])),
+    ("ap.radio_table_stats", "device", (0, "radio_table_stats"),
+     _all_radios_lose_stats),
+    ("radio.name", "device", (0, "radio_table", SWEEP_RADIO, "name"),
+     _JOIN_LOST),
+    ("radio.radio", "device", (0, "radio_table", SWEEP_RADIO, "radio"),
+     _radio_set(band="unknown")),
+    ("radio.channel", "device", (0, "radio_table", SWEEP_RADIO, "channel"),
+     _radio_set(channel_setting=None)),
+    ("radio.ht", "device", (0, "radio_table", SWEEP_RADIO, "ht"),
+     _radio_set(width_mhz=None)),
+    ("radio.tx_power_mode", "device",
+     (0, "radio_table", SWEEP_RADIO, "tx_power_mode"),
+     _radio_set(tx_power_mode=None)),
+    ("stats.name", "device", (0, "radio_table_stats", SWEEP_RADIO, "name"),
+     _JOIN_LOST),
+    # Stats radio is read only when the table radio is not a string.
+    ("stats.radio", "device", (0, "radio_table_stats", SWEEP_RADIO, "radio"),
+     _unchanged),
+    ("stats.channel", "device",
+     (0, "radio_table_stats", SWEEP_RADIO, "channel"),
+     _radio_set(channel=100)),
+    ("stats.tx_power", "device",
+     (0, "radio_table_stats", SWEEP_RADIO, "tx_power"),
+     _radio_set(tx_power_dbm=None)),
+    ("stats.cu_total", "device",
+     (0, "radio_table_stats", SWEEP_RADIO, "cu_total"),
+     _radio_set(channel_utilization_pct=None)),
+    ("stats.cu_self_rx", "device",
+     (0, "radio_table_stats", SWEEP_RADIO, "cu_self_rx"),
+     _radio_set(self_rx_pct=None)),
+    ("stats.cu_self_tx", "device",
+     (0, "radio_table_stats", SWEEP_RADIO, "cu_self_tx"),
+     _radio_set(self_tx_pct=None)),
+    ("stats.num_sta", "device",
+     (0, "radio_table_stats", SWEEP_RADIO, "num_sta"),
+     _radio_set(client_count=None)),
+    ("stats.satisfaction", "device",
+     (0, "radio_table_stats", SWEEP_RADIO, "satisfaction"),
+     _radio_set(satisfaction_pct=None)),
+    ("stats.tx_packets", "device",
+     (0, "radio_table_stats", SWEEP_RADIO, "tx_packets"),
+     _radio_set(tx_retry_pct_cumulative=None)),
+    ("stats.tx_retries", "device",
+     (0, "radio_table_stats", SWEEP_RADIO, "tx_retries"),
+     _radio_set(tx_retry_pct_cumulative=None)),
+    # stat/sta: a WiFi client ("Kitchen Speaker" on AP1)
+    ("client.mac", "sta", (0, "mac"), _client_dropped_with_warning(SWEEP_KITCHEN)),
+    ("client.ap_mac", "sta", (0, "ap_mac"), _kitchen_ap_mac),
+    ("client.is_wired", "sta", (0, "is_wired"),
+     _wired_drops(SWEEP_KITCHEN, _unchanged)),
+    ("client.name", "sta", (0, "name"),
+     _kept_if_text(_kitchen, "name", lambda record: "speaker-1")),
+    ("client.hostname", "sta", (0, "hostname"), _unchanged),
+    ("client.hostname_only", "sta", (1, "hostname"),
+     _kept_if_text(_pixel, "name", _none)),
+    ("client.oui", "sta", (0, "oui"),
+     _kept_if_text(_kitchen, "vendor", _unknown)),
+    ("client.ip", "sta", (0, "ip"), _client_set(SWEEP_KITCHEN, ip=None)),
+    ("client.essid", "sta", (0, "essid"), _ssid(_kitchen)),
+    ("client.radio", "sta", (0, "radio"), _client_set(SWEEP_KITCHEN, band="unknown")),
+    ("client.radio_proto", "sta", (0, "radio_proto"),
+     _client_set(SWEEP_KITCHEN, wifi_standard=None, wifi_standard_raw=None)),
+    ("client.tx_rate", "sta", (0, "tx_rate"),
+     _client_set(SWEEP_KITCHEN, tx_rate_mbps=None)),
+    ("client.rx_rate", "sta", (0, "rx_rate"),
+     _client_set(SWEEP_KITCHEN, rx_rate_mbps=None)),
+    ("client.is_guest", "sta", (0, "is_guest"), _guest),
+    ("client.channel", "sta", (0, "channel"),
+     _client_set(SWEEP_KITCHEN, channel=None)),
+    ("client.signal", "sta", (0, "signal"),
+     _client_set(SWEEP_KITCHEN, signal_dbm=None)),
+    ("client.noise", "sta", (0, "noise"), _client_set(SWEEP_KITCHEN, noise_dbm=None)),
+    ("client.satisfaction", "sta", (0, "satisfaction"),
+     _client_set(SWEEP_KITCHEN, satisfaction_pct=None)),
+    ("client.tx_packets", "sta", (0, "tx_packets"),
+     _client_set(SWEEP_KITCHEN, tx_retry_pct_cumulative=None)),
+    ("client.tx_retries", "sta", (0, "tx_retries"),
+     _client_set(SWEEP_KITCHEN, tx_retry_pct_cumulative=None)),
+    ("client.wifi_tx_retries_percentage", "sta",
+     (0, "wifi_tx_retries_percentage"),
+     _client_set(SWEEP_KITCHEN, tx_retry_pct_recent=None)),
+    ("client.uptime", "sta", (0, "uptime"),
+     _client_set(SWEEP_KITCHEN, connected_s=None)),
+    ("client.idletime", "sta", (0, "idletime"),
+     _client_set(SWEEP_KITCHEN, idle_s=None)),
+    # stat/sta: a no-AP device ("Bedroom Subwoofer")
+    ("no_ap.mac", "sta", (13, "mac"), _client_dropped_with_warning(SWEEP_SUBWOOFER)),
+    ("no_ap.ap_mac", "sta", (13, "ap_mac"), _subwoofer_ap_mac),
+    ("no_ap.is_wired", "sta", (13, "is_wired"),
+     _wired_drops(SWEEP_SUBWOOFER, _no_ap_set(is_wired=None))),
+    ("no_ap.name", "sta", (13, "name"),
+     _kept_if_text(_subwoofer, "name", lambda record: "subwoofer-1")),
+    ("no_ap.hostname", "sta", (13, "hostname"), _unchanged),
+    ("no_ap.oui", "sta", (13, "oui"),
+     _kept_if_text(_subwoofer, "vendor", _unknown)),
+    ("no_ap.ip", "sta", (13, "ip"), _no_ap_set(ip=None)),
+    ("no_ap.essid", "sta", (13, "essid"), _ssid(_subwoofer)),
+    # stat/sysinfo
+    ("sysinfo.version", "sysinfo", (0, "version"), _controller_version),
+)
+
+_SWEEP_FILES = {
+    "sysinfo": "unifi_os_sysinfo.json",
+    "device": "unifi_os_device.json",
+    "sta": "unifi_os_sta.json",
+}
+_SWEEP_PREFIX = "/proxy/network/api/s/default/stat/"
+
+_JSON_TYPES = {
+    "string": (str,), "integer": (int,), "number": (int, float),
+    "boolean": (bool,), "object": (dict,), "array": (list,),
+}
+
+
+def _declared_type_problems(envelope_obj):
+    """Every output value against the snapshot's declared fields."""
+    command = next(c for c in UniFiWifi.commands if c.name == "snapshot")
+    problems = []
+    for field in command.fields:
+        values = [envelope_obj]
+        for segment in field.path.split("."):
+            is_list = segment.endswith("[]")
+            key = segment[:-2] if is_list else segment
+            nxt = []
+            for value in values:
+                if not isinstance(value, dict) or key not in value:
+                    continue
+                child = value[key]
+                nxt.extend(child if is_list and isinstance(child, list)
+                           else [child])
+            values = nxt
+        for value in values:
+            if value is None:
+                if not field.nullable:
+                    problems.append(f"{field.path}: null")
+                continue
+            ok = isinstance(value, _JSON_TYPES[field.type]) and (
+                field.type == "boolean" or not isinstance(value, bool))
+            if isinstance(value, float) and not math.isfinite(value):
+                ok = False
+            if ok and field.untrusted and len(value) > field.max_len:
+                ok = False
+            if not ok:
+                problems.append(f"{field.path}: {value!r}")
+    return problems
+
+
+@pytest.fixture(scope="module")
+def sweep_server():
+    shared = SharedServer()
+    yield shared
+    shared.close()
+
+
+@pytest.fixture(scope="module")
+def sweep_baseline(sweep_server, tmp_path_factory):
+    outcome, _info = run_case(
+        tmp_path_factory.mktemp("sweep-baseline"),
+        typical_routes("unifi_os"), shared=sweep_server)
+    assert outcome.exit_code == 0, outcome.envelope
+    return outcome.envelope
+
+
+@pytest.mark.parametrize("kind,value", SWEEP_VALUES,
+                         ids=[kind for kind, _ in SWEEP_VALUES])
+@pytest.mark.parametrize("case,endpoint,path,effect", SWEEP_FIELDS,
+                         ids=[item[0] for item in SWEEP_FIELDS])
+def test_odd_upstream_value_never_breaks_snapshot(
+    case, endpoint, path, effect, kind, value,
+    sweep_server, sweep_baseline, tmp_path,
+):
+    body = json.loads(fixture_bytes(_SWEEP_FILES[endpoint]))
+    parent = body["data"]
+    for step in path[:-1]:
+        parent = parent[step]
+    if value is _ABSENT:
+        parent.pop(path[-1], None)
+    else:
+        parent[path[-1]] = json.loads(json.dumps(value))
+    routes = typical_routes("unifi_os")
+    routes[("GET", _SWEEP_PREFIX + endpoint)] = Canned(
+        status=200, body=json.dumps(body).encode("utf-8"))
+
+    outcome, info = run_case(tmp_path, routes, shared=sweep_server)
+
+    assert outcome.exit_code == 0, outcome.envelope
+    assert len(logout_requests(info)) == 1
+    assert _declared_type_problems(outcome.envelope) == []
+    expected = _Expected(sweep_baseline)
+    effect(expected, value)
+    assert outcome.envelope["data"] == expected.data()
+    assert outcome.envelope["warnings"] == expected.warnings
+    assert outcome.envelope["source"] == expected.source
