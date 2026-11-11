@@ -29,6 +29,17 @@ import urllib.request
 
 # Files whose change alters what CI validates, how it validates, or what the
 # privileged publisher runs. Each entry: (kind, pattern, why).
+#
+# NOTE: this list is a partial defence, not a proof. The conformance suite and
+# the other protected suites necessarily execute PR code (module source under
+# src/, fixture data under tests/fixtures/), so a malicious PR could still
+# weaken what they check in ways this file list cannot see; human review
+# (gates 2 and 5) is the backstop there. What this list plus ci-guard.yml does
+# make tamper-proof is the hygiene scan: the guard runs the base copy of
+# scripts/hygiene_scan.py over the PR's blobs, so no PR file can switch that
+# scan off. tests/test_ci_guard.py::test_every_repo_local_import_of_protected_
+# suites_is_protected pins the closure below: every repo-local module the
+# protected suites import from tests/ or load from scripts/ is protected too.
 EXACT_PROTECTED = {
     # Evidence builders, validators, and renderers: PR code that produces
     # the published comment and screenshots, and main's code that the
@@ -40,6 +51,9 @@ EXACT_PROTECTED = {
     # The guard itself and the tests that pin all of the above: editing the
     # tests could mask a weakened script, so they are protected too.
     "scripts/ci_guard.py": "this guard",
+    "scripts/hygiene_scan.py": "the trusted scanner the guard runs over PR blobs",
+    "tests/core/helpers.py": "imported by the conformance harness at collection "
+    "time; patching it can neuter protected suites in the full test run",
     "tests/test_hygiene.py": "pins the repo hygiene scan",
     "tests/test_pr_evidence.py": "pins the evidence comment builder",
     "tests/test_ui_evidence.py": "pins the screenshot capture and validator",
@@ -64,15 +78,20 @@ PREFIX_PROTECTED = {
 }
 
 # File names that are dangerous anywhere in the tree: pytest/ruff/tooling
-# config (a stray pytest.ini overrides pyproject.toml), interpreter
-# start-up hooks (sitecustomize/usercustomize/*.pth run code in every
-# python process, including CI's), and conftest.py (fixtures, hooks, and
-# pytest_plugins that apply to the whole directory below it).
+# config (a stray pytest.ini in a subdirectory still overrides pyproject.toml
+# when that directory is the tests' common ancestor), interpreter start-up
+# hooks (sitecustomize/usercustomize/*.pth run code in every python process,
+# including CI's), a setup.py (the setuptools build backend executes it during
+# install), and conftest.py (fixtures, hooks, and pytest_plugins that apply to
+# the whole directory below it).
 NAME_PROTECTED = {
     "conftest.py": "pytest fixtures, hooks, and plugins for its directory",
     "pytest.ini": "overrides the pytest config in pyproject.toml",
+    ".pytest.ini": "pytest also honours dot-prefixed ini config",
     "setup.cfg": "may carry pytest or tool config",
     "tox.ini": "may carry pytest or tool config",
+    "pyproject.toml": "pytest/ruff config, dependency pins, entry points",
+    "setup.py": "executed by the setuptools build backend during install",
     "ruff.toml": "overrides the ruff config in pyproject.toml",
     ".ruff.toml": "overrides the ruff config in pyproject.toml",
     "sitecustomize.py": "runs at every interpreter start-up",
@@ -128,6 +147,14 @@ def is_protected(path: str) -> str | None:
     name = normal.rsplit("/", 1)[-1]
     if name in NAME_PROTECTED:
         return NAME_PROTECTED[name]
+    parts = normal.split("/")
+    if (
+        len(parts) == 4
+        and parts[0] == "tests"
+        and parts[1] == "fixtures"
+        and parts[3] == "conformance.json"
+    ):
+        return "the conformance manifest: weakening a fixture hides regressions"
     if name.endswith(".pth"):
         return "runs at interpreter start-up"
     if name == "__init__.py" and (normal == "tests/__init__.py" or normal.startswith("tests/")):

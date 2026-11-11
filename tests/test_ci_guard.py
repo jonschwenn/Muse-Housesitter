@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 
@@ -35,14 +36,23 @@ SPEC.loader.exec_module(ci_guard)
         "scripts/ui_evidence.py",
         "scripts/publish_evidence.py",
         "scripts/ci_guard.py",
+        "scripts/hygiene_scan.py",
         "scripts/test_results.py",
         "tests/test_test_results.py",
+        "tests/core/helpers.py",
+        "tests/fixtures/unifi_wifi/conformance.json",
+        "tests/fixtures/other_mod/conformance.json",
         "pyproject.toml",
+        "config/pyproject.toml",
+        "setup.py",
+        "pkg/setup.py",
         "conftest.py",
         "tests/conftest.py",
         "tests/modules/conftest.py",
         "pytest.ini",
+        ".pytest.ini",
         "tests/pytest.ini",
+        "tests/.pytest.ini",
         "setup.cfg",
         "tox.ini",
         "ruff.toml",
@@ -70,6 +80,11 @@ def test_protected_paths_are_caught(path):
         "tests/test_cli.py",
         "tests/modules/test_something.py",
         "tests/test_brand_new.py",
+        "tests/fixtures/unifi_wifi/classic_sta.json",
+        "tests/fixtures/conformance.json",
+        "tests/fixtures/a/b/conformance.json",
+        "tests/conformance.json",
+        "setup.cfg.bak",
         "docs/GITHUB.md",
         "README.md",
         "web/index.html",
@@ -83,6 +98,131 @@ def test_ordinary_paths_pass(path):
 def test_reason_names_what_is_protected():
     assert "pytest" in (ci_guard.is_protected("conftest.py") or "")
     assert "start-up" in (ci_guard.is_protected("x.pth") or "")
+
+
+# Import closure -------------------------------------------------------------
+# Every module a protected suite imports from tests/ or loads from scripts/
+# must itself be protected: otherwise a PR could weaken the suite through an
+# unprotected file (D16). This walks the imports statically (ast), so it never
+# executes the files it checks. Imports that resolve nowhere under tests/
+# (stdlib, pytest, third-party, src/) are not the guard's business: src/ in
+# particular cannot be protected, because the conformance suite necessarily
+# executes PR module code.
+
+PROTECTED_SUITE_FILES = [
+    "tests/test_hygiene.py",
+    "tests/test_pr_evidence.py",
+    "tests/test_ui_evidence.py",
+    "tests/test_publish_evidence.py",
+    "tests/test_test_results.py",
+    "tests/test_ci_guard.py",
+]
+PROTECTED_SUITE_DIRS = ["tests/conformance"]
+
+
+def _suite_files():
+    files = [ROOT / name for name in PROTECTED_SUITE_FILES]
+    for dirname in PROTECTED_SUITE_DIRS:
+        files.extend(sorted((ROOT / dirname).rglob("*.py")))
+    return files
+
+
+def _resolve_import(path, level, dotted):
+    """Repo-relative paths under tests/ that an import statement may load."""
+    parts = dotted.split(".") if dotted else []
+    if level:
+        base = path.parent
+        for _ in range(level - 1):
+            base = base.parent
+        roots = [base]
+    else:
+        roots = [ROOT / "tests", path.parent]
+    found = []
+    for root in roots:
+        for candidate in (
+            root.joinpath(*parts).with_suffix(".py"),
+            root.joinpath(*parts, "__init__.py"),
+        ):
+            try:
+                rel = candidate.relative_to(ROOT).as_posix()
+            except ValueError:
+                continue
+            if candidate.is_file():
+                found.append(rel)
+    return found
+
+
+def _spec_load_targets(tree):
+    """Scripts loaded via ``spec_from_file_location``: repo-relative paths."""
+    calls = []  # (enclosing function name or None, string constants in args)
+
+    def visit(node, func):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child.name)
+            else:
+                if (
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "spec_from_file_location"
+                ):
+                    consts = [
+                        constant.value
+                        for constant in ast.walk(child)
+                        if isinstance(constant, ast.Constant)
+                        and isinstance(constant.value, str)
+                    ]
+                    calls.append((func, consts))
+                visit(child, func)
+
+    visit(tree, None)
+    first_args = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            first_args.setdefault(node.func.id, set()).add(node.args[0].value)
+    targets = []
+    for func, consts in calls:
+        if "scripts" not in consts:
+            continue
+        pys = [c for c in consts if c.endswith(".py") and len(c) > len(".py")]
+        if pys:
+            targets.extend(f"scripts/{Path(p).name}" for p in pys)
+        elif func in first_args:
+            # Dynamic file name (``ROOT / "scripts" / f"{name}.py"``): resolve
+            # through the loader's constant call sites, e.g. _load("ui_evidence").
+            targets.extend(f"scripts/{name}.py" for name in first_args[func])
+    return targets
+
+
+def _repo_local_targets(path):
+    tree = ast.parse(path.read_text())
+    targets = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                targets.update(_resolve_import(path, 0, alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            targets.update(_resolve_import(path, node.level, node.module or ""))
+    targets.update(_spec_load_targets(tree))
+    return sorted(targets)
+
+
+def test_every_repo_local_import_of_protected_suites_is_protected():
+    unprotected = []
+    for path in _suite_files():
+        rel = path.relative_to(ROOT).as_posix()
+        for target in _repo_local_targets(path):
+            if ci_guard.is_protected(target) is None:
+                unprotected.append(f"{rel} -> {target}")
+    assert not unprotected, (
+        "protected suites import unprotected files:\n" + "\n".join(unprotected)
+    )
 
 
 # File listing ----------------------------------------------------------------
