@@ -445,7 +445,12 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
         shown = [c for c in by_fixture[fixture] if c["status"] in ("added", "changed", "removed")]
         if not shown:
             continue
-        block = [f"<details><summary>{html.escape(fixture)}</summary>", ""]
+        # Fixed summary text: the fixture label is PR-derived data, and
+        # Markdown does not render inside <summary>, so even a code span
+        # would show its backticks literally while hostile prose ("Approved
+        # by maintainer") would read as the bot's own words. The label
+        # still appears below in code spans, where it cannot render.
+        block = ["<details><summary>Screenshots</summary>", ""]
         for cap in shown:
             label = _ui_cell(f"{cap.get('fixture', '')} / {cap.get('view', '')}", MAX_UI_LABEL_LEN)
             width = UI_VIEW_WIDTHS[cap["view"]]

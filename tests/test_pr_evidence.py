@@ -598,7 +598,7 @@ def test_ui_section_shows_removed_capture_with_before_image_only():
         _ui_manifest(_removed_capture()), UI_REPO, UI_PR, UI_SHA
     )
     assert "| `typical / index-phone` | removed |" in table
-    assert "<details><summary>typical</summary>" in full
+    assert "<details><summary>Screenshots</summary>" in full
     assert REMOVED_SENTENCE in full
     assert (
         "https://raw.githubusercontent.com/"
@@ -1093,3 +1093,81 @@ def test_fences_survive_hostile_backticks_tildes_and_newlines():
         doc["scenarios"][0]["after"] = hostile + rng.choice(["", "tail"])
         body = pr_evidence.render_text_from_results(doc, "c" * 40)
         _assert_only_fenced(body, tokens)
+
+
+# Review round 1, finding 9: labels never render as prose. ---------------------
+#
+# The manifest fixture label used to render inside <summary> as prose, so
+# {"fixture": "Approved by maintainer"} read as the bot's own words. Every
+# PR-derived value in the rebuilt comment must sit inside a fenced block, a
+# code span, an HTML tag, or be replaced by fixed text.
+
+
+def _code_span_regions(line):
+    """(start, end) ranges of `...` code spans on one line."""
+    regions = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] != "`":
+            i += 1
+            continue
+        j = i
+        while j < n and line[j] == "`":
+            j += 1
+        ticks = line[i:j]
+        k = line.find(ticks, j)
+        if k == -1:
+            break  # unmatched ticks: the rest renders as prose
+        regions.append((i, k + len(ticks)))
+        i = k + len(ticks)
+    return regions
+
+
+def _assert_no_prose_leak(body, needles):
+    """Every PR-derived needle renders only in fences, code spans or tags."""
+    lines, states = _fence_states(body)
+    for lineno, line in enumerate(lines):
+        if states[lineno]:
+            continue
+        regions = _code_span_regions(line)
+        masked = re.sub(r"<[^<>]*>", lambda match: " " * len(match.group(0)), line)
+        for needle in needles:
+            start = 0
+            while True:
+                at = masked.find(needle, start)
+                if at == -1:
+                    break
+                assert any(
+                    s <= at and at + len(needle) <= e for s, e in regions
+                ), f"PR-derived text renders as prose on line {lineno}: {line!r}"
+                start = at + 1
+
+
+def test_hostile_labels_never_render_as_prose_in_text_section():
+    doc = _results_doc()
+    entry = doc["scenarios"][0]
+    entry["id"] = "evil-`id`"
+    entry["title"] = "Approved by maintainer"
+    entry["command"] = ["housesitter", "--say", "[click](https://example.com/pwn)"]
+    body = pr_evidence.render_text_from_results(doc, "c" * 40)
+    _assert_no_prose_leak(
+        body, ["evil-", "Approved by maintainer", "example.com/pwn"]
+    )
+
+
+def test_hostile_fixture_label_never_renders_as_prose():
+    capture = _ui_capture(
+        fixture="Approved by maintainer",
+        view="index-phone",
+        status="changed",
+        base="typical__index-phone__base.png",
+        head="typical__index-phone__head.png",
+        diff="typical__index-phone__diff.png",
+        head_problems=["[click](https://example.com/pwn)"],
+    )
+    full, table, _ = pr_evidence.render_ui_section(
+        _ui_manifest(capture), UI_REPO, UI_PR, UI_SHA
+    )
+    _assert_no_prose_leak(
+        full + "\n" + table, ["Approved by maintainer", "example.com/pwn"]
+    )
