@@ -535,7 +535,7 @@ def _env_seconds(name, default):
 def _log_seal_watchdog(path):
     """Test-only: record when the CLI's watchdog timers arm and fire.
 
-    Appends ``armed <epoch>`` / ``fired <epoch>`` lines to ``path`` so a
+    Appends ``armed <t>`` / ``fired <t>`` lines (``time.monotonic()``) to ``path`` so a
     test can measure the real watchdog interval inside this process,
     independent of process start-up or parent scheduling. Only the CLI
     module's view of ``threading`` is shadowed; nothing else changes.
@@ -544,7 +544,7 @@ def _log_seal_watchdog(path):
     def _note(label):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            os.write(fd, f"{label} {time.time():.6f}\n".encode())
+            os.write(fd, f"{label} {time.monotonic():.6f}\n".encode())
         finally:
             os.close(fd)
 
