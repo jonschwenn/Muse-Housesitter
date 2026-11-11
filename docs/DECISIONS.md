@@ -659,15 +659,23 @@ handoff's "license not chosen; don't publish."
   `scripts/hygiene_scan.py` over the PR head tree as data. It fetches git
   objects, verifies the head SHA against the event, and reads blobs through
   `git ls-tree` and `git cat-file --batch`. It never checks out, imports, or
-  runs the PR there. Relative file links inside the tree resolve to target
-  blobs, scanned under each link's own name. Directory links and links
-  into submodules are skipped; submodules are skipped with a count in the
-  output. Absolute, escaping, dangling, looping, or overlong link chains
-  fail the check. The scan has a 300-second deadline and byte and tree-entry
-  caps; the entry cap is enforced while reading the tree. Exceeding a limit
-  fails the check. Suppression listings show only `path:line` for each
-  `hygiene: ok` line, up to the listing cap, with a count of any remainder.
-  They never print the suppressed content, which could contain a secret.
+  runs the PR there. Relative file links resolve in filesystem order to
+  target blobs, scanned under each link's own name. Directory links and
+  links into submodules are skipped; submodules are skipped with a count in
+  the output. Absolute, escaping, dangling, looping, or overlong link
+  chains, links through files, and links into `.git` fail the check. Link
+  errors name only the link, never its target. The scan has a 300-second
+  deadline, checked through the last file, and byte and tree-entry caps; the
+  entry cap is enforced while reading the tree. The workflow scan step has a
+  six-minute timeout. Exceeding a limit fails the check. Suppression
+  listings show only `path:line` for each `hygiene: ok` line, up to the
+  listing cap, with a count of any remainder. They never print the
+  suppressed content, which could contain a secret. Problem messages name
+  the rule, path, and file line, never the flagged value; an SSID message
+  gives only its length. Printed paths are escaped for display and cut to
+  200 characters. Output has a 100,000-character budget and a truncation
+  marker; counts stay exact. JSON web token and session-cookie matching
+  take linear time with unchanged detection rules.
   This trusted copy makes hygiene tamper-proof against PR code. The re-run
   in `ci.yml`, "Protected suites, fresh process
   (honest-mistake check)", still runs PR code and pytest config.
@@ -679,7 +687,8 @@ handoff's "license not chosen; don't publish."
   test package initialisers. A test pins that the protected suites' local
   imports from `tests/` and file loads from `scripts/` are protected. It
   follows their imports transitively, including submodule imports written
-  as `from package import submodule`.
+  as `from package import submodule`, literal dynamic imports, literal
+  path loads, and parent package `__init__.py` files.
 - **Why:** widening the list stops the cheapest edits, but is only a partial
   defence. Conformance, the import lint, and the stdio-guard tests must run
   PR code and cannot be made tamper-proof this way. Human review of every
