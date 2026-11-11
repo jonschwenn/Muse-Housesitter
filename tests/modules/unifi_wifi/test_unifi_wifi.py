@@ -57,12 +57,16 @@ def typical_routes(flavor):
     }
 
 
-def run_case(routes, config=None, params=None, full_name=None, identifiers="full"):
-    """Run one command against a fixture server; return (outcome, run_info)."""
+def run_case(tmp_path, routes, config=None, params=None, full_name=None, identifiers="full"):
+    """Run one command against a fixture server; return (outcome, run_info).
+
+    ``tmp_path`` is the test's pytest ``tmp_path``: each call gets its own
+    fresh HOME inside it, so pytest removes it (no /tmp leak).
+    """
     from housesitter.core import http as http_core
 
     server = ScriptedServer(canned_handler(routes))
-    home = tempfile.mkdtemp()
+    home = tempfile.mkdtemp(dir=tmp_path)
     base_config = {
         "base_url": f"https://192.0.2.1:{server.port}",
         "site": "default",
@@ -425,8 +429,8 @@ def by_id(items):
     return {item["id"]: item for item in items}
 
 
-def test_snapshot_unifi_os_exact_fields():
-    outcome, info = run_case(typical_routes("unifi_os"))
+def test_snapshot_unifi_os_exact_fields(tmp_path):
+    outcome, info = run_case(tmp_path, typical_routes("unifi_os"))
     assert outcome.exit_code == 0
     env = outcome.envelope
     assert env["ok"] is True
@@ -510,9 +514,9 @@ def test_snapshot_unifi_os_exact_fields():
     assert all(item.target != "/" for item in info["requests"])
 
 
-def test_snapshot_classic_exact_source_and_flows():
+def test_snapshot_classic_exact_source_and_flows(tmp_path):
     outcome, info = run_case(
-        typical_routes("classic"), config={"flavor": "classic"}
+        tmp_path, typical_routes("classic"), config={"flavor": "classic"}
     )
     assert outcome.exit_code == 0
     env = outcome.envelope
@@ -546,8 +550,8 @@ def edge_routes(extra=None, sta_file="edge_sta.json"):
     return routes
 
 
-def test_edge_cases():
-    outcome, info = run_case(edge_routes())
+def test_edge_cases(tmp_path):
+    outcome, info = run_case(tmp_path, edge_routes())
     assert outcome.exit_code == 0
     data = outcome.envelope["data"]
     aps = by_id(data["aps"])
@@ -727,8 +731,8 @@ def assert_no_secrets(outcome, info):
             assert secret not in text
 
 
-def test_hostile_output_sanitised_and_truncated():
-    outcome, info = run_case(hostile_routes())
+def test_hostile_output_sanitised_and_truncated(tmp_path):
+    outcome, info = run_case(tmp_path, hostile_routes())
     assert outcome.exit_code == 0
     env = outcome.envelope
     assert env["ok"] is True
@@ -783,9 +787,9 @@ def test_hostile_output_sanitised_and_truncated():
     )
 
 
-def test_hostile_error_text_never_leaves():
+def test_hostile_error_text_never_leaves(tmp_path):
     outcome, info = run_case(
-        hostile_routes(
+        tmp_path, hostile_routes(
             sta_body=fixture_bytes("hostile_error.json"),
         )
     )
@@ -798,11 +802,11 @@ def test_hostile_error_text_never_leaves():
     assert len(logout_requests(info)) == 1
 
 
-def test_detection_auto_refused_by_core_sends_no_login():
+def test_detection_auto_refused_by_core_sends_no_login(tmp_path):
     # The core HTTP client refuses the bare root path, so GET / detection
     # cannot run yet. The module must fail with config_invalid before any
     # request, and must never try both login paths with the password.
-    outcome, info = run_case(typical_routes("classic"), config={"flavor": "auto"})
+    outcome, info = run_case(tmp_path, typical_routes("classic"), config={"flavor": "auto"})
     assert outcome.exit_code == 1
     assert outcome.envelope["error"]["code"] == "config_invalid"
     assert "flavor" in outcome.envelope["error"]["message"]
@@ -810,26 +814,26 @@ def test_detection_auto_refused_by_core_sends_no_login():
     assert login_requests(info) == []
 
 
-def test_detection_explicit_flavor_skips_probe():
+def test_detection_explicit_flavor_skips_probe(tmp_path):
     outcome, info = run_case(
-        typical_routes("classic"), config={"flavor": "classic"}
+        tmp_path, typical_routes("classic"), config={"flavor": "classic"}
     )
     assert outcome.exit_code == 0
     assert outcome.envelope["source"]["flavor"] == "classic"
     assert [item.target for item in login_requests(info)] == ["/api/login"]
     outcome, info = run_case(
-        typical_routes("unifi_os"), config={"flavor": "unifi_os"}
+        tmp_path, typical_routes("unifi_os"), config={"flavor": "unifi_os"}
     )
     assert outcome.exit_code == 0
     assert [item.target for item in login_requests(info)] == [
         "/api/auth/login"]
 
 
-def test_no_retry_on_401_and_no_logout_without_login():
+def test_no_retry_on_401_and_no_logout_without_login(tmp_path):
     routes = typical_routes("unifi_os")
     routes[("POST", "/api/auth/login")] = Canned(
         status=401, body=b'{"meta":{"rc":"error"}}')
-    outcome, info = run_case(routes)
+    outcome, info = run_case(tmp_path, routes)
     assert outcome.exit_code == 1
     assert outcome.envelope["error"]["code"] == "upstream_auth"
     assert len(login_requests(info)) == 1
@@ -837,18 +841,18 @@ def test_no_retry_on_401_and_no_logout_without_login():
     assert info["saved_obj"] is None
 
 
-def test_400_login_is_auth_failure_without_retry():
+def test_400_login_is_auth_failure_without_retry(tmp_path):
     routes = typical_routes("unifi_os")
     routes[("POST", "/api/auth/login")] = Canned(
         status=400, body=b'{"meta":{"rc":"error"}}')
-    outcome, info = run_case(routes)
+    outcome, info = run_case(tmp_path, routes)
     assert outcome.exit_code == 1
     assert outcome.envelope["error"]["code"] == "upstream_auth"
     assert len(login_requests(info)) == 1
     assert logout_requests(info) == []
 
 
-def test_logout_attempted_on_every_failure_after_login():
+def test_logout_attempted_on_every_failure_after_login(tmp_path):
     prefix = "/proxy/network/api/s/default"
     variants = {
         "sysinfo-500": {
@@ -867,18 +871,18 @@ def test_logout_attempted_on_every_failure_after_login():
     for name, override in variants.items():
         routes = typical_routes("unifi_os")
         routes.update(override)
-        outcome, info = run_case(routes)
+        outcome, info = run_case(tmp_path, routes)
         assert outcome.exit_code == 1, name
         assert outcome.envelope["error"]["code"] == "upstream_unexpected", name
         assert len(logout_requests(info)) == 1, name
 
 
-def test_logout_attempted_on_timeout():
+def test_logout_attempted_on_timeout(tmp_path):
     prefix = "/proxy/network/api/s/default"
     routes = typical_routes("unifi_os")
     routes[("GET", prefix + "/stat/sysinfo")] = Canned(
         status=200, body=fixture_bytes("unifi_os_sysinfo.json"), sleep_s=5)
-    outcome, info = run_case(routes, config={"request_timeout_s": 1})
+    outcome, info = run_case(tmp_path, routes, config={"request_timeout_s": 1})
     assert outcome.exit_code == 1
     assert outcome.envelope["error"]["code"] == "timeout"
     assert len(logout_requests(info)) == 1
@@ -920,15 +924,15 @@ def test_allow_list_refusals():
             raise AssertionError(f"not refused: {method} {target}")
 
 
-def test_site_validation_rejects_traversal():
+def test_site_validation_rejects_traversal(tmp_path):
     for site in ("../x", "a/b"):
         outcome, _ = run_case(
-            typical_routes("unifi_os"), config={"site": site})
+            tmp_path, typical_routes("unifi_os"), config={"site": site})
         assert outcome.exit_code == 1
         assert outcome.envelope["error"]["code"] == "config_invalid"
 
 
-def test_base_url_validation():
+def test_base_url_validation(tmp_path):
     userinfo = "https://" + "user" + ":" + "pass" + "@192.0.2.1/"
     for base_url in (
         "http://192.0.2.1/",
@@ -937,7 +941,7 @@ def test_base_url_validation():
         "https://192.0.2.1/?x=1",
     ):
         outcome, _ = run_case(
-            typical_routes("unifi_os"), config={"base_url": base_url})
+            tmp_path, typical_routes("unifi_os"), config={"base_url": base_url})
         assert outcome.exit_code == 1
         assert outcome.envelope["error"]["code"] == "config_invalid"
 
@@ -945,11 +949,11 @@ def test_base_url_validation():
 class SavedHome:
     """One temp HOME + fixture server kept alive across snapshot and get."""
 
-    def __init__(self, routes, config=None, identifiers="full"):
+    def __init__(self, tmp_path, routes, config=None, identifiers="full"):
         from housesitter.core import http as http_core
 
         self.server = ScriptedServer(canned_handler(routes))
-        self.home = tempfile.mkdtemp()
+        self.home = tempfile.mkdtemp(dir=tmp_path)
         base_config = {
             "base_url": f"https://192.0.2.1:{self.server.port}",
             "site": "default",
@@ -998,8 +1002,8 @@ class SavedHome:
         self.server.close()
 
 
-def test_get_round_trip_and_paging_chain():
-    home = SavedHome(typical_routes("unifi_os"))
+def test_get_round_trip_and_paging_chain(tmp_path):
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1055,11 +1059,11 @@ def test_get_round_trip_and_paging_chain():
         home.close()
 
 
-def test_get_large_paging_chain_returns_every_client_once():
+def test_get_large_paging_chain_returns_every_client_once(tmp_path):
     routes = typical_routes("unifi_os")
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=fixture_bytes("large_sta.json"))
-    home = SavedHome(routes)
+    home = SavedHome(tmp_path, routes)
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1106,11 +1110,11 @@ def _tamper_saved(home, saved_id):
     return saved, path
 
 
-def test_get_with_damaged_ids_fails_instead_of_shifting_offsets():
+def test_get_with_damaged_ids_fails_instead_of_shifting_offsets(tmp_path):
     # Regression (F1): a locally edited saved file with an invalid AP or
     # client id must fail a section get as damaged rather than drop
     # records (which would shift paging offsets).
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1138,12 +1142,12 @@ def test_get_with_damaged_ids_fails_instead_of_shifting_offsets():
         home.close()
 
 
-def test_get_revalidates_saved_fields_and_recomputes_summary():
+def test_get_revalidates_saved_fields_and_recomputes_summary(tmp_path):
     # Regression (F1): control characters smuggled into a saved file must
     # not reach plain-string fields the runner does not sanitise, a bad
     # site must fail as damaged, and the whole-snapshot summary must be
     # recomputed from the re-validated records.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1192,26 +1196,26 @@ def test_get_revalidates_saved_fields_and_recomputes_summary():
         home.close()
 
 
-def test_base_url_port_must_be_valid():
+def test_base_url_port_must_be_valid(tmp_path):
     # Regression (F3): an out-of-range port used to pass config validation
     # and fail later as upstream_unexpected. It must be config_invalid.
     for bad_port in ("0", "00", "080", "65536", "99999", "100000"):
         outcome, _ = run_case(
-            typical_routes("unifi_os"),
+            tmp_path, typical_routes("unifi_os"),
             config={"base_url": f"https://192.0.2.1:{bad_port}"},
         )
         assert outcome.exit_code == 1, bad_port
         assert outcome.envelope["error"]["code"] == "config_invalid", bad_port
     for good_port in ("1", "80", "443", "8443", "65535"):
         outcome, _ = run_case(
-            typical_routes("unifi_os"),
+            tmp_path, typical_routes("unifi_os"),
             config={"base_url": f"https://192.0.2.1:{good_port}"},
         )
         assert outcome.exit_code == 0, good_port
 
 
-def test_identifiers_none_removes_ids():
-    home = SavedHome(typical_routes("unifi_os"), identifiers="none")
+def test_identifiers_none_removes_ids(tmp_path):
+    home = SavedHome(tmp_path, typical_routes("unifi_os"), identifiers="none")
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1238,23 +1242,23 @@ def test_identifiers_none_removes_ids():
         home.close()
 
 
-def test_budget_on_non_ascii_heavy_fixture():
-    outcome, _ = run_case(hostile_routes())
+def test_budget_on_non_ascii_heavy_fixture(tmp_path):
+    outcome, _ = run_case(tmp_path, hostile_routes())
     assert outcome.exit_code == 0
     stdout_text = envelope.serialize(outcome.envelope)
     assert len(json.dumps(stdout_text)) - 2 <= BUDGET_BYTES
-    outcome, _ = run_case(typical_routes("unifi_os"))
+    outcome, _ = run_case(tmp_path, typical_routes("unifi_os"))
     assert outcome.exit_code == 0
     assert outcome.envelope["truncated"] is False
     stdout_text = envelope.serialize(outcome.envelope)
     assert len(json.dumps(stdout_text)) - 2 <= BUDGET_BYTES
 
 
-def test_check_reads_only_sysinfo():
+def test_check_reads_only_sysinfo(tmp_path):
     from housesitter.core.context import ModuleContext
     from housesitter.core.store import FileStore
 
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         module = UniFiWifi()
         ctx = ModuleContext(
@@ -1306,7 +1310,7 @@ def test_compact_form_drops_documented_fields():
     }
 
 
-def test_client_ip_with_ipv6_scope_text_is_dropped():
+def test_client_ip_with_ipv6_scope_text_is_dropped(tmp_path):
     # Regression: Python's ipaddress accepts "2001:db8::1%<any text>", and `ip`
     # is an identifier field the runner does not sanitise. Scoped
     # addresses must never carry upstream text to Muse.
@@ -1316,7 +1320,7 @@ def test_client_ip_with_ipv6_scope_text_is_dropped():
     sta["data"][1]["ip"] = "2001:db8::10"
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     by_id = {c["id"]: c for c in outcome.envelope["data"]["clients"]}
     assert by_id[sta["data"][0]["mac"].lower()]["ip"] is None
@@ -1324,7 +1328,7 @@ def test_client_ip_with_ipv6_scope_text_is_dropped():
     assert "Ignore previous" not in json.dumps(outcome.envelope)
 
 
-def test_duplicate_ap_mac_keeps_first_and_warns():
+def test_duplicate_ap_mac_keeps_first_and_warns(tmp_path):
     # Regression (F2): duplicate AP MACs must keep the first record and
     # count the rest; client ap_name must come from the kept AP.
     routes = typical_routes("unifi_os")
@@ -1334,7 +1338,7 @@ def test_duplicate_ap_mac_keeps_first_and_warns():
     dev["data"] = [dev["data"][0], dupe] + dev["data"][1:]
     routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
         status=200, body=json.dumps(dev).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     aps = {item["id"]: item for item in outcome.envelope["data"]["aps"]}
     assert aps[AP1]["name"] == "Living Room"
@@ -1345,7 +1349,7 @@ def test_duplicate_ap_mac_keeps_first_and_warns():
     assert clients["02:00:00:00:01:02"]["ap_name"] == "Living Room"
 
 
-def test_huge_numbers_become_null_instead_of_killing_snapshot():
+def test_huge_numbers_become_null_instead_of_killing_snapshot(tmp_path):
     # Regression (F4): a 400-digit tx_rate hit OverflowError on /1000 and
     # killed the whole snapshot. Huge values must normalise to null.
     routes = typical_routes("unifi_os")
@@ -1354,7 +1358,7 @@ def test_huge_numbers_become_null_instead_of_killing_snapshot():
     sta["data"][0]["uptime"] = 10**400
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     clients = {c["id"]: c for c in outcome.envelope["data"]["clients"]}
     victim = clients[sta["data"][0]["mac"].lower()]
@@ -1365,7 +1369,7 @@ def test_huge_numbers_become_null_instead_of_killing_snapshot():
     assert victim["signal_dbm"] == sta["data"][0]["signal"]
 
 
-def test_uppercase_macs_are_lowercased_and_still_join():
+def test_uppercase_macs_are_lowercased_and_still_join(tmp_path):
     # F7: uppercase MACs (device, sta, and ap_mac) normalise to
     # lowercase and the client still joins its AP.
     routes = typical_routes("unifi_os")
@@ -1378,7 +1382,7 @@ def test_uppercase_macs_are_lowercased_and_still_join():
         status=200, body=json.dumps(dev).encode("utf-8"))
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     data = outcome.envelope["data"]
     assert by_id(data["aps"])["02:00:00:00:ab:cd"]["name"] == "Living Room"
@@ -1393,7 +1397,7 @@ def test_uppercase_macs_are_lowercased_and_still_join():
             assert item["ap_id"] == item["ap_id"].lower()
 
 
-def test_null_names_sort_after_named_ones():
+def test_null_names_sort_after_named_ones(tmp_path):
     # F7: a null AP name and a null client name sort after named ones.
     routes = typical_routes("unifi_os")
     dev = json.loads(fixture_bytes("unifi_os_device.json"))
@@ -1408,7 +1412,7 @@ def test_null_names_sort_after_named_ones():
         status=200, body=json.dumps(dev).encode("utf-8"))
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     data = outcome.envelope["data"]
     assert [item["id"] for item in data["aps"]] == [AP1, AP2, AP3]
@@ -1420,7 +1424,7 @@ def test_null_names_sort_after_named_ones():
     assert all(item["name"] is not None for item in group[:-1])
 
 
-def test_check_logs_out_when_sysinfo_fails():
+def test_check_logs_out_when_sysinfo_fails(tmp_path):
     # F7: check() still logs out when the sysinfo read fails (and raises).
     from housesitter.core.context import ModuleContext
     from housesitter.core.store import FileStore
@@ -1428,7 +1432,7 @@ def test_check_logs_out_when_sysinfo_fails():
     routes = typical_routes("unifi_os")
     routes[("GET", "/proxy/network/api/s/default/stat/sysinfo")] = Canned(
         status=500, body=b"x")
-    home = SavedHome(routes)
+    home = SavedHome(tmp_path, routes)
     try:
         module = UniFiWifi()
         ctx = ModuleContext(
@@ -1461,10 +1465,10 @@ def test_check_logs_out_when_sysinfo_fails():
         home.close()
 
 
-def test_get_offset_past_end_returns_empty_page():
+def test_get_offset_past_end_returns_empty_page(tmp_path):
     # F7: an offset past the end of a section is an empty page, not an
     # error: truncated false and more null.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1537,7 +1541,7 @@ def test_tls_failure_names_the_tls_options(tmp_path):
     assert len(sent) == 1
 
 
-def test_get_keeps_numeric_channel_setting_from_collection():
+def test_get_keeps_numeric_channel_setting_from_collection(tmp_path):
     # Regression: collection turns a numeric channel (even negative) into
     # its decimal string; get's re-validation must accept what collection
     # produced, so a saved snapshot reads back unchanged.
@@ -1548,7 +1552,7 @@ def test_get_keeps_numeric_channel_setting_from_collection():
             radio["channel"] = -1
     routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
         status=200, body=json.dumps(device).encode("utf-8"))
-    home = SavedHome(routes)
+    home = SavedHome(tmp_path, routes)
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1563,7 +1567,7 @@ def test_get_keeps_numeric_channel_setting_from_collection():
         home.close()
 
 
-def test_missing_ssid_is_its_own_group_listed_last():
+def test_missing_ssid_is_its_own_group_listed_last(tmp_path):
     # Review 2 N1: a wireless client without essid forms a {ssid: null}
     # group, listed after the named SSIDs (spec §4.3).
     routes = typical_routes("unifi_os")
@@ -1573,7 +1577,7 @@ def test_missing_ssid_is_its_own_group_listed_last():
     wireless[1]["essid"] = 7
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     groups = outcome.envelope["data"]["summary"]["clients_by_ssid"]
     assert groups[-1] == {"ssid": None, "count": 2}
@@ -1581,25 +1585,25 @@ def test_missing_ssid_is_its_own_group_listed_last():
     assert sum(g["count"] for g in groups) == 14
 
 
-def test_logout_failure_never_replaces_the_result():
+def test_logout_failure_never_replaces_the_result(tmp_path):
     # Review 2 N3: a failed logout is logged, and the snapshot still
     # succeeds; check() still reports its findings.
     routes = typical_routes("unifi_os")
     routes[("POST", "/api/auth/logout")] = Canned(status=500, body=b"{}")
-    outcome, info = run_case(routes)
+    outcome, info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     assert len(outcome.envelope["data"]["clients"]) == 14
     assert len(logout_requests(info)) == 1
     routes[("POST", "/api/auth/logout")] = Canned(status=401, body=b"{}")
-    outcome, info = run_case(routes)
+    outcome, info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     assert len(logout_requests(info)) == 1
 
 
-def test_get_nulls_out_of_range_cumulative_retry_in_saved_file():
+def test_get_nulls_out_of_range_cumulative_retry_in_saved_file(tmp_path):
     # Review 2 N2: re-validation applies the 0-100 percent range to the
     # cumulative retry figures too.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         saved_id = snap.envelope["saved"]
@@ -1618,7 +1622,7 @@ def test_get_nulls_out_of_range_cumulative_retry_in_saved_file():
         home.close()
 
 
-def test_non_string_enum_values_become_null_instead_of_failing():
+def test_non_string_enum_values_become_null_instead_of_failing(tmp_path):
     # Red-team 1: a dict or list where an enum string belongs raised
     # TypeError (unhashable) and killed the whole snapshot.
     routes = typical_routes("unifi_os")
@@ -1627,7 +1631,7 @@ def test_non_string_enum_values_become_null_instead_of_failing():
     dev["data"][0]["uplink"] = {"type": []}
     routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
         status=200, body=json.dumps(dev).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     ap = by_id(outcome.envelope["data"]["aps"])[dev["data"][0]["mac"].lower()]
     assert ap["uplink_type"] is None
@@ -1635,7 +1639,7 @@ def test_non_string_enum_values_become_null_instead_of_failing():
     assert modes == {"2.4GHz": None, "5GHz": "high", "6GHz": "auto"}
 
 
-def test_numeric_strings_are_range_checked_before_rounding():
+def test_numeric_strings_are_range_checked_before_rounding(tmp_path):
     # Red-team 1: "9007199254740993" rounded to 2**53 and passed the
     # magnitude check; "100.000000000000001" rounded to 100 and passed
     # the percent range. Both must become null.
@@ -1646,7 +1650,7 @@ def test_numeric_strings_are_range_checked_before_rounding():
     sta["data"][1]["uptime"] = "3600"
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     clients = by_id(outcome.envelope["data"]["clients"])
     victim = clients[sta["data"][0]["mac"].lower()]
@@ -1655,18 +1659,18 @@ def test_numeric_strings_are_range_checked_before_rounding():
     assert clients[sta["data"][1]["mac"].lower()]["connected_s"] == 3600
 
 
-def test_logout_http_error_status_is_logged(caplog):
+def test_logout_http_error_status_is_logged(caplog, tmp_path):
     # Red-team 1 nit: a logout answered with HTTP 500 was silently
     # ignored; spec §5 says a failed logout is logged with fixed text.
     routes = typical_routes("unifi_os")
     routes[("POST", "/api/auth/logout")] = Canned(status=500, body=b"{}")
     with caplog.at_level("INFO", logger="housesitter"):
-        outcome, _info = run_case(routes)
+        outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     assert any(r.getMessage() == "UniFi logout failed" for r in caplog.records)
 
 
-def test_ordinary_decimal_strings_still_read():
+def test_ordinary_decimal_strings_still_read(tmp_path):
     # Guard for the red-team 1 fix: exact range checks must not null
     # ordinary decimal strings that floats cannot represent exactly.
     routes = typical_routes("unifi_os")
@@ -1675,7 +1679,7 @@ def test_ordinary_decimal_strings_still_read():
     sta["data"][0]["signal"] = "-61"
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     victim = by_id(outcome.envelope["data"]["clients"])[
         sta["data"][0]["mac"].lower()]
@@ -1701,14 +1705,14 @@ def _device_with_extra_radios(counts):
     return dev
 
 
-def test_collection_radio_cap_keeps_first_16_and_counts_across_aps():
+def test_collection_radio_cap_keeps_first_16_and_counts_across_aps(tmp_path):
     # D1: per AP the first 16 radio records are kept in order; drops
     # are counted across APs with one warning.
     routes = typical_routes("unifi_os")
     dev = _device_with_extra_radios({0: 17, 1: 18})
     routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
         status=200, body=json.dumps(dev).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     aps = by_id(outcome.envelope["data"]["aps"])
     kept = aps["02:00:00:00:00:01"]["radios"]
@@ -1720,13 +1724,13 @@ def test_collection_radio_cap_keeps_first_16_and_counts_across_aps():
     ]
 
 
-def test_collection_radio_cap_singular_warning():
+def test_collection_radio_cap_singular_warning(tmp_path):
     # D1: exactly one dropped radio uses the singular warning.
     routes = typical_routes("unifi_os")
     dev = _device_with_extra_radios({0: 17})
     routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
         status=200, body=json.dumps(dev).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     aps = by_id(outcome.envelope["data"]["aps"])
     assert len(aps["02:00:00:00:00:01"]["radios"]) == 16
@@ -1735,23 +1739,23 @@ def test_collection_radio_cap_singular_warning():
     ]
 
 
-def test_collection_16_radios_needs_no_warning():
+def test_collection_16_radios_needs_no_warning(tmp_path):
     # D1 guard: an AP exactly at the cap keeps everything silently.
     routes = typical_routes("unifi_os")
     dev = _device_with_extra_radios({0: 16})
     routes[("GET", "/proxy/network/api/s/default/stat/device")] = Canned(
         status=200, body=json.dumps(dev).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     aps = by_id(outcome.envelope["data"]["aps"])
     assert len(aps["02:00:00:00:00:01"]["radios"]) == 16
     assert outcome.envelope["warnings"] == []
 
 
-def test_get_saved_ap_with_17_radios_is_damaged():
+def test_get_saved_ap_with_17_radios_is_damaged(tmp_path):
     # D1: a saved AP with more than 16 radios fails whole and section
     # get as damaged instead of shifting paging offsets.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1794,10 +1798,10 @@ def _maxed_radio(index):
     }
 
 
-def test_get_saved_ap_with_16_max_length_radios_still_pages():
+def test_get_saved_ap_with_16_max_length_radios_still_pages(tmp_path):
     # D1: one saved AP at the cap with every string field at maximum
     # length still returns at least one AP per section page (progress).
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1830,11 +1834,11 @@ def _lookalike_routes():
     return routes
 
 
-def test_whole_get_keeps_lookalike_ssid_groups():
+def test_whole_get_keeps_lookalike_ssid_groups(tmp_path):
     # D2: SSIDs that differ only in characters the runner strips stay
     # separate groups that display identically, in the snapshot and in
     # an identical whole get.
-    home = SavedHome(_lookalike_routes())
+    home = SavedHome(tmp_path, _lookalike_routes())
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1854,10 +1858,10 @@ def test_whole_get_keeps_lookalike_ssid_groups():
         home.close()
 
 
-def test_whole_get_damaged_on_wrong_group_count():
+def test_whole_get_damaged_on_wrong_group_count(tmp_path):
     # D2: a saved group count that no longer matches its clients fails
     # the whole get as damaged.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1873,10 +1877,10 @@ def test_whole_get_damaged_on_wrong_group_count():
         home.close()
 
 
-def test_whole_get_damaged_on_extra_group_name():
+def test_whole_get_damaged_on_extra_group_name(tmp_path):
     # D2: a saved group naming clients that do not exist fails as
     # damaged.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1893,10 +1897,10 @@ def test_whole_get_damaged_on_extra_group_name():
         home.close()
 
 
-def test_whole_get_damaged_when_group_missing_without_warning():
+def test_whole_get_damaged_when_group_missing_without_warning(tmp_path):
     # D2: clients whose name appears in no saved group fail as damaged
     # unless a recognised SSID-cap warning accounts for them.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1914,7 +1918,7 @@ def test_whole_get_damaged_when_group_missing_without_warning():
         home.close()
 
 
-def test_whole_get_damaged_on_null_group_not_last():
+def test_whole_get_damaged_on_null_group_not_last(tmp_path):
     # D2: a null group is only valid as the last summary entry.
     routes = typical_routes("unifi_os")
     sta = json.loads(fixture_bytes("unifi_os_sta.json"))
@@ -1922,7 +1926,7 @@ def test_whole_get_damaged_on_null_group_not_last():
     del wireless[0]["essid"]
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    home = SavedHome(routes)
+    home = SavedHome(tmp_path, routes)
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1942,9 +1946,9 @@ def test_whole_get_damaged_on_null_group_not_last():
         home.close()
 
 
-def test_whole_get_damaged_on_bool_group_count():
+def test_whole_get_damaged_on_bool_group_count(tmp_path):
     # D2: a bool is an int in Python but never a valid group count.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1960,9 +1964,9 @@ def test_whole_get_damaged_on_bool_group_count():
         home.close()
 
 
-def test_whole_get_damaged_on_non_list_groups():
+def test_whole_get_damaged_on_non_list_groups(tmp_path):
     # D2: the saved groups must be a list; anything else is damaged.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -1978,10 +1982,10 @@ def test_whole_get_damaged_on_non_list_groups():
         home.close()
 
 
-def test_get_restates_saved_collection_warnings():
+def test_get_restates_saved_collection_warnings(tmp_path):
     # D3: a whole get and both section gets restate the saved
     # collection warnings instead of dropping them.
-    home = SavedHome(edge_routes())
+    home = SavedHome(tmp_path, edge_routes())
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2007,12 +2011,12 @@ def test_get_restates_saved_collection_warnings():
         home.close()
 
 
-def test_get_tls_warning_survives_whole_and_section_get():
+def test_get_tls_warning_survives_whole_and_section_get(tmp_path):
     # D3: the core TLS-insecure warning is saved at collection and
     # restated by whole and section gets.
     expected = "TLS verification disabled by config (unifi_wifi.tls.insecure)"
     home = SavedHome(
-        typical_routes("unifi_os"), config={"tls": {"insecure": True}})
+        tmp_path, typical_routes("unifi_os"), config={"tls": {"insecure": True}})
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2032,11 +2036,11 @@ def test_get_tls_warning_survives_whole_and_section_get():
         home.close()
 
 
-def test_get_drops_unrecognised_saved_warnings():
+def test_get_drops_unrecognised_saved_warnings(tmp_path):
     # D3: saved strings that match no known template are dropped; a
     # recognised core "N more warnings omitted" warning is restated,
     # and bad integers never match.
-    home = SavedHome(edge_routes())
+    home = SavedHome(tmp_path, edge_routes())
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2061,11 +2065,11 @@ def test_get_drops_unrecognised_saved_warnings():
         home.close()
 
 
-def test_get_damaged_on_non_list_warnings():
+def test_get_damaged_on_non_list_warnings(tmp_path):
     # D3: saved top-level warnings must be a list of strings; a missing
     # key means no warnings.
     for bad in ("not-a-list", ["ok", 7], [{"warning": "ok"}]):
-        home = SavedHome(typical_routes("unifi_os"))
+        home = SavedHome(tmp_path, typical_routes("unifi_os"))
         try:
             snap = home.run("housesitter.unifi_wifi.snapshot", {})
             assert snap.exit_code == 0
@@ -2083,7 +2087,7 @@ def test_get_damaged_on_non_list_warnings():
                     "That saved snapshot is damaged."), (bad, params)
         finally:
             home.close()
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2118,12 +2122,12 @@ def _many_ssid_routes(count=300):
     return routes
 
 
-def test_300_distinct_ssids_cap_summary_and_page():
+def test_300_distinct_ssids_cap_summary_and_page(tmp_path):
     # D4 (reviewer repro): zero APs, 300 clients each with a distinct
     # long SSID. The snapshot succeeds with a saved id, caps the
     # summary at 50 groups with a counted warning, pages the clients,
     # and a whole get of the save succeeds and matches.
-    home = SavedHome(_many_ssid_routes())
+    home = SavedHome(tmp_path, _many_ssid_routes())
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2205,7 +2209,7 @@ def test_ssid_field_max_len_declarations_match():
 # --- Red-team re-check (astra 2) regressions --------------------------------
 
 
-def test_huge_exponent_numeric_strings_become_null():
+def test_huge_exponent_numeric_strings_become_null(tmp_path):
     # B1: "1e1000000" overflowed the Decimal context in abs() and killed
     # the whole snapshot; it must become null like any huge number.
     routes = typical_routes("unifi_os")
@@ -2215,7 +2219,7 @@ def test_huge_exponent_numeric_strings_become_null():
     sta["data"][2]["uptime"] = "1e-1000000"
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     clients = by_id(outcome.envelope["data"]["clients"])
     for index in range(3):
@@ -2242,10 +2246,10 @@ def _cap_boundary_routes(extra_names):
     return routes
 
 
-def test_capped_lookalike_groups_round_trip():
+def test_capped_lookalike_groups_round_trip(tmp_path):
     # B2: a look-alike pair straddling the 50-group cap made an untouched
     # save fail as damaged on whole get.
-    home = SavedHome(_cap_boundary_routes(["Z-example", "Z​-example"]))
+    home = SavedHome(tmp_path, _cap_boundary_routes(["Z-example", "Z​-example"]))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2260,10 +2264,10 @@ def test_capped_lookalike_groups_round_trip():
         home.close()
 
 
-def test_duplicated_cap_warning_is_not_damage():
+def test_duplicated_cap_warning_is_not_damage(tmp_path):
     # B5: the same cap warning saved twice is one warning, not a
     # contradiction.
-    home = SavedHome(_cap_boundary_routes(["Y-example", "Z-example"]))
+    home = SavedHome(tmp_path, _cap_boundary_routes(["Y-example", "Z-example"]))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2278,8 +2282,8 @@ def test_duplicated_cap_warning_is_not_damage():
         home.close()
 
 
-def _assert_whole_get_damaged(routes, tamper):
-    home = SavedHome(routes)
+def _assert_whole_get_damaged(tmp_path, routes, tamper):
+    home = SavedHome(tmp_path, routes)
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2295,7 +2299,7 @@ def _assert_whole_get_damaged(routes, tamper):
         home.close()
 
 
-def test_forged_cap_warning_cannot_hide_groups():
+def test_forged_cap_warning_cannot_hide_groups(tmp_path):
     # B4: an omission warning only explains missing groups when the
     # summary really is full (50 named groups) and its counts are
     # possible (groups <= clients).
@@ -2317,11 +2321,11 @@ def test_forged_cap_warning_cannot_hide_groups():
             f"client{'s' if gone['count'] != 1 else ''} was not listed "
             "in the summary"]
 
-    _assert_whole_get_damaged(typical_routes("unifi_os"), drop_all)
-    _assert_whole_get_damaged(typical_routes("unifi_os"), drop_one)
+    _assert_whole_get_damaged(tmp_path, typical_routes("unifi_os"), drop_all)
+    _assert_whole_get_damaged(tmp_path, typical_routes("unifi_os"), drop_one)
 
 
-def test_forged_cap_warning_cannot_hide_the_null_group():
+def test_forged_cap_warning_cannot_hide_the_null_group(tmp_path):
     # B4: the null group is always kept, so a cap warning cannot account
     # for clients with no SSID.
     routes = _cap_boundary_routes(["Y-example", "Z-example", None])
@@ -2334,13 +2338,13 @@ def test_forged_cap_warning_cannot_hide_the_null_group():
             "2 more SSID groups with 2 clients were not listed in the "
             "summary"]
 
-    _assert_whole_get_damaged(routes, drop_null)
+    _assert_whole_get_damaged(tmp_path, routes, drop_null)
 
 
-def test_noncanonical_warning_text_is_dropped():
+def test_noncanonical_warning_text_is_dropped(tmp_path):
     # B6: restated warnings must match a template exactly; wrong grammar
     # is not silently rewritten.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         saved, path = _tamper_saved(home, snap.envelope["saved"])
@@ -2381,10 +2385,10 @@ def _many_ap_routes(count):
     return routes
 
 
-def test_too_many_large_aps_fail_clearly_without_saving():
+def test_too_many_large_aps_fail_clearly_without_saving(tmp_path):
     # B3: summary and aps are never paged, so a house whose unpaged part
     # cannot fit fails with the core's clear size error and saves nothing.
-    home = SavedHome(_many_ap_routes(20))
+    home = SavedHome(tmp_path, _many_ap_routes(20))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code != 0
@@ -2403,10 +2407,10 @@ def test_too_many_large_aps_fail_clearly_without_saving():
         home.close()
 
 
-def test_large_aps_below_the_limit_still_save_and_page_by_section():
+def test_large_aps_below_the_limit_still_save_and_page_by_section(tmp_path):
     # The same worst-case APs, few enough to fit: saved, and a section
     # get of aps walks every AP without a stuck continuation.
-    home = SavedHome(_many_ap_routes(10))
+    home = SavedHome(tmp_path, _many_ap_routes(10))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2444,10 +2448,10 @@ def _no_ap_routes():
     }
 
 
-def test_no_ap_cap_lists_10_and_counts_all():
+def test_no_ap_cap_lists_10_and_counts_all(tmp_path):
     # D5: 25 no-AP records list the first 10 by name, count all 25 in
     # the summary, and warn about the 15 left out.
-    outcome, _info = run_case(_no_ap_routes())
+    outcome, _info = run_case(tmp_path, _no_ap_routes())
     assert outcome.exit_code == 0
     data = outcome.envelope["data"]
     assert data["clients"] == []
@@ -2473,7 +2477,7 @@ def test_no_ap_cap_lists_10_and_counts_all():
         "is_wired"] is None
 
 
-def test_no_ap_cap_singular_warning():
+def test_no_ap_cap_singular_warning(tmp_path):
     # D5: exactly one record beyond the cap uses the singular warning.
     stations = [
         {
@@ -2488,7 +2492,7 @@ def test_no_ap_cap_singular_warning():
         status=200,
         body=json.dumps(
             {"meta": {"rc": "ok"}, "data": stations}).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     data = outcome.envelope["data"]
     assert len(data["no_ap_clients"]) == 10
@@ -2498,7 +2502,7 @@ def test_no_ap_cap_singular_warning():
     ]
 
 
-def test_no_ap_dedup_wifi_record_first_wins():
+def test_no_ap_dedup_wifi_record_first_wins(tmp_path):
     # D5: a no-AP record after a WiFi record with the same MAC is
     # dropped and counted in the duplicate-client warning.
     dup_mac = "02:00:00:00:08:01"
@@ -2517,7 +2521,7 @@ def test_no_ap_dedup_wifi_record_first_wins():
         status=200,
         body=json.dumps(
             {"meta": {"rc": "ok"}, "data": stations}).encode("utf-8"))
-    outcome, _info = run_case(routes)
+    outcome, _info = run_case(tmp_path, routes)
     assert outcome.exit_code == 0
     data = outcome.envelope["data"]
     assert data["clients"] == [{
@@ -2551,10 +2555,10 @@ def test_no_ap_dedup_wifi_record_first_wins():
     ]
 
 
-def test_channel_in_use_may_differ_from_setting_and_idle_radio_nulls():
+def test_channel_in_use_may_differ_from_setting_and_idle_radio_nulls(tmp_path):
     # U1: the 5 GHz radio moved off its configured channel (stats 36,
     # table "100"); the idle 6 GHz radio with no stats reads nulls.
-    outcome, _info = run_case(typical_routes("unifi_os"))
+    outcome, _info = run_case(tmp_path, typical_routes("unifi_os"))
     assert outcome.exit_code == 0
     aps = by_id(outcome.envelope["data"]["aps"])
     moved = aps[AP1]["radios"][1]
@@ -2563,7 +2567,7 @@ def test_channel_in_use_may_differ_from_setting_and_idle_radio_nulls():
     assert aps[AP2]["radios"][2] == OFFICE["radios"][2]
 
 
-def test_truncated_snapshot_keeps_full_no_ap_list():
+def test_truncated_snapshot_keeps_full_no_ap_list(tmp_path):
     # D5: the no-AP list is never paged or compacted: a truncated
     # snapshot still returns it in full, while clients page on.
     routes = typical_routes("unifi_os")
@@ -2581,7 +2585,7 @@ def test_truncated_snapshot_keeps_full_no_ap_list():
     ])
     routes[("GET", "/proxy/network/api/s/default/stat/sta")] = Canned(
         status=200, body=json.dumps(sta).encode("utf-8"))
-    home = SavedHome(routes)
+    home = SavedHome(tmp_path, routes)
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2596,11 +2600,11 @@ def test_truncated_snapshot_keeps_full_no_ap_list():
         home.close()
 
 
-def test_get_reads_snapshot_saved_before_no_ap_change():
+def test_get_reads_snapshot_saved_before_no_ap_change(tmp_path):
     # D5: a save without no_ap_clients reads as an empty list with a
     # zero count; null and blank vendors read as "unknown"; an old
     # no-AP device inside clients is returned as saved.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2629,8 +2633,8 @@ def test_get_reads_snapshot_saved_before_no_ap_change():
         home.close()
 
 
-def _assert_no_ap_damaged(mutate):
-    home = SavedHome(_no_ap_routes())
+def _assert_no_ap_damaged(tmp_path, mutate):
+    home = SavedHome(tmp_path, _no_ap_routes())
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2647,46 +2651,46 @@ def _assert_no_ap_damaged(mutate):
         home.close()
 
 
-def test_get_damaged_on_unreadable_no_ap_record():
+def test_get_damaged_on_unreadable_no_ap_record(tmp_path):
     # Replace (not append) so the list stays at the cap and the record
     # check itself, not the length check, rejects the file.
     def mutate(saved):
         saved["data"]["no_ap_clients"][3] = "nope"
 
-    _assert_no_ap_damaged(mutate)
+    _assert_no_ap_damaged(tmp_path, mutate)
 
 
-def test_get_damaged_on_invalid_no_ap_mac():
+def test_get_damaged_on_invalid_no_ap_mac(tmp_path):
     def mutate(saved):
         saved["data"]["no_ap_clients"][3]["id"] = "not-a-mac"
 
-    _assert_no_ap_damaged(mutate)
+    _assert_no_ap_damaged(tmp_path, mutate)
 
 
-def test_get_damaged_on_too_many_no_ap_records():
+def test_get_damaged_on_too_many_no_ap_records(tmp_path):
     def mutate(saved):
         saved["data"]["no_ap_clients"].append(
             dict(saved["data"]["no_ap_clients"][0]))
 
-    _assert_no_ap_damaged(mutate)
+    _assert_no_ap_damaged(tmp_path, mutate)
 
 
-def test_get_damaged_on_non_integer_no_ap_count():
+def test_get_damaged_on_non_integer_no_ap_count(tmp_path):
     for bad in ("25", 25.0, True, None):
         def mutate(saved, bad=bad):
             saved["data"]["summary"]["no_ap_client_count"] = bad
 
-        _assert_no_ap_damaged(mutate)
+        _assert_no_ap_damaged(tmp_path, mutate)
 
 
-def test_get_damaged_on_no_ap_count_mismatch():
+def test_get_damaged_on_no_ap_count_mismatch(tmp_path):
     def mutate(saved):
         saved["data"]["summary"]["no_ap_client_count"] = 26
 
-    _assert_no_ap_damaged(mutate)
+    _assert_no_ap_damaged(tmp_path, mutate)
 
 
-def test_get_damaged_on_forged_no_ap_cap_warning():
+def test_get_damaged_on_forged_no_ap_cap_warning(tmp_path):
     # The cap warning only explains a full 10-record list whose count
     # is 10 plus the warning's number.
     def short_list(saved):
@@ -2702,15 +2706,15 @@ def test_get_damaged_on_forged_no_ap_cap_warning():
             "15 more client records with no AP were not listed"]
         saved["data"]["summary"]["no_ap_client_count"] = 26
 
-    _assert_no_ap_damaged(short_list)
-    _assert_no_ap_damaged(wrong_count)
+    _assert_no_ap_damaged(tmp_path, short_list)
+    _assert_no_ap_damaged(tmp_path, wrong_count)
 
 
-def test_get_restates_no_ap_cap_warning_and_preserves_count():
+def test_get_restates_no_ap_cap_warning_and_preserves_count(tmp_path):
     # D5/D3: the whole get restates the cap warning, preserves the
     # full count (never recomputed from the capped list), and section
     # gets carry no no_ap_clients key.
-    home = SavedHome(_no_ap_routes())
+    home = SavedHome(tmp_path, _no_ap_routes())
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
@@ -2759,26 +2763,26 @@ def test_compact_form_drops_no_identifier_or_compact_fields_from_no_ap():
         assert path in fields, path
 
 
-def test_get_damaged_on_wired_no_ap_record():
+def test_get_damaged_on_wired_no_ap_record(tmp_path):
     # Gate 2: collection never lists a wired record (is_wired true is
     # excluded), so a saved no-AP record claiming it is damaged.
     def mutate(saved):
         saved["data"]["no_ap_clients"][0]["is_wired"] = True
 
-    _assert_no_ap_damaged(mutate)
+    _assert_no_ap_damaged(tmp_path, mutate)
 
 
-def test_get_damaged_on_two_different_no_ap_cap_warnings():
+def test_get_damaged_on_two_different_no_ap_cap_warnings(tmp_path):
     def mutate(saved):
         saved["warnings"] = [
             "15 more client records with no AP were not listed",
             "16 more client records with no AP were not listed",
         ]
 
-    _assert_no_ap_damaged(mutate)
+    _assert_no_ap_damaged(tmp_path, mutate)
 
 
-def test_non_string_ap_mac_stays_a_wifi_client_with_null_join():
+def test_non_string_ap_mac_stays_a_wifi_client_with_null_join(tmp_path):
     # Spec §4.2: only a missing, null, or blank-string ap_mac makes a
     # no-AP device; any other value is a WiFi client whose AP is unknown.
     routes = typical_routes("unifi_os")
@@ -2790,7 +2794,7 @@ def test_non_string_ap_mac_stays_a_wifi_client_with_null_join():
             {"mac": "02:00:00:00:05:02", "ap_mac": "not-a-mac",
              "radio": "ng", "is_wired": False},
         ]}).encode("utf-8"))
-    home = SavedHome(routes)
+    home = SavedHome(tmp_path, routes)
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0, snap.envelope
@@ -2808,20 +2812,20 @@ def test_non_string_ap_mac_stays_a_wifi_client_with_null_join():
         home.close()
 
 
-def test_get_damaged_on_duplicate_no_ap_ids():
+def test_get_damaged_on_duplicate_no_ap_ids(tmp_path):
     # Deep review: collection never lists one MAC twice, so a saved
     # duplicate is damage, not data (DASHBOARD §4.4 uniqueness).
     def mutate(saved):
         saved["data"]["no_ap_clients"][4]["id"] = (
             saved["data"]["no_ap_clients"][3]["id"])
 
-    _assert_no_ap_damaged(mutate)
+    _assert_no_ap_damaged(tmp_path, mutate)
 
 
-def test_get_damaged_when_no_ap_id_is_also_a_wifi_client():
+def test_get_damaged_when_no_ap_id_is_also_a_wifi_client(tmp_path):
     # Deep review: a MAC in both lists cannot come from collection (the
     # WiFi record wins), so the saved file is damaged.
-    home = SavedHome(typical_routes("unifi_os"))
+    home = SavedHome(tmp_path, typical_routes("unifi_os"))
     try:
         snap = home.run("housesitter.unifi_wifi.snapshot", {})
         assert snap.exit_code == 0
