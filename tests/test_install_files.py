@@ -189,6 +189,24 @@ def test_unit_denies_privilege_and_writes():
     assert filters == ["@system-service", "~@privileged @resources"]
 
 
+# systemd.exec: these can create writable directories or introduce writable
+# mounts despite ProtectSystem/ProtectHome. None is needed by this unit.
+WRITABLE_PATH_DIRECTIVES = {
+    "ReadWritePaths", "ReadWriteDirectories", "BindPaths",
+    "RuntimeDirectory", "StateDirectory", "CacheDirectory", "LogsDirectory",
+    "ConfigurationDirectory", "TemporaryFileSystem", "MountImages",
+    "ExtensionImages", "ExtensionDirectories", "RootDirectory", "RootImage",
+    "RootEphemeral",
+}
+
+
+def test_unit_has_no_writable_path_exceptions():
+    _, _, triples = rendered_unit()
+    for section, key, _ in triples:
+        if section == "Service":
+            assert key not in WRITABLE_PATH_DIRECTIVES, key
+
+
 TIMER_LIKE = re.compile(
     r"timer|calendar|OnActive|OnBoot|OnStartup|cron|poll|wake|alarm",
     re.IGNORECASE,
