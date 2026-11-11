@@ -198,6 +198,13 @@ def fence(text: str, lang: str = "") -> str:
     ticks = "```"
     while ticks in text:
         ticks += "`"
+    # The closing fence must start its own CommonMark line, or it becomes
+    # part of the last content line and a later opening fence closes the
+    # block instead: PR text would then render as Markdown. CommonMark
+    # recognises LF, CRLF and lone CR as line endings, so only a text
+    # without any of those endings needs one added.
+    if text and not text.endswith(("\n", "\r")):
+        text += "\n"
     return f"{ticks}{lang}\n{text}{ticks}\n"
 
 

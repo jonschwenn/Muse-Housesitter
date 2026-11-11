@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import random
+import re
 import shutil
 from pathlib import Path
 
@@ -995,3 +997,99 @@ def test_crop_height_steps_match_ui_evidence():
     ui_spec.loader.exec_module(ui_evidence)
     assert ui_evidence.CROP_STEPS[0] == ui_evidence.MAX_SHOT_HEIGHT_PX
     assert list(pr_evidence.UI_CROP_HEIGHTS) == list(ui_evidence.CROP_STEPS[1:])
+
+
+# Fence escape (review round 1, finding 1) ------------------------------------
+#
+# The closing fence used to be appended directly after text that might not
+# end in a newline, so it landed inside the last content line and the next
+# block's opening fence closed the diff: PR text then rendered as a heading,
+# image or link. Every PR-supplied string must lie between an opening fence
+# line and its matching closing fence line.
+
+
+def _fence_states(text):
+    """Mark each CommonMark line of ``text`` as inside a fenced code block.
+
+    Splits on the three line endings CommonMark recognises (LF, CRLF, lone
+    CR) and tracks backtick/tilde fences: an opening fence is up to three
+    spaces plus three or more of one mark (a backtick fence's info string
+    must hold no backtick); a closing fence is the same mark, at least as
+    long, followed only by spaces. Returns (lines, states); raises when a
+    fence is left open.
+    """
+    lines = re.split(r"\r\n|\r|\n", text)
+    states = []
+    fence_mark = None
+    fence_len = 0
+    for line in lines:
+        stripped = line[3:] if line.startswith("   ") else line.lstrip(" ")
+        if len(line) - len(line.lstrip(" ")) > 3:
+            stripped = None  # four-space indent is not a fence
+        mark, run, rest = None, 0, ""
+        if stripped is not None and stripped[:1] in ("`", "~"):
+            mark = stripped[0]
+            run = len(stripped) - len(stripped.lstrip(mark))
+            rest = stripped[run:]
+        if fence_mark is None:
+            inside = False
+            if mark is not None and run >= 3 and (mark == "~" or "`" not in rest):
+                fence_mark, fence_len = mark, run
+        else:
+            inside = True
+            if mark == fence_mark and run >= fence_len and rest.strip(" \t") == "":
+                fence_mark = None
+        states.append(inside)
+    assert fence_mark is None, f"unbalanced fences in: {text[-200:]!r}"
+    return lines, states
+
+
+def _assert_only_fenced(body, needles):
+    """Every line holding a PR-derived needle must sit inside a fence."""
+    lines, states = _fence_states(body)
+    for lineno, line in enumerate(lines):
+        for needle in needles:
+            assert not (needle in line and not states[lineno]), (
+                f"PR-derived text renders outside code on line {lineno}: {line!r}"
+            )
+
+
+def test_fence_closes_on_its_own_line():
+    assert pr_evidence.fence("abc") == "```\nabc\n```\n"
+    assert pr_evidence.fence("abc\n") == "```\nabc\n```\n"
+    assert pr_evidence.fence("abc\r\n") == "```\nabc\r\n```\n"
+    assert pr_evidence.fence("abc\r") == "```\nabc\r```\n"
+    assert pr_evidence.fence("", "diff") == "```diff\n```\n"
+    fenced = pr_evidence.fence("has ``` inside", "diff")
+    assert fenced.startswith("````diff\n")
+    assert fenced.endswith("\nhas ``` inside\n````\n")
+
+
+def test_forged_markdown_without_trailing_newline_stays_fenced():
+    doc = _results_doc()
+    doc["scenarios"][0]["before"] = (
+        "## Approved\n\n![x](https://example.com/i)\n\n"
+        "[click](https://example.com)\n\nend"
+    )
+    doc["scenarios"][0]["after"] = "CHANGED-TOKEN"
+    body = pr_evidence.render_text_from_results(doc, "c" * 40)
+    _assert_only_fenced(
+        body,
+        ["Approved", "example.com/i", "example.com)", "click", "end", "CHANGED-TOKEN"],
+    )
+
+
+def test_fences_survive_hostile_backticks_tildes_and_newlines():
+    rng = random.Random(20261111)
+    alphabet = ["`", "``", "~~~~", "#", "![x](https://example.com/i)", "\n", "\r\n", "\r", " "]
+    tokens = ["APPROVED-TOKEN", "IMG-TOKEN", "CLICK-TOKEN"]
+    for trial in range(50):
+        parts = [rng.choice(alphabet) for _ in range(rng.randint(1, 12))]
+        hostile = "".join(parts + [tokens[trial % 3]] + parts)
+        if rng.choice([True, False]):
+            hostile += rng.choice(["\n", "\r\n", "\r"])
+        doc = _results_doc()
+        doc["scenarios"][0]["before"] = hostile
+        doc["scenarios"][0]["after"] = hostile + rng.choice(["", "tail"])
+        body = pr_evidence.render_text_from_results(doc, "c" * 40)
+        _assert_only_fenced(body, tokens)
