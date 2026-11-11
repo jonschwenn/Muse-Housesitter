@@ -374,19 +374,94 @@ def test_unknown_critical_chunk_is_rejected():
     assert evidence_checks.validate_png(data)
 
 
+def _png_chunks(extra_before_idat=(), extra_after_idat=(), color_type=6):
+    """A small PNG with extra chunks around the single IDAT."""
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+    raw = b"".join(
+        b"\x00" + bytes([1, 2, 3, 4])[:channels] * 4 for _ in range(4)
+    )
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, color_type, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + b"".join(_chunk(t, d) for t, d in extra_before_idat)
+        + _chunk(b"IDAT", zlib.compress(raw))
+        + b"".join(_chunk(t, d) for t, d in extra_after_idat)
+        + _chunk(b"IEND", b"")
+    )
+
+
 def test_allow_listed_chunks_pass():
-    # Only IHDR/PLTE/IDAT/IEND are accepted (review round 1, finding 5):
-    # the old "ancillary chunks pass" rule is gone.
-    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
+    # Only IHDR/IDAT/IEND are accepted (review round 1, finding 5, and
+    # round 2, finding 3): the old "ancillary chunks pass" rule is gone,
+    # and so is the PLTE exception.
+    assert evidence_checks.validate_png(_png_chunks()) == []
+
+
+# Review round 2, finding 3: Chrome screenshots are RGB/RGBA and never use
+# palettes, so PLTE is refused outright (and colour type 3 with the other
+# non-RGB/RGBA types), and IDAT chunks must be consecutive.
+
+
+def test_one_byte_plte_after_ihdr_is_rejected():
+    assert evidence_checks.validate_png(
+        _png_chunks(extra_before_idat=[(b"PLTE", b"x")])
+    )
+
+
+def test_million_byte_plte_is_rejected():
+    assert evidence_checks.validate_png(
+        _png_chunks(extra_before_idat=[(b"PLTE", bytes(1_000_000))])
+    )
+
+
+def test_duplicate_plte_is_rejected():
+    assert evidence_checks.validate_png(
+        _png_chunks(
+            extra_before_idat=[(b"PLTE", bytes([1, 2, 3]))] * 2,
+        )
+    )
+
+
+def test_plte_after_idat_is_rejected():
+    assert evidence_checks.validate_png(
+        _png_chunks(extra_after_idat=[(b"PLTE", bytes([1, 2, 3]))])
+    )
+
+
+def test_idat_split_by_plte_is_rejected():
     raw = b"".join(b"\x00" + bytes([1, 2, 3, 4]) * 4 for _ in range(4))
+    blob = zlib.compress(raw)
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
     data = (
         b"\x89PNG\r\n\x1a\n"
         + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", blob[: len(blob) // 2])
         + _chunk(b"PLTE", bytes([1, 2, 3]))
-        + _chunk(b"IDAT", zlib.compress(raw))
+        + _chunk(b"IDAT", blob[len(blob) // 2 :])
+        + _chunk(b"IEND", b"")
+    )
+    assert evidence_checks.validate_png(data)
+
+
+def test_consecutive_idat_chunks_pass():
+    # Splitting the one zlib stream over several IDAT chunks is legal PNG;
+    # only interleaved chunks break consecutiveness.
+    raw = b"".join(b"\x00" + bytes([1, 2, 3, 4]) * 4 for _ in range(4))
+    blob = zlib.compress(raw)
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
+    data = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", blob[: len(blob) // 2])
+        + _chunk(b"IDAT", blob[len(blob) // 2 :])
         + _chunk(b"IEND", b"")
     )
     assert evidence_checks.validate_png(data) == []
+
+
+def test_palette_colour_type_is_rejected():
+    assert evidence_checks.validate_png(_png_chunks(color_type=3))
 
 
 def test_decompression_bomb_is_rejected_with_a_bound():

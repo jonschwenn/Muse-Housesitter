@@ -338,12 +338,15 @@ PNG_MAX_HEIGHT = 120_000
 PNG_MAX_PIXELS = 16_777_216
 PNG_CHANNELS = {2: 3, 6: 4}  # 8-bit RGB/RGBA non-interlaced: what the pipeline emits
 # Chunk types the pipeline's screenshots contain. A real Chromium capture
-# holds IHDR, IDAT and IEND only (pinned by test); PLTE is legal alongside
-# truecolour data, so it stays allowed. Everything else — text chunks,
-# timestamps, colour profiles, and animation chunks (acTL/fcTL/fdAT) — is
-# refused: either hostile bytes or a sign the capture pipeline changed,
-# and both fail closed.
-PNG_ALLOWED_CHUNKS = frozenset({b"IHDR", b"PLTE", b"IDAT", b"IEND"})
+# holds IHDR, IDAT and IEND only (pinned by test): the pipeline emits
+# 8-bit RGB/RGBA, which never uses a palette, so PLTE (and colour type 3,
+# refused with the other non-RGB/RGBA types below) is refused entirely —
+# either hostile bytes or a sign the capture pipeline changed, and both
+# fail closed. Everything else — text chunks, timestamps, colour
+# profiles, and animation chunks (acTL/fcTL/fdAT) — is refused the same
+# way. IDAT chunks must also be consecutive: anything interleaved between
+# them is refused even if its type were ever allow-listed.
+PNG_ALLOWED_CHUNKS = frozenset({b"IHDR", b"IDAT", b"IEND"})
 
 
 def _chunk_name(ctype: bytes) -> str:
@@ -405,6 +408,11 @@ def validate_png(data: bytes) -> list[str]:
         elif ctype == b"IDAT":
             seen_idat = True
             idat += body
+        elif seen_idat and ctype != b"IEND":
+            return [
+                "PNG IDAT chunks must be consecutive: "
+                f"{_chunk_name(ctype)} chunk after IDAT image data"
+            ]
         elif ctype == b"IEND":
             if length != 0:
                 return ["PNG IEND chunk must be empty"]
