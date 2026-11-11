@@ -161,6 +161,79 @@ def test_code_span_survives_backticks():
     assert pr_evidence.code_span("`x") == "`` `x ``"
 
 
+def _fence_search_loop(text, lang=""):
+    """The old quadratic fence choice: the oracle for the linear pass."""
+    ticks = "```"
+    while ticks in text:
+        ticks += "`"
+    if text and not text.endswith(("\n", "\r")):
+        text += "\n"
+    return f"{ticks}{lang}\n{text}{ticks}\n"
+
+
+def test_fence_matches_search_loop_on_adversarial_inputs():
+    # Random backtick/tick-adjacent runs: the linear pass must pick exactly
+    # the fence the old search loop picked.
+    import random
+
+    rng = random.Random(20261111)
+    cases = ["", "`", "``", "```", "a`b``c```d", "`" * 100, "x" * 1000]
+    for _ in range(200):
+        alphabet = ["`", "`", "a", "\n", "~"]
+        cases.append("".join(rng.choice(alphabet) for _ in range(rng.randint(0, 60))))
+    for text in cases:
+        assert pr_evidence.fence(text) == _fence_search_loop(text)
+        assert pr_evidence.fence(text, "diff") == _fence_search_loop(text, "diff")
+
+
+def test_fence_handles_million_tick_runs_quickly():
+    # Review round 2, finding 4: schema-valid output of a million backticks
+    # made fence selection scan ever-longer strings (100k took ~4 s, the
+    # full artifact ran past 30 s). One linear pass must stay far under 2 s.
+    import time
+
+    text = "`" * 1_000_000
+    start = time.monotonic()
+    out = pr_evidence.fence(text)
+    assert time.monotonic() - start < 2
+    assert out.startswith("`" * 1_000_001 + "\n")
+    assert out.endswith("`" * 1_000_001 + "\n")
+
+
+def test_render_text_handles_million_tick_runs_quickly():
+    # End to end: the comment-budget trimming path over hostile output with
+    # million-tick runs must also finish quickly (trimming runs over text
+    # the linear fence already shaped, with no other super-linear work).
+    import time
+
+    ticks = "`" * 1_000_000
+    results = {
+        "version": 1,
+        "metadata": {"generator": "scripts/pr_evidence.py", "base_has_package": True},
+        "scenarios": [
+            {
+                "id": "tickbomb",
+                "title": "tick bomb",
+                "command": ["housesitter", "--version"],
+                "exit_before": 0,
+                "exit_after": 0,
+                "expected_exit": 0,
+                "size_before": 10,
+                "size_after": 10,
+                "changed": True,
+                "new_in_pr": False,
+                "before": "$ exit 0\n" + ticks + "\n",
+                "after": "$ exit 0\n" + ticks + "\n",
+            }
+        ],
+        "removed": [],
+    }
+    start = time.monotonic()
+    body = pr_evidence.render_text_from_results(results, "a" * 40)
+    assert time.monotonic() - start < 2
+    assert body.startswith(pr_evidence.MARKER)
+
+
 HOSTILE_TITLE = '<img src="https://evil.example/x.png"> **All UI checks passed** <!-- x -->'
 
 

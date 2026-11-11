@@ -194,10 +194,24 @@ def code_span(text: str) -> str:
     return f"{ticks}{pad}{text}{pad}{ticks}"
 
 
+def _longest_run(text: str, char: str) -> int:
+    """Length of the longest run of ``char`` in ``text`` (one linear pass)."""
+    best = run = 0
+    for ch in text:
+        if ch == char:
+            run += 1
+            if run > best:
+                best = run
+        else:
+            run = 0
+    return best
+
+
 def fence(text: str, lang: str = "") -> str:
-    ticks = "```"
-    while ticks in text:
-        ticks += "`"
+    # One linear pass for the fence: one tick longer than the longest
+    # backtick run (at least three) is exactly what the old search loop
+    # computed, without its quadratic rescanning of ever-longer strings.
+    ticks = "`" * max(3, _longest_run(text, "`") + 1)
     # The closing fence must start its own CommonMark line, or it becomes
     # part of the last content line and a later opening fence closes the
     # block instead: PR text would then render as Markdown. CommonMark
