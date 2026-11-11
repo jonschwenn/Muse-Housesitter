@@ -432,7 +432,8 @@ handoff's "license not chosen; don't publish."
   model family for high-risk changes; this makes considering it deliberate.
 - **Rejected:** making it mandatory for every change (too costly for
   doc-only PRs); leaving it informal (then it never gets considered).
-- **Status:** a two-way door: how we work for now, reversible if it proves
+- **Status:** superseded in part by D30 (cross-family gate 2–3 reviews).
+  Otherwise a two-way door: how we work for now, reversible if it proves
   too heavy or too light. Revisit with a new entry that supersedes this one.
 
 ### D23. Dashboard server config, saved-data status, and packaging (2026-11-08, Jon)
@@ -631,3 +632,9 @@ handoff's "license not chosen; don't publish."
   spots, see D22).
 - **Status:** a two-way door: how we work for now, reversible if it proves
   too heavy or too light. Revisit with a new entry that supersedes this one.
+- **Amended (2026-11-11, Jon):** the exception changes only who writes the
+  change; gates 2 and 3 still use a different model family from the one
+  that actually wrote each part. A small fix written by the reviewer's
+  family also gets a look from Jon or another model family. The optional
+  deep reviewer comes from a family that did not write the change,
+  including when Codex wrote it.

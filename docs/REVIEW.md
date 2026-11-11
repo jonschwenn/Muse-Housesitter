@@ -283,7 +283,10 @@ not get the author's reasoning or summary. An author who explains the
 change pre-loads the conclusion.
 
 Choose a fresh reviewer from a model family other than the author's
-(AGENTS.md, "Who does the work", D30).
+(AGENTS.md, "Who does the work", D30). The exception there changes only
+who writes the change. Gates 2 and 3 still use a different model family
+from the one that actually wrote each part. A small fix written by the
+reviewer's family also gets a look from Jon or another model family.
 
 Reviewer brief (use as is, filling in the brackets):
 
@@ -304,7 +307,8 @@ Reviewer brief (use as is, filling in the brackets):
 ## Gate 3: threat and privacy review
 
 Choose a fresh reviewer from a model family other than the author's, or
-Jon (AGENTS.md, "Who does the work", D30).
+Jon (AGENTS.md, "Who does the work", D30). The exception changes only who
+writes the change; the review rules for each part are the same as gate 2.
 
 Use this checklist. Every item gets *yes*, *no (finding)*, or *n/a (why)*.
 
@@ -398,17 +402,17 @@ test, and assets that weren't there.
 
 Consider this step for a new module or any change to http allow-lists,
 secrets, identifiers, envelope, storage, drop-ins, install, CI, or
-`ci-guard`. If one of these changes received same-family review in gates
-2–3 under the AGENTS.md exception (assigned agent unavailable, or a small
-fix found in review), that is a strong reason to run this review rather
-than skip it. Same-family review alone does not put a low-risk change in
-scope.
+`ci-guard`. If one of these changes used the AGENTS.md exception
+(assigned agent unavailable, or a small fix found in review), that is a
+strong reason to run this review rather than skip it. The exception does
+not waive cross-family review in gates 2–3 or put a low-risk change in scope.
 
-Use a fresh agent from a model family other than the author's: Codex
-running an astra-level GPT model at `xhigh` effort, or `ultra` for core,
-`ci-guard`, or install changes. The review is read-only: the reviewer edits
-nothing. Give it the diff, the spec, and the findings already handled, so
-it does not re-report them.
+Use a fresh agent from a model family that did not write the change:
+for example, Codex for code Muse Spark or Claude wrote; Claude or Muse
+Spark for changes Codex wrote. For Codex, use an astra-level GPT model at
+`xhigh` effort, or `ultra` for core, `ci-guard`, or install changes. The
+review is read-only: the reviewer edits nothing. Give it the diff, the
+spec, and the findings already handled, so it does not re-report them.
 
 Before a review covering a lot of code or using a lot of tokens (such as a
 large diff or any `ultra` run), tell Jon it is starting and roughly why it

@@ -87,7 +87,10 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
    use a model family other than the one that wrote the change, applying
    D22's reasoning; the deep review in REVIEW.md stays optional.
    If the assigned agent is unavailable, or for a small fix found in
-   review, another agent may do the work; the PR says so.
+   review, another agent may write the change; the PR says so. This changes
+   only who writes it: gates 2 and 3 still use a different model family
+   from the one that actually wrote each part. A small fix written by the
+   reviewer's family also gets a look from Jon or another model family.
 4. **Fixture, then code, then test.** Write an invented upstream fixture
    first, then the code that reads it, then the test that pins the
    normalised output field by field.
