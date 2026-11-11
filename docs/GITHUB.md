@@ -47,6 +47,13 @@ after the PR. Merged branches clean themselves up.
      download the test-results artifacts and read job conclusions from the
      API; no permission was widened.
 
+The publisher serialises runs with a per-PR concurrency group keyed by
+head repository owner and branch, without cancelling the active run. It
+checks the head again before pushing images and before posting. Artifact
+refusals produce a fixed notice with a reason code instead of silently
+leaving out the evidence; stale or ambiguous PR lookups and moved heads
+still stop without writing. These controls add no permissions (D34).
+
 Click **Save** in each section.
 
 ## The `main` ruleset
