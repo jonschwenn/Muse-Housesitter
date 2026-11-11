@@ -1349,43 +1349,102 @@ def test_print_capped_budgets_bytes_not_characters(capsys):
     assert "bytes" in out
 
 
-def test_display_redacts_secret_shaped_names():
-    """Finding 4 (round 3): a token-shaped name never prints verbatim."""
-    token = "gh" + "p_" + "Q" * 30
-    assert hygiene_scan._display(token) == "[redacted]"
-    assert token not in hygiene_scan._display(f"dir/{token}.txt")
-    assert "[redacted]" in hygiene_scan._display(f"dir/{token}.txt")
-    # Credential-shaped names redact too; planted and reference-like values
-    # stay readable, as in secret_problems.
-    assignment = PW + '="hunter2' + 'hunter2"'
-    assert hygiene_scan._display(assignment) == "[redacted]"
+def _display_id(path: str) -> str:
+    """The ``[redacted path <id>]`` the scanner prints for this path."""
+    import hashlib as _hashlib
+    import os as _os
+
+    digest = _hashlib.sha256(_os.fsencode(path)).hexdigest()[:8]
+    return f"[redacted path {digest}]"
+
+
+def test_display_replaces_secret_shaped_names_with_stable_ids():
+    """Findings 1 and 5 (round 4): a secret-shaped name never prints.
+
+    The credential detector is anchored at line starts, so it flagged
+    ``password=...`` but not ``dir/password=...``. Every detector now runs
+    on each path component and the whole path; a hit prints a stable id of
+    the path bytes instead of the name, so two secret-shaped names stay
+    distinguishable without revealing either. Planted and reference-like
+    values stay readable, as in secret_problems.
+    """
+    token_a = "gh" + "p_" + "Q" * 30
+    token_b = "mg" + "st_" + "R" * 30
+    sensitive = [
+        token_a,
+        f"dir/{token_a}.txt",
+        PW + '="hunter2' + 'hunter2"',
+        "dir/" + PW + "=AbCd123456.txt",
+        "dir/X_AUTH" + "KEY=AbCd123456.txt",
+        "dir/" + token_b,
+    ]
+    for path in sensitive:
+        shown = hygiene_scan._display(path)
+        assert shown == _display_id(path), (path, shown)
+        for secret in (token_a, token_b, PW, "AbCd123456"):
+            assert secret not in shown, (path, shown)
+    # Distinct names get distinct ids; repeats are stable.
+    assert hygiene_scan._display(token_a) != hygiene_scan._display(token_b)
+    assert hygiene_scan._display(token_a) == hygiene_scan._display(token_a)
+    # Ordinary, planted, and reference-like names still print in full.
+    assert hygiene_scan._display("notes.txt") == "notes.txt"
     assert hygiene_scan._display("PLANTED-SECRET-notes") == "PLANTED-SECRET-notes"
     assert hygiene_scan._display(PW + "=changeme") == PW + "=changeme"
-    # Ordinary names still print in full.
-    assert hygiene_scan._display("notes.txt") == "notes.txt"
 
 
 @NEEDS_GIT
 def test_trusted_scan_suppression_listing_redacts_secret_name(tmp_path):
-    """Finding 4 (round 3): the suppression path hides a token-shaped name."""
+    """Findings 1 and 5 (round 4): the suppression path hides every shape."""
     token = "gh" + "p_" + "Q" * 30
-    repo, sha = _git_repo(tmp_path, {token: "# hygiene: ok\n"})
+    nested = "dir/" + PW + "=AbCd123456.txt"
+    repo, sha = _git_repo(
+        tmp_path, {token: "# hygiene: ok\n", nested: "# hygiene: ok\n"}
+    )
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert token not in proc.stdout
-    assert "suppression [redacted]:1" in proc.stdout
+    assert PW not in proc.stdout
+    assert "AbCd123456" not in proc.stdout
+    assert f"suppression {_display_id(token)}:1" in proc.stdout
+    assert f"suppression {_display_id(nested)}:1" in proc.stdout
+    assert _display_id(token) != _display_id(nested)
+
+
+@NEEDS_GIT
+def test_trusted_scan_problem_listing_redacts_nested_secret_name(tmp_path):
+    """Findings 1 and 5 (round 4): problem lines hide a nested secret name."""
+    nested = "dir/" + PW + "=AbCd123456.txt"
+    planted = "server at " + ".".join(REAL10) + "\n"
+    repo, sha = _git_repo(tmp_path, {nested: planted})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert PW not in proc.stdout
+    assert "AbCd123456" not in proc.stdout
+    assert f"hygiene-scan: {_display_id(nested)}: IPv4 address at line 1" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_symlink_error_redacts_nested_secret_name(tmp_path):
+    """Findings 1 and 5 (round 4): the symlink error hides the entry name."""
+    link = "dir/" + PW + "=AbCd123456.txt"
+    repo, sha = _git_repo(tmp_path, {"target.txt": "hello\n"}, links={link: "target.txt"})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert PW not in proc.stdout
+    assert "AbCd123456" not in proc.stdout
+    assert _display_id(link) in proc.stdout
 
 
 @NEEDS_GIT
 def test_trusted_scan_oversized_blob_error_redacts_secret_name(tmp_path):
-    """Finding 4 (round 3): the fail-closed path hides a token-shaped name."""
+    """Finding 1 (round 4): the fail-closed path hides a token-shaped name."""
     token = "gh" + "p_" + "Q" * 30
     repo, sha = _git_repo(tmp_path, {token: "Z" * (hygiene_scan.MAX_FILE_BYTES + 1)})
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "fail closed" in proc.stdout
     assert token not in proc.stdout
-    assert "[redacted]" in proc.stdout
+    assert _display_id(token) in proc.stdout
 
 
 @NEEDS_GIT
