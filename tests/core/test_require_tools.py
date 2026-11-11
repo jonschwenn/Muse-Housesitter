@@ -15,25 +15,25 @@ import subprocess
 import pytest
 
 from . import helpers
-from .helpers import fail_on_proc_error, require_test_tool, test_tools_required
+from .helpers import fail_on_proc_error, require_test_tool, tools_required
 
 VAR = "HOUSESITTER_REQUIRE_TEST_TOOLS"
 
 
 def test_tools_required_unset_by_default(monkeypatch):
     monkeypatch.delenv(VAR, raising=False)
-    assert test_tools_required() is False
+    assert tools_required() is False
 
 
 def test_tools_required_set_to_1(monkeypatch):
     monkeypatch.setenv(VAR, "1")
-    assert test_tools_required() is True
+    assert tools_required() is True
 
 
 @pytest.mark.parametrize("value", ["0", "yes", "", "true"])
 def test_tools_required_ignores_other_values(monkeypatch, value):
     monkeypatch.setenv(VAR, value)
-    assert test_tools_required() is False
+    assert tools_required() is False
 
 
 def test_require_present_tool_passes_through():

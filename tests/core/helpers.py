@@ -20,7 +20,7 @@ import threading
 from dataclasses import dataclass, field
 
 
-def test_tools_required():
+def tools_required():
     """True when missing test prerequisites must fail instead of skip.
 
     CI sets ``HOUSESITTER_REQUIRE_TEST_TOOLS=1`` for the ``test`` job, so
@@ -38,7 +38,7 @@ def require_test_tool(present, message):
     """
     if present:
         return None
-    if test_tools_required():
+    if tools_required():
         import pytest
 
         pytest.fail(message)

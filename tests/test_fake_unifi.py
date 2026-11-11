@@ -1,9 +1,10 @@
 """Smoke test for scripts/fake_unifi.py against localhost only.
 
 Generates a throwaway certificate with openssl (skipped when openssl
-is missing), boots the fake on an OS-assigned port, and checks the
-startup fingerprint plus the login, stat, and logout routes. No real
-network, no sudo, no system paths changed.
+is missing, or failed when HOUSESITTER_REQUIRE_TEST_TOOLS=1), boots the
+fake on an OS-assigned port, and checks the startup fingerprint plus the
+login, stat, and logout routes. No real network, no sudo, no system
+paths changed.
 """
 
 from __future__ import annotations
@@ -18,15 +19,12 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
+from core.helpers import require_test_tool
 
 ROOT = Path(__file__).resolve().parent.parent
 FAKE = ROOT / "scripts" / "fake_unifi.py"
 
 openssl = shutil.which("openssl")
-needs_openssl = pytest.mark.skipif(
-    openssl is None, reason="openssl is not installed"
-)
 
 
 def wait_for_line(process, needle, timeout=20.0):
@@ -48,8 +46,8 @@ def wait_for_line(process, needle, timeout=20.0):
     raise AssertionError(f"never saw {needle!r} in fake_unifi output")
 
 
-@needs_openssl
 def test_fake_unifi_serves_fixtures_over_tls(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
     cert = tmp_path / "cert.pem"
     key = tmp_path / "key.pem"
     subprocess.run(

@@ -475,28 +475,33 @@ class TestStartup:
 # -- packaging -----------------------------------------------------------------------
 
 
+WHEEL_TOOLS = ("pip", "setuptools", "wheel", "venv", "ensurepip")
+
+
 @pytest.fixture(scope="module")
 def built_wheel(tmp_path_factory):
-    """Build the wheel once and install it into a fresh venv once.
+    """Build the wheel once and install it into a fresh venv once."""
+    return build_and_install_wheel(tmp_path_factory.mktemp("wheel"))
 
-    Skips only when the build tooling itself is missing (setuptools or
-    wheel not importable, or venv/ensurepip unavailable), and fails
+
+def build_and_install_wheel(base):
+    """Build the wheel into ``base`` and install it into a fresh venv.
+
+    Skips only when the build tooling itself is missing (pip, setuptools
+    or wheel not importable, or venv/ensurepip unavailable), and fails
     instead when HOUSESITTER_REQUIRE_TEST_TOOLS=1 demands it. Any build
     or install failure once tooling is present fails the test: a broken
     package must never show up as skipped tests and a green run. Checks
     on what the wheel contains or how it runs belong in the tests.
     """
     missing = [
-        mod
-        for mod in ("setuptools", "wheel", "venv", "ensurepip")
-        if importlib.util.find_spec(mod) is None
+        mod for mod in WHEEL_TOOLS if importlib.util.find_spec(mod) is None
     ]
     if missing:
         require_test_tool(
             False,
             "wheel build tooling unavailable: missing " + ", ".join(missing),
         )
-    base = tmp_path_factory.mktemp("wheel")
     try:
         proc = subprocess.run(
             # Offline: build with the dev venv's own setuptools and
@@ -528,6 +533,79 @@ def built_wheel(tmp_path_factory):
     except subprocess.CalledProcessError as exc:
         fail_on_proc_error(exc, "fresh-venv install")
     return wheels[0], venv
+
+
+class TestBuiltWheelPrerequisites:
+    """Pin when the packaging fixture skips and when it fails.
+
+    ``subprocess.run`` and ``find_spec`` are faked, so nothing is built.
+    """
+
+    VAR = "HOUSESITTER_REQUIRE_TEST_TOOLS"
+
+    @staticmethod
+    def _missing(monkeypatch, name):
+        real = importlib.util.find_spec
+        monkeypatch.setattr(
+            importlib.util, "find_spec",
+            lambda mod, *a: None if mod == name else real(mod, *a),
+        )
+
+    @staticmethod
+    def _run_never(*_a, **_k):
+        raise AssertionError("nothing may run when tooling is missing")
+
+    @pytest.mark.parametrize("tool", WHEEL_TOOLS)
+    def test_missing_tool_skips_by_default(self, monkeypatch, tmp_path, tool):
+        monkeypatch.delenv(self.VAR, raising=False)
+        self._missing(monkeypatch, tool)
+        monkeypatch.setattr(subprocess, "run", self._run_never)
+        with pytest.raises(pytest.skip.Exception, match=tool):
+            build_and_install_wheel(tmp_path)
+
+    @pytest.mark.parametrize("tool", WHEEL_TOOLS)
+    def test_missing_tool_fails_when_required(self, monkeypatch, tmp_path, tool):
+        monkeypatch.setenv(self.VAR, "1")
+        self._missing(monkeypatch, tool)
+        monkeypatch.setattr(subprocess, "run", self._run_never)
+        with pytest.raises(pytest.fail.Exception, match=tool):
+            build_and_install_wheel(tmp_path)
+
+    def test_failed_build_fails_even_by_default(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(self.VAR, raising=False)
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda args, **_k: subprocess.CompletedProcess(
+                args, 1, b"", b"error: bad pyproject"),
+        )
+        with pytest.raises(pytest.fail.Exception, match="bad pyproject"):
+            build_and_install_wheel(tmp_path)
+
+    def test_build_that_cannot_start_fails(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(self.VAR, raising=False)
+
+        def boom(*_a, **_k):
+            raise OSError("exec failed")
+
+        monkeypatch.setattr(subprocess, "run", boom)
+        with pytest.raises(pytest.fail.Exception, match="exec failed"):
+            build_and_install_wheel(tmp_path)
+
+    def test_failed_install_fails_even_by_default(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(self.VAR, raising=False)
+
+        def fake_run(args, **kwargs):
+            if "wheel" in args:
+                (tmp_path / "housesitter-0-py3-none-any.whl").write_bytes(b"")
+                return subprocess.CompletedProcess(args, 0, b"", b"")
+            if "install" in args:
+                raise subprocess.CalledProcessError(
+                    1, args, stderr=b"no matching distribution")
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(pytest.fail.Exception, match="no matching"):
+            build_and_install_wheel(tmp_path)
 
 
 class TestPackaging:
