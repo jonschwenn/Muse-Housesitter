@@ -3,7 +3,8 @@
 Every test mints its own throwaway self-signed cert with the ``openssl``
 CLI and serves it from an in-process server on 127.0.0.1. No key
 material is committed. When ``openssl`` is not on PATH, these tests
-skip with a clear reason.
+skip with a clear reason, or fail when ``HOUSESITTER_REQUIRE_TEST_TOOLS=1``
+(set in CI).
 """
 
 from __future__ import annotations
