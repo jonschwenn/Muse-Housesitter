@@ -129,14 +129,22 @@ PR #1 predates the tooling and has no evidence.
     but not shown. Failure messages and tracebacks are never published.
   - Jon's option A (D21): missing or invalid results or unusable job data
     degrade only the Tests line: `results unavailable`, `no test jobs
-    found`, or `no valid results file`. To fit the comment size budget,
-    failing names are dropped first (counts and verdicts stay), then a fixed
-    short line is used, and if even that doesn't fit, the line is left out.
-    Both CI and the publisher reserve room for the longest hidden marker
-    when fitting text, Tests and UI sections; the final stamped body must
-    still fit the comment budget. Test data never blocks the publish or
-    hides the screenshots and diffs reviewers need. Invalid UI artifacts
+    found`, or `no valid results file`. Test data never blocks the publish
+    or hides the screenshots and diffs reviewers need. Invalid UI artifacts
     still refuse the evidence and produce the fixed notice.
+- CI and the publisher use the same fitting code and one 60,000-byte budget
+  for the whole comment as posted. The measurement allows for the longest
+  hidden marker and counts image links with their final 40-character commit
+  SHA, including the growth from replacing each placeholder. When the body
+  is too long, it drops failing test names first (counts and verdicts stay),
+  then uses a fixed short Tests line, then drops that line. Next it reduces
+  screenshot details from the full section to a table with a notice, then
+  to a pointer. Only then does it remove whole text scenario sections.
+  Omission notices count toward the same budget; they name at most five
+  omitted scenarios, followed by "and N more" for the rest. If the remaining
+  body still cannot fit, the evidence is refused. The workflow's final
+  check also enforces 60,000 bytes on the stamped body with final image
+  links before posting.
 - Trust model (the fine print that makes the above honest). The `CI`
   workflow runs on `pull_request`, so its file comes from the PR: a PR that
   edits `ci.yml` controls that run's jobs, including what the artifact

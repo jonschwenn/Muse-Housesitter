@@ -262,13 +262,9 @@ handoff's "license not chosen; don't publish."
     `pr-evidence` branch, and posts or edits the single bot comment. Fork
     PRs get comments too. Artifact refusals and publish failures produce a
     fixed notice with a reason code; stale or ambiguous PR lookups publish
-    nothing. The head is re-checked immediately before every push attempt
-    and, inside the serialised per-PR comment job, before comment lookup
-    and again immediately before writing. A moved head writes nothing.
-    Trusted markers keep comments from newer CI runs across heads and
-    prevent notices replacing same-head evidence. Even skipped writes
-    remove duplicate bot marker comments. There is no workflow-level group.
-    D34 records the ordering rules and remaining pending-job limit.
+    nothing. Freshness and comment ordering protect current evidence;
+    [REVIEW.md, "Evidence"](REVIEW.md#evidence-before-and-after-every-pr)
+    describes the mechanics and D34 records the trade-offs.
   - `ci-guard.yml` on `pull_request_target` runs from the base commit and
     never touches PR code. `scripts/ci_guard.py` (stdlib only, unit-tested)
     lists the PR's changed files through the API — paginated, failing
@@ -344,14 +340,9 @@ handoff's "license not chosen; don't publish."
 - **Amended (2026-11-11, Jon):** updated the current-state workflow list
   above: shared checks fail the evidence job, main rebuilds both comment
   sections, and refusals and publish failures mean a fixed notice. PNG
-  validation checks chunk lengths, CRCs and dimensions, allows only IHDR,
-  IDAT and IEND chunks, refuses palette chunks (PLTE) and palette images,
-  and requires consecutive IDAT chunks. It requires a complete compressed
-  stream with no trailing data, decoding to exactly the size declared by IHDR.
-  Each scanline's filter byte must be 0–4. The head is re-checked immediately
-  before every push attempt and, inside the serialised comment job, before
-  comment lookup and again immediately before writing.
-  Permissions are unchanged. See D33–D35.
+  validation is structural, not just a file signature check. Freshness
+  checks and ordered comment writes protect current evidence. Permissions
+  are unchanged. See D33–D35 and REVIEW.md, "Evidence."
 
 ### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
 - **Decision:** use C's overall design, A's per-radio and per-client detail,
@@ -424,12 +415,10 @@ handoff's "license not chosen; don't publish."
   messages and tracebacks are never published.
 - **Bad data (option A):** a missing or invalid results file, or unusable
   job data, degrades only the Tests line: `results unavailable`,
-  `no test jobs found`, or `no valid results file`. To fit the comment size
-  budget, failing names are dropped first (counts and verdicts stay), then
-  a fixed short line is used, and if even that doesn't fit, the line is left
-  out. Test data never blocks the publish. The rest
-  of the evidence comment still publishes. Invalid UI artifacts still
-  refuse the evidence and produce a fixed notice.
+  `no test jobs found`, or `no valid results file`. Test data never blocks
+  the publish: its line gives way before screenshot details or text diffs
+  when space is short. Invalid UI artifacts still refuse the evidence and
+  produce a fixed notice. REVIEW.md, "Evidence," gives the fitting order.
 - **Why:** the test summary is a one-line add-on whose pass/fail already
   comes from the trusted API. Refusing everything for bad test data would
   hide the screenshots and diffs a reviewer needs.
@@ -437,12 +426,11 @@ handoff's "license not chosen; don't publish."
   - Refusing the whole publish on bad test data, like the UI artifact.
   - Taking pass/fail from the XML instead of the API: PR-produced counts
     cannot establish whether the test job passed.
-- **Amended (2026-11-11, Jon):** updated the bad-data paragraph above:
-  invalid UI evidence now produces a fixed refusal notice (D34). Bad test
-  data still degrades only the Tests line. Both CI and the publisher reserve
-  room for the longest hidden marker when fitting the text, Tests and UI
-  sections. The final stamped body must still fit the comment budget, so
-  adding the marker cannot make accepted evidence too large to publish.
+- **Amended (2026-11-11, Jon):** invalid UI evidence now produces a fixed
+  refusal notice (D34). Bad test data still degrades only the Tests line.
+  CI and the publisher share one fitting function and a 60,000-byte budget
+  for the final comment, including its hidden marker and final image links,
+  so evidence accepted by CI fits when posted. See REVIEW.md, "Evidence."
 
 ### D22. Optional deep red-team review on a different model family (2026-11-08, Jon)
 - **Decision:** explicitly consider an optional deep review on a different
@@ -686,14 +674,11 @@ handoff's "license not chosen; don't publish."
   the publisher's checks on its artifact; refusal fails `evidence` and
   `ci-ok`. This catches honest mistakes only, because a PR controls its
   own copy. Main's publisher posts a fixed notice on artifact refusal or
-  publish failure, using only its own text and one reason code: `missing`,
-  `too_large`, `bad_png`, `bad_schema`, `stale_head`, `render_error`, or
-  `publish_failed`. `render_error` means rendering failed; `publish_failed`
-  covers a failed image push or any failure to read or validate the rendered
-  comment or refusal file, including an unknown refusal reason. The fallback
-  notice follows the same freshness and ordering checks.
-  Stale or ambiguous PR lookups and a moved head at the final freshness
-  checks still stop without writing.
+  publish failure, using only its own text and a fixed reason code.
+  Freshness checks and ordered comment writes protect current evidence;
+  only the comment job is serialised, so the rest of the publisher can run
+  independently. See [REVIEW.md, "Evidence"](REVIEW.md#evidence-before-and-after-every-pr)
+  for the refusal reasons and publishing mechanics.
 - **Why:** PR #43's 40.3 MB of screenshots exceeded the 40 MB cap. The
   publisher refused twice while CI stayed green; it merged without evidence.
 - **Rejected:** CI checks alone (a hostile PR can edit them); notices alone
@@ -702,22 +687,9 @@ handoff's "license not chosen; don't publish."
   one pending run per group, and a late stale run can replace the current
   head's pending run regardless of commit age, losing its evidence. An
   owner-and-branch key can also collide across PRs.
-- **Comment ordering:** only the comment job is serialised, using the per-PR
-  job-level group `evidence-comment-<PR>` with `cancel-in-progress: false`,
-  so comment lookup sees earlier writes. The head is checked before comment
-  lookup and again immediately before writing. Every evidence or notice body
-  carries a hidden marker with the head SHA, run id, attempt and outcome
-  from trusted event data. Only the bot's own marker comments count. A
-  comment from a newer CI run is kept (ordered by run id, then attempt),
-  whatever head it names. A genuinely newer push gets a newer CI run id, so
-  it can still publish. A notice never replaces same-head evidence. Even a
-  skipped write removes duplicate bot marker comments, keeping the newest
-  run with same-head evidence preferred over notices. This prevents
-  overlapping comment writes without queuing the whole publisher. GitHub
-  still keeps only one pending job per group: a later arrival can replace a
-  pending comment job. If that later run is stale, it writes nothing and the
-  previous comment stays, naming its head SHA. Re-running the publisher
-  recovers the missing update.
+- **Accepted edge case:** GitHub can replace a pending comment job with a
+  stale run, leaving the previous comment and its head SHA visible until
+  the publisher is re-run.
 - **Status:** in effect from PR #57.
 
 ### D35. Crop oversized screenshot sets to fit (2026-11-11, Jon)
