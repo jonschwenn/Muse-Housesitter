@@ -228,8 +228,8 @@ gh api graphql -f query='query{repository(owner:"jonschwenn",name:"Muse-Housesit
   and tests with read-only tokens, `ci-guard.yml` guards the testing
   mechanism and runs main's trusted hygiene scan over PR files as data.
   Protected-path changes require a head branch in this repo and an author
-  with write, maintain, or admin permission (effective after PR #56 merges,
-  D31–D32). `evidence-publish.yml` publishes the evidence comment.
+  with write, maintain, or admin permission (D31–D32).
+  `evidence-publish.yml` publishes the evidence comment.
   `main` is protected by a ruleset that requires a PR and green `ci-ok`
   and `ci-guard` checks (`docs/GITHUB.md`). A change is not done while CI
   is red.

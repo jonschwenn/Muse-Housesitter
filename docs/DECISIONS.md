@@ -265,7 +265,7 @@ handoff's "license not chosen; don't publish."
     cap — and fails the `ci-guard` check when a protected path is touched
     unless its head branch is in this repository and its author has admin,
     maintain, or write permission (collaborator permission from the API,
-    not `author_association`; effective after PR #56 merges, D32).
+    not `author_association`; D32).
   - The `main` ruleset requires `ci-ok` **and** `ci-guard`.
 - **What is protected:** `.github/**` (workflows, ruleset, templates);
   `tests/test_hygiene.py` (pins the repo-hygiene scan);
@@ -298,8 +298,8 @@ handoff's "license not chosen; don't publish."
   - *Trusted collaborators pass the guard by permission.* A PR from an
     author with write, maintain, or admin access and a head branch in this
     repository may touch protected paths; the guard logs them as a notice
-    (effective after PR #56 merges, D32). This is not an escalation: such an
-    author can already push to `main`-adjacent branches and edit these files.
+    (D32). This is not an escalation: such an author can already push to
+    `main`-adjacent branches and edit these files.
   - *Fork PRs simply cannot touch protected paths.* A fork that needs such
     a change must ask Jon (or his agents) to make it instead.
   - *New files are not blocked.* A new module needs new tests, so the
@@ -343,11 +343,8 @@ handoff's "license not chosen; don't publish."
   tests must run PR code by design. Ordinary source files outside any
   workable protected list can weaken them; human review of every PR,
   including gate 3, covers this limit. The trusted hygiene scan in D31 is
-  the tamper-proof part. The current protected-path list and step name
-  above are updated for PR #56, and the pass rule now includes D32's
-  head-repository condition. These guard changes take effect only after
-  PR #56 merges: `pull_request_target` always runs main's workflow and
-  scripts.
+  the tamper-proof part. The protected-path list, step name and pass rule
+  above were updated for this in PR #56 (D31–D32).
 
 ### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
 - **Decision:** use C's overall design, A's per-radio and per-client detail,
@@ -679,8 +676,7 @@ handoff's "license not chosen; don't publish."
   cannot all be protected.
 - **Rejected:** only widening the protected list. Any source file can patch
   a scanner running in the same process, so no such list can be complete.
-- **Status:** in effect once PR #56 merges. `pull_request_target` runs
-  main's copy, so this PR's own guard run cannot exercise the new workflow.
+- **Status:** in effect from PR #56.
 
 ### D32. Trust the head repository as well as the author (2026-11-11, Jon)
 - **Decision:** a PR touching protected paths passes the path guard only
@@ -693,5 +689,4 @@ handoff's "license not chosen; don't publish."
   that head branch trusted.
 - **Rejected:** Jon approving the exact head commit. That needs more
   machinery, and approval is easy to give on autopilot.
-- **Status:** in effect once PR #56 merges. `pull_request_target` always
-  runs main's copy of `ci-guard.yml` and its scripts.
+- **Status:** in effect from PR #56.

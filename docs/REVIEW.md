@@ -129,8 +129,7 @@ PR #1 predates the tooling and has no evidence.
   Fork PRs touching protected paths always fail; a maintainer must recreate
   the change on a branch here. Main's trusted hygiene scanner also reads
   the PR head tree's files as data through git plumbing. It never checks
-  out, imports, or runs PR code. These changes take effect after PR #56
-  merges, because `pull_request_target` runs main's copy (D31–D32).
+  out, imports, or runs PR code (D31–D32).
 - Web UI screenshots work the same way, with the browser in the loop. In
   the `evidence` job, `scripts/ui_evidence.py` serves each tree's own
   `scripts/dev_dashboard.py` with that tree's own `web/` and fixtures, and
