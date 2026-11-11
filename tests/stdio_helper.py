@@ -515,6 +515,22 @@ _SCENARIOS = {
 }
 
 
+def _env_seconds(name, default):
+    """Test-only override for a timing constant; production keeps default.
+
+    Decision 7 (option A): most watchdog-fires tests run the helper with
+    ``HOUSESITTER_STDIO_WATCHDOG_S=1`` so the seal watchdog fires after
+    one second instead of five; slow-work tests add
+    ``HOUSESITTER_STDIO_SLOW_S=1.6`` so the slow sleep still outlives it.
+    Non-positive or unparsable values keep the production default.
+    """
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def _run_serve_probe(home_dir):
     """Stubbed ``serve``: the console must be exactly as on ``main``.
 
@@ -603,9 +619,10 @@ def make_module(scenario):
     if scenario == "slow_check":
         # W1: doctor --check runs this read-only module check in the
         # worker thread; it takes longer than the final-delivery
-        # watchdog, well within the 60 s doctor deadline.
+        # watchdog (7 s vs 5 s production, or SLOW_S vs 1 s fast),
+        # well within the 60 s doctor deadline.
         def check(self, ctx):
-            time.sleep(7)
+            time.sleep(_env_seconds("HOUSESITTER_STDIO_SLOW_S", 7))
             return ["check-ok-example"]
 
         members["check"] = check
@@ -617,6 +634,12 @@ def main(argv):
     # E3: which production subcommand to run. Default "invoke" keeps
     # every existing caller on the invoke path.
     cmd_key = argv[3] if len(argv) > 3 else "invoke"
+    # Decision 7 (option A): test-only shortened seal watchdog. The
+    # production default (5 s) is untouched; only helper runs with this
+    # env var set arm an earlier watchdog. Unset keeps production timing.
+    cli._SEAL_WATCHDOG_S = _env_seconds(
+        "HOUSESITTER_STDIO_WATCHDOG_S", cli._SEAL_WATCHDOG_S
+    )
     # D3: hold > 1100 fds open BEFORE the guard starts, so the guard's
     # own fds land above FD_SETSIZE. Kept alive in this frame for the
     # whole run. None means the platform refused: skip with exit 3.
@@ -746,15 +769,16 @@ def main(argv):
         # unable to start (the unguarded continue path).
         _install_faults(scenario)
         # W1: a slow installer backend; only the first file sleeps so
-        # one run stays well under 20 s. Uses the injectable runner
-        # seam (an interactive sudo password prompt behaves the same
-        # way: the child takes longer than the delivery watchdog).
+        # one run stays well under 20 s production (well under 10 s
+        # fast). Uses the injectable runner seam (an interactive sudo
+        # password prompt behaves the same way: the child takes longer
+        # than the delivery watchdog).
         slept = []
 
         def _slow_run(argv, **kwargs):
             if not slept:
                 slept.append(True)
-                time.sleep(7)
+                time.sleep(_env_seconds("HOUSESITTER_STDIO_SLOW_S", 7))
             return subprocess.CompletedProcess(argv, 0)
 
         return cli.main(
