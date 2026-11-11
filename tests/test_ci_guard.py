@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -36,16 +37,25 @@ SPEC.loader.exec_module(ci_guard)
         "scripts/ui_evidence.py",
         "scripts/publish_evidence.py",
         "scripts/ci_guard.py",
+        "scripts/hygiene_scan.py",
         "scripts/test_results.py",
         "scripts/evidence_checks.py",
         "tests/test_evidence_checks.py",
         "tests/test_test_results.py",
+        "tests/core/helpers.py",
+        "tests/fixtures/unifi_wifi/conformance.json",
+        "tests/fixtures/other_mod/conformance.json",
         "pyproject.toml",
+        "config/pyproject.toml",
+        "setup.py",
+        "pkg/setup.py",
         "conftest.py",
         "tests/conftest.py",
         "tests/modules/conftest.py",
         "pytest.ini",
+        ".pytest.ini",
         "tests/pytest.ini",
+        "tests/.pytest.ini",
         "setup.cfg",
         "tox.ini",
         "ruff.toml",
@@ -73,6 +83,11 @@ def test_protected_paths_are_caught(path):
         "tests/test_cli.py",
         "tests/modules/test_something.py",
         "tests/test_brand_new.py",
+        "tests/fixtures/unifi_wifi/classic_sta.json",
+        "tests/fixtures/conformance.json",
+        "tests/fixtures/a/b/conformance.json",
+        "tests/conformance.json",
+        "setup.cfg.bak",
         "docs/GITHUB.md",
         "README.md",
         "web/index.html",
@@ -86,6 +101,513 @@ def test_ordinary_paths_pass(path):
 def test_reason_names_what_is_protected():
     assert "pytest" in (ci_guard.is_protected("conftest.py") or "")
     assert "start-up" in (ci_guard.is_protected("x.pth") or "")
+
+
+# Import closure -------------------------------------------------------------
+# Every module a protected suite imports from tests/ or loads from scripts/
+# must itself be protected: otherwise a PR could weaken the suite through an
+# unprotected file (D16). This walks the imports statically (ast), so it never
+# executes the files it checks. Imports that resolve nowhere under tests/
+# (stdlib, pytest, third-party, src/) are not the guard's business: src/ in
+# particular cannot be protected, because the conformance suite necessarily
+# executes PR module code.
+
+PROTECTED_SUITE_FILES = [
+    "tests/test_hygiene.py",
+    "tests/test_pr_evidence.py",
+    "tests/test_ui_evidence.py",
+    "tests/test_publish_evidence.py",
+    "tests/test_test_results.py",
+    "tests/test_ci_guard.py",
+]
+PROTECTED_SUITE_DIRS = ["tests/conformance"]
+
+
+def _suite_files():
+    files = [ROOT / name for name in PROTECTED_SUITE_FILES]
+    for dirname in PROTECTED_SUITE_DIRS:
+        files.extend(sorted((ROOT / dirname).rglob("*.py")))
+    return files
+
+
+def _resolve_import(path, level, dotted, root):
+    """Repo-relative paths under tests/ that an import statement may load."""
+    parts = dotted.split(".") if dotted else []
+    if level:
+        base = path.parent
+        for _ in range(level - 1):
+            base = base.parent
+        roots = [base]
+    else:
+        # The repository root is a search root too: ``from tests.core import
+        # evil`` loads root/tests/core/evil.py (round 3). Absolute imports
+        # that resolve nowhere still contribute nothing.
+        roots = [root / "tests", path.parent, root]
+    found = []
+    for search in roots:
+        for candidate in (
+            search.joinpath(*parts).with_suffix(".py"),
+            search.joinpath(*parts, "__init__.py"),
+        ):
+            try:
+                rel = candidate.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if candidate.is_file():
+                found.append(rel)
+    # Importing a module also executes every parent package's __init__.py,
+    # so those load too.
+    for rel in list(found):
+        directory = (root / rel).parent
+        while directory != root and root in directory.parents:
+            init = directory / "__init__.py"
+            if init.is_file():
+                found.append(init.relative_to(root).as_posix())
+            directory = directory.parent
+    return found
+
+
+def _dynamic_import_targets(tree, path, root):
+    """String-literal ``import_module`` / ``__import__`` calls as imports.
+
+    ``importlib.import_module("core.x")`` and ``__import__("core.x")`` load
+    exactly what the equivalent import statement loads; a non-literal first
+    argument cannot be resolved statically, so it contributes nothing. Two
+    literal-string forms resolve like their statement equivalents (round 3):
+    ``import_module(".evil", "core")`` loads ``core.evil`` through the
+    package argument, and ``__import__("core", fromlist=["evil"])`` loads
+    ``core.evil`` through the fromlist.
+    """
+    targets = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            if func.attr != "import_module":
+                continue
+            is_import_module = True
+        elif isinstance(func, ast.Name):
+            if func.id not in ("import_module", "__import__"):
+                continue
+            is_import_module = func.id == "import_module"
+        else:
+            continue
+        first = node.args[0] if node.args else None
+        if first is None:
+            for keyword in node.keywords:
+                if keyword.arg == "name":
+                    first = keyword.value
+        if not (
+            isinstance(first, ast.Constant)
+            and isinstance(first.value, str)
+            and first.value
+        ):
+            continue
+        name = first.value
+        if name.startswith(".") and is_import_module:
+            # A leading-dot name resolves against the package argument, like
+            # a relative import: one dot keeps the package, each further dot
+            # climbs one parent. Without a literal package it stays opaque.
+            package = None
+            if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                package = node.args[1].value
+            if package is None:
+                for keyword in node.keywords:
+                    if keyword.arg == "package":
+                        package = (
+                            keyword.value.value
+                            if isinstance(keyword.value, ast.Constant)
+                            else None
+                        )
+            if isinstance(package, str) and package:
+                level = len(name) - len(name.lstrip("."))
+                remainder = name.lstrip(".")
+                base = package.split(".")
+                if level - 1 <= len(base):
+                    absolute = ".".join(
+                        base[: len(base) - level + 1]
+                        + ([remainder] if remainder else [])
+                    )
+                    if absolute:
+                        targets.extend(_resolve_import(path, 0, absolute, root))
+                continue
+        targets.extend(_resolve_import(path, 0, name, root))
+        if not is_import_module:
+            # ``__import__("core", fromlist=["evil"])`` loads the submodule
+            # too, like ``from core import evil``. Only literal list/tuple
+            # items resolve; anything computed contributes nothing.
+            fromlist = None
+            if len(node.args) >= 4 and isinstance(
+                node.args[3], (ast.List, ast.Tuple)
+            ):
+                fromlist = node.args[3]
+            else:
+                for keyword in node.keywords:
+                    if keyword.arg == "fromlist" and isinstance(
+                        keyword.value, (ast.List, ast.Tuple)
+                    ):
+                        fromlist = keyword.value
+            if fromlist is not None:
+                for item in fromlist.elts:
+                    if (
+                        isinstance(item, ast.Constant)
+                        and isinstance(item.value, str)
+                        and item.value
+                        and item.value != "*"
+                    ):
+                        targets.extend(
+                            _resolve_import(path, 0, f"{name}.{item.value}", root)
+                        )
+    return targets
+
+
+def _spec_load_targets(tree, root):
+    """Scripts loaded via ``spec_from_file_location``: repo-relative paths."""
+    calls = []  # (enclosing function name or None, string constants in args)
+
+    def visit(node, func):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child.name)
+            else:
+                if (
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "spec_from_file_location"
+                ):
+                    consts = [
+                        constant.value
+                        for constant in ast.walk(child)
+                        if isinstance(constant, ast.Constant)
+                        and isinstance(constant.value, str)
+                    ]
+                    calls.append((func, consts))
+                visit(child, func)
+
+    visit(tree, None)
+    first_args = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            first_args.setdefault(node.func.id, set()).add(node.args[0].value)
+    targets = []
+    for func, consts in calls:
+        if "scripts" in consts:
+            pys = [c for c in consts if c.endswith(".py") and len(c) > len(".py")]
+            if pys:
+                targets.extend(f"scripts/{Path(p).name}" for p in pys)
+            elif func in first_args:
+                # Dynamic file name (``ROOT / "scripts" / f"{name}.py"``): resolve
+                # through the loader's constant call sites, e.g. _load("ui_evidence").
+                targets.extend(f"scripts/{name}.py" for name in first_args[func])
+        # A literal path load (``spec_from_file_location("m", "tests/x.py")``)
+        # imports that file when it lives under the repo.
+        for const in consts:
+            if len(const) <= len(".py") or not const.endswith(".py"):
+                continue
+            candidate = Path(os.path.normpath(root / const))
+            try:
+                rel = candidate.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if candidate.is_file():
+                targets.append(rel)
+    return targets
+
+
+def _from_import_targets(path, level, module, names, root):
+    """What ``from X import a, b`` may load: X itself plus X/a, X/b.
+
+    A ``from package import submodule`` line loads the submodule file too
+    (``from core import evil`` loads ``tests/core/evil.py``), so every
+    imported name is also tried as a submodule of the module.
+    """
+    targets = set(_resolve_import(path, level, module, root))
+    base = module or ""
+    for name in names:
+        if name == "*":
+            continue
+        dotted = f"{base}.{name}" if base else name
+        targets.update(_resolve_import(path, level, dotted, root))
+    return targets
+
+
+def _repo_local_targets(path, root):
+    tree = ast.parse(path.read_text())
+    targets = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                # ``import a.b`` loads a, a.b, and the leaf file alike.
+                parts = alias.name.split(".")
+                for depth in range(1, len(parts) + 1):
+                    targets.update(
+                        _resolve_import(path, 0, ".".join(parts[:depth]), root)
+                    )
+        elif isinstance(node, ast.ImportFrom):
+            targets.update(
+                _from_import_targets(
+                    path, node.level, node.module or "", [a.name for a in node.names], root
+                )
+            )
+    targets.update(_dynamic_import_targets(tree, path, root))
+    for target in _spec_load_targets(tree, root):
+        candidate = root / target
+        if candidate.is_file():
+            targets.add(target)
+    return sorted(targets)
+
+
+def _closure_reachable(start, root):
+    """Every file reachable from ``start`` through repo-local imports.
+
+    Walks transitively: a protected helper importing an unprotected file
+    weakens the suite the same way a direct import does, so the walk
+    follows each reached file's own imports (tests/ and scripts/ only).
+    """
+    seen = set()
+    queue = [start.relative_to(root).as_posix()]
+    while queue:
+        rel = queue.pop()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        candidate = root / rel
+        if candidate.suffix != ".py" or not candidate.is_file():
+            continue
+        for target in _repo_local_targets(candidate, root):
+            if target not in seen:
+                queue.append(target)
+    seen.discard(start.relative_to(root).as_posix())
+    return sorted(seen)
+
+
+def test_every_repo_local_import_of_protected_suites_is_protected():
+    """The closure pin: every file a protected suite can load is protected.
+
+    The pin covers static imports and literal-string dynamic imports only
+    (``import_module``/``__import__`` with string-literal names, packages,
+    and fromlists, plus literal ``spec_from_file_location`` paths). It is a
+    drift check for honest mistakes, not a sandbox: computed import names
+    (``import_module(name)`` with a variable) are out of scope — they
+    contribute nothing, and sneaking a weakening through a computed import
+    would be a deliberate attack, which the trusted base-copy hygiene scan
+    (the tamper-proof part) still catches.
+    """
+    unprotected = []
+    for path in _suite_files():
+        rel = path.relative_to(ROOT).as_posix()
+        for target in _closure_reachable(path, ROOT):
+            if ci_guard.is_protected(target) is None:
+                unprotected.append(f"{rel} -> {target}")
+    assert not unprotected, (
+        "protected suites import unprotected files:\n" + "\n".join(unprotected)
+    )
+
+
+def _write_tree(root, files):
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+
+def test_closure_follows_transitive_imports(tmp_path):
+    """Finding 4: a protected helper importing an unprotected file is caught."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/suite_a.py": "import helper_mod\n",
+            "tests/helper_mod.py": "import evil_mod\n",
+            "tests/evil_mod.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "suite_a.py", root)
+    assert "tests/evil_mod.py" in reached
+
+
+def test_closure_resolves_from_import_submodule(tmp_path):
+    """Finding 4: ``from core import evil`` resolves tests/core/evil.py."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/suite_b.py": "from core import evil\n",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "suite_b.py", root)
+    assert "tests/core/evil.py" in reached
+
+
+def test_closure_resolves_relative_imports(tmp_path):
+    """Finding 4: relative imports resolve against the importing file."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/pkg/suite_c.py": "from . import sib\nfrom .. import top\n",
+            "tests/pkg/sib.py": "X = 1\n",
+            "tests/top.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "pkg" / "suite_c.py", root)
+    assert "tests/pkg/sib.py" in reached
+    assert "tests/top.py" in reached
+
+
+def test_closure_follows_import_module_string(tmp_path):
+    """Finding 4 (round 2): importlib.import_module("core.x") loads it."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/core/start.py": 'import importlib\nimportlib.import_module("core.x")\n',
+            "tests/core/x.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "core" / "start.py", root)
+    assert "tests/core/x.py" in reached
+
+
+def test_closure_follows_dunder_import_string(tmp_path):
+    """Finding 4 (round 2): __import__("core.x") loads it."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/core/start.py": '__import__("core.x")\n',
+            "tests/core/x.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "core" / "start.py", root)
+    assert "tests/core/x.py" in reached
+
+
+def test_closure_follows_import_module_package_argument(tmp_path):
+    """Finding 3 (round 3): import_module(".evil", "core") loads core/evil.py."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": (
+                "import importlib\nimportlib.import_module(\".evil\", \"core\")\n"
+            ),
+            "tests/core/__init__.py": "",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/evil.py" in reached
+    assert "tests/core/__init__.py" in reached
+
+
+def test_closure_follows_import_module_package_keyword(tmp_path):
+    """Finding 3 (round 3): the package= keyword form resolves too."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": (
+                "import importlib\n"
+                'importlib.import_module(".evil", package="core")\n'
+            ),
+            "tests/core/__init__.py": "",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/evil.py" in reached
+
+
+def test_closure_follows_dunder_import_fromlist(tmp_path):
+    """Finding 3 (round 3): __import__("core", fromlist=["evil"]) loads it."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": '__import__("core", fromlist=["evil"])\n',
+            "tests/core/__init__.py": "",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/evil.py" in reached
+    assert "tests/core/__init__.py" in reached
+
+
+def test_closure_resolves_repository_root_tests_import(tmp_path):
+    """Finding 3 (round 3): from tests.core import evil loads it."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": "from tests.core import evil\n",
+            "tests/core/__init__.py": "",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/evil.py" in reached
+    assert "tests/core/__init__.py" in reached
+
+
+def test_closure_ignores_non_literal_dynamic_import(tmp_path):
+    """Finding 4 (round 2): import_module(name) cannot resolve, but no crash."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/core/start.py": (
+                "import importlib\nname = 'core.x'\nimportlib.import_module(name)\n"
+            ),
+            "tests/core/x.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "core" / "start.py", root)
+    assert "tests/core/x.py" not in reached
+
+
+def test_closure_follows_spec_from_file_location_path(tmp_path):
+    """Finding 4 (round 2): a literal path load is an import of that file."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": (
+                "import importlib.util\n"
+                'importlib.util.spec_from_file_location("m", "tests/core/x.py")\n'
+            ),
+            "tests/core/x.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/x.py" in reached
+
+
+def test_closure_includes_parent_package_inits(tmp_path):
+    """Finding 4 (round 2): from core.pkg.leaf import VALUE loads the inits."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/core/start.py": "from core.pkg.leaf import VALUE\n",
+            "tests/core/__init__.py": "",
+            "tests/core/pkg/__init__.py": "X = 1\n",
+            "tests/core/pkg/leaf.py": "VALUE = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "core" / "start.py", root)
+    assert "tests/core/pkg/leaf.py" in reached
+    assert "tests/core/pkg/__init__.py" in reached
+    assert "tests/core/__init__.py" in reached
 
 
 # File listing ----------------------------------------------------------------
@@ -150,6 +672,30 @@ def test_missing_author_fails_closed():
         ci_guard.get_pr_author(lambda sub: {"user": {}})
 
 
+def test_head_repo_comes_from_the_pr_object():
+    def get(sub):
+        return {"head": {"repo": {"full_name": "fork-owner/repo"}}}
+
+    assert ci_guard.get_head_repo_full_name(get) == "fork-owner/repo"
+
+
+def test_null_head_repo_is_untrusted_not_an_error():
+    def get(sub):
+        return {"head": {"repo": None}}
+
+    assert ci_guard.get_head_repo_full_name(get) is None
+
+
+def test_missing_head_fails_closed():
+    with pytest.raises(ci_guard.ApiError):
+        ci_guard.get_head_repo_full_name(lambda sub: {"user": {"login": "octo"}})
+
+
+def test_nameless_head_repo_fails_closed():
+    with pytest.raises(ci_guard.ApiError):
+        ci_guard.get_head_repo_full_name(lambda sub: {"head": {"repo": {}}})
+
+
 def test_unknown_collaborator_counts_as_none():
     def get(subpath):
         raise ci_guard.ApiError("GET .../permission failed with HTTP 404")
@@ -168,31 +714,62 @@ def test_other_permission_errors_fail_closed():
 # Decision --------------------------------------------------------------------
 
 
+def _same_repo(**kwargs):
+    return {"head_repo_full_name": "o/r", "base_repo_full_name": "o/r", **kwargs}
+
+
 def test_no_protected_paths_passes_without_a_permission():
-    ok, protected, message = ci_guard.evaluate(["docs/GITHUB.md", "web/a.html"], None)
+    ok, protected, message = ci_guard.evaluate(
+        ["docs/GITHUB.md", "web/a.html"], None, **_same_repo()
+    )
     assert ok and protected == []
     assert "no protected paths" in message
 
 
 def test_trusted_permission_passes_with_protected_paths():
     for permission in ("admin", "maintain", "write"):
-        ok, protected, _ = ci_guard.evaluate(["pyproject.toml"], permission)
+        ok, protected, _ = ci_guard.evaluate(["pyproject.toml"], permission, **_same_repo())
         assert ok and protected == ["pyproject.toml"], permission
 
 
 @pytest.mark.parametrize("permission", ["read", "none", None])
 def test_untrusted_permission_blocks(permission):
     ok, protected, message = ci_guard.evaluate(
-        ["pyproject.toml", "docs/GITHUB.md"], permission
+        ["pyproject.toml", "docs/GITHUB.md"], permission, **_same_repo()
     )
     assert not ok
     assert protected == ["pyproject.toml"]
     assert "pyproject.toml" in message
 
 
+def test_fork_head_always_blocks_even_with_write_permission():
+    ok, protected, message = ci_guard.evaluate(
+        ["pyproject.toml"],
+        "write",
+        head_repo_full_name="fork-owner/repo",
+        base_repo_full_name="o/r",
+    )
+    assert not ok
+    assert protected == ["pyproject.toml"]
+    assert "fork-owner/repo" in message
+    assert "maintainer must recreate" in message
+
+
+def test_null_head_repo_blocks():
+    ok, _, message = ci_guard.evaluate(
+        ["pyproject.toml"],
+        "write",
+        head_repo_full_name=None,
+        base_repo_full_name="o/r",
+    )
+    assert not ok
+    assert "unavailable" in message
+    assert "maintainer must recreate" in message
+
+
 def test_blocked_message_names_every_protected_file():
     ok, _, message = ci_guard.evaluate(
-        [".github/workflows/ci.yml", "pyproject.toml"], "read"
+        [".github/workflows/ci.yml", "pyproject.toml"], "read", **_same_repo()
     )
     assert not ok
     assert ".github/workflows/ci.yml" in message
@@ -233,11 +810,13 @@ NOTICE = "::notice title=ci-guard::"
 class FakeApi:
     """Stands in for ``api_get``: serves canned file pages, author, permission."""
 
-    def __init__(self, pages, *, author="octo", permission="write", files_error=None,
-                 permission_error=None):
+    def __init__(self, pages, *, author="octo", permission="write", head_repo="o/r",
+                 files_error=None, permission_error=None):
         self.pages = pages
         self.author = author
         self.permission = permission
+        # None stands for a deleted fork's null head repo.
+        self.head_repo = head_repo
         self.files_error = files_error
         self.permission_error = permission_error
         self.calls = []
@@ -251,7 +830,16 @@ class FakeApi:
             page = int(subpath.rsplit("page=", 1)[1])
             return self.pages[page - 1] if page <= len(self.pages) else []
         if subpath == "":
-            return {"user": {"login": self.author}}
+            head = (
+                {"repo": {"full_name": self.head_repo}}
+                if self.head_repo is not None
+                else {"repo": None}
+            )
+            return {
+                "user": {"login": self.author},
+                "head": head,
+                "base": {"repo": {"full_name": "o/r"}},
+            }
         if subpath == f"collaborators/{self.author}/permission":
             if self.permission_error is not None:
                 raise self.permission_error
@@ -301,7 +889,8 @@ def test_main_trusted_author_passes_with_notice(monkeypatch, capsys, permission)
     assert ".github/workflows/ci.yml, pyproject.toml" in lines[0]
     assert "docs/GITHUB.md" not in lines[0]
     assert f"(author @octo has '{permission}')" in lines[0]
-    assert fake.calls[1:] == ["", "collaborators/octo/permission"]
+    # The PR object is fetched once for the author and once for the head repo.
+    assert fake.calls[1:] == ["", "", "collaborators/octo/permission"]
 
 
 @pytest.mark.parametrize(
@@ -330,6 +919,42 @@ def test_main_untrusted_author_is_blocked(monkeypatch, capsys, permission, permi
         assert f"{path} ({ci_guard.is_protected(path)})" in line
     assert "README.md" not in line
     assert f"(author @stranger has '{expected}'; needs admin, maintain, or write)" in line
+    assert "D16" in err
+
+
+def test_main_fork_head_with_write_permission_is_blocked(monkeypatch, capsys):
+    fake = FakeApi(
+        _files(".github/workflows/ci.yml", "pyproject.toml"),
+        author="octo",
+        permission="write",
+        head_repo="fork-owner/repo",
+    )
+    code, out, err = _run_main(monkeypatch, capsys, fake)
+    assert code == 1
+    lines = out.splitlines()
+    assert len(lines) == 1
+    line = lines[0]
+    assert line.startswith("::error::ci_guard: blocked: PR head repository is ")
+    assert "fork-owner/repo" in line
+    assert "maintainer must recreate" in line
+    assert "(author @octo; head repo 'fork-owner/repo')" in line
+    # Fork heads always fail: the permission lookup never runs.
+    assert not any(call.startswith("collaborators/") for call in fake.calls)
+    assert "D16" in err
+
+
+def test_main_null_head_repo_is_blocked(monkeypatch, capsys):
+    fake = FakeApi(
+        _files("pyproject.toml"),
+        author="octo",
+        permission="write",
+        head_repo=None,
+    )
+    code, out, err = _run_main(monkeypatch, capsys, fake)
+    assert code == 1
+    assert "unavailable" in out
+    assert "maintainer must recreate" in out
+    assert not any(call.startswith("collaborators/") for call in fake.calls)
     assert "D16" in err
 
 

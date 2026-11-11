@@ -226,7 +226,10 @@ gh api graphql -f query='query{repository(owner:"jonschwenn",name:"Muse-Housesit
 - **CI** runs ruff and the full suite on Python 3.9 and the newest Python,
   across dedicated workflows (`.github/workflows/`, D16): `ci.yml` builds
   and tests with read-only tokens, `ci-guard.yml` guards the testing
-  mechanism, `evidence-publish.yml` publishes the evidence comment.
+  mechanism and runs main's trusted hygiene scan over PR files as data.
+  Protected-path changes require a head branch in this repo and an author
+  with write, maintain, or admin permission (D31–D32).
+  `evidence-publish.yml` publishes the evidence comment.
   `main` is protected by a ruleset that requires a PR and green `ci-ok`
   and `ci-guard` checks (`docs/GITHUB.md`). A change is not done while CI
   is red.

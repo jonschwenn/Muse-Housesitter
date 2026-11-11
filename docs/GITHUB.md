@@ -118,10 +118,16 @@ creates a second ruleset when you import, so edit the existing one instead.
 **Why only `ci-ok` (plus `ci-guard`):** `ci-ok` is a final job that
 passes only when every other CI job passed. If the Python versions in the
 test matrix change later, the ruleset doesn't need editing. `ci-guard` is
-the guard workflow's single job: it passes only when the PR touches no
-protected path, or its author has write access. `evidence-publish.yml` is
-deliberately **not** required: it only posts the evidence comment and never
-blocks a merge.
+the guard workflow's single job. Its path guard passes when the PR touches
+no protected path, or its head branch is in this repository and its author
+has write, maintain, or admin permission. Fork PRs touching protected paths
+always fail; a maintainer must recreate the change on a branch here.
+Main's `scripts/hygiene_scan.py` also scans the PR head tree's files as data
+through git plumbing, without checking out, importing, or running PR code.
+Both checks must pass (D31–D32). See [REVIEW.md](REVIEW.md), "Trusted
+hygiene scan," for scanner mechanics and import-check scope.
+`evidence-publish.yml` is deliberately **not** required: it only posts the
+evidence comment and never blocks a merge.
 
 ### Step 3: require ci-guard or re-apply the ruleset
 
