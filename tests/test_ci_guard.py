@@ -127,7 +127,7 @@ def _suite_files():
     return files
 
 
-def _resolve_import(path, level, dotted):
+def _resolve_import(path, level, dotted, root):
     """Repo-relative paths under tests/ that an import statement may load."""
     parts = dotted.split(".") if dotted else []
     if level:
@@ -136,15 +136,15 @@ def _resolve_import(path, level, dotted):
             base = base.parent
         roots = [base]
     else:
-        roots = [ROOT / "tests", path.parent]
+        roots = [root / "tests", path.parent]
     found = []
-    for root in roots:
+    for search in roots:
         for candidate in (
-            root.joinpath(*parts).with_suffix(".py"),
-            root.joinpath(*parts, "__init__.py"),
+            search.joinpath(*parts).with_suffix(".py"),
+            search.joinpath(*parts, "__init__.py"),
         ):
             try:
-                rel = candidate.relative_to(ROOT).as_posix()
+                rel = candidate.relative_to(root).as_posix()
             except ValueError:
                 continue
             if candidate.is_file():
@@ -200,29 +200,134 @@ def _spec_load_targets(tree):
     return targets
 
 
-def _repo_local_targets(path):
+def _from_import_targets(path, level, module, names, root):
+    """What ``from X import a, b`` may load: X itself plus X/a, X/b.
+
+    A ``from package import submodule`` line loads the submodule file too
+    (``from core import evil`` loads ``tests/core/evil.py``), so every
+    imported name is also tried as a submodule of the module.
+    """
+    targets = set(_resolve_import(path, level, module, root))
+    base = module or ""
+    for name in names:
+        if name == "*":
+            continue
+        dotted = f"{base}.{name}" if base else name
+        targets.update(_resolve_import(path, level, dotted, root))
+    return targets
+
+
+def _repo_local_targets(path, root):
     tree = ast.parse(path.read_text())
     targets = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                targets.update(_resolve_import(path, 0, alias.name))
+                # ``import a.b`` loads a, a.b, and the leaf file alike.
+                parts = alias.name.split(".")
+                for depth in range(1, len(parts) + 1):
+                    targets.update(
+                        _resolve_import(path, 0, ".".join(parts[:depth]), root)
+                    )
         elif isinstance(node, ast.ImportFrom):
-            targets.update(_resolve_import(path, node.level, node.module or ""))
-    targets.update(_spec_load_targets(tree))
+            targets.update(
+                _from_import_targets(
+                    path, node.level, node.module or "", [a.name for a in node.names], root
+                )
+            )
+    for target in _spec_load_targets(tree):
+        candidate = root / target
+        if candidate.is_file():
+            targets.add(target)
     return sorted(targets)
+
+
+def _closure_reachable(start, root):
+    """Every file reachable from ``start`` through repo-local imports.
+
+    Walks transitively: a protected helper importing an unprotected file
+    weakens the suite the same way a direct import does, so the walk
+    follows each reached file's own imports (tests/ and scripts/ only).
+    """
+    seen = set()
+    queue = [start.relative_to(root).as_posix()]
+    while queue:
+        rel = queue.pop()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        candidate = root / rel
+        if candidate.suffix != ".py" or not candidate.is_file():
+            continue
+        for target in _repo_local_targets(candidate, root):
+            if target not in seen:
+                queue.append(target)
+    seen.discard(start.relative_to(root).as_posix())
+    return sorted(seen)
 
 
 def test_every_repo_local_import_of_protected_suites_is_protected():
     unprotected = []
     for path in _suite_files():
         rel = path.relative_to(ROOT).as_posix()
-        for target in _repo_local_targets(path):
+        for target in _closure_reachable(path, ROOT):
             if ci_guard.is_protected(target) is None:
                 unprotected.append(f"{rel} -> {target}")
     assert not unprotected, (
         "protected suites import unprotected files:\n" + "\n".join(unprotected)
     )
+
+
+def _write_tree(root, files):
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+
+def test_closure_follows_transitive_imports(tmp_path):
+    """Finding 4: a protected helper importing an unprotected file is caught."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/suite_a.py": "import helper_mod\n",
+            "tests/helper_mod.py": "import evil_mod\n",
+            "tests/evil_mod.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "suite_a.py", root)
+    assert "tests/evil_mod.py" in reached
+
+
+def test_closure_resolves_from_import_submodule(tmp_path):
+    """Finding 4: ``from core import evil`` resolves tests/core/evil.py."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/suite_b.py": "from core import evil\n",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "suite_b.py", root)
+    assert "tests/core/evil.py" in reached
+
+
+def test_closure_resolves_relative_imports(tmp_path):
+    """Finding 4: relative imports resolve against the importing file."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/pkg/suite_c.py": "from . import sib\nfrom .. import top\n",
+            "tests/pkg/sib.py": "X = 1\n",
+            "tests/top.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "pkg" / "suite_c.py", root)
+    assert "tests/pkg/sib.py" in reached
+    assert "tests/top.py" in reached
 
 
 # File listing ----------------------------------------------------------------

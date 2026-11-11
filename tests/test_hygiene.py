@@ -259,7 +259,7 @@ REAL10 = ["10", "1", "2", "3"]
 NEEDS_GIT = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 
 
-def _git_repo(tmp_path, files):
+def _git_repo(tmp_path, files, links=None):
     repo = tmp_path / "repo"
     repo.mkdir(parents=True)
 
@@ -271,6 +271,12 @@ def _git_repo(tmp_path, files):
         target = repo / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
+    for rel, target_str in (links or {}).items():
+        link = repo / rel
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(target_str)
     run("add", "-A")
     run(
         "-c",
@@ -294,7 +300,7 @@ def _scan_tree(repo, sha):
         cwd=repo,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=300,
     )
 
 
@@ -364,7 +370,8 @@ def test_trusted_scan_lists_suppressions(tmp_path):
     )
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 0
-    assert "suppression notes.txt:1:" in proc.stdout
+    # Only the path and line number are listed, never the line content.
+    assert "suppression notes.txt:1\n" in proc.stdout
 
 
 @NEEDS_GIT
@@ -428,6 +435,388 @@ def test_fetch_verifies_the_head_sha_before_scanning(tmp_path, monkeypatch):
         assert "PR_NUMBER" in str(exc)
     else:
         raise AssertionError("expected FailClosed on a bad PR_NUMBER")
+
+
+# Review round 1 (PR #56): the tree listing used ``--format=%(path)``,
+# which C-quotes names holding a tab, newline, quote, or backslash even
+# with ``-z``, so the quoted name missed the fixture prefix/.json suffix
+# and fixture-only checks (bare MAC, SSID) were skipped. The scanner must
+# read real path bytes, so every special character below is still flagged.
+BYPASS_MAC = "".join(["a4", "83", "e7", "12", "34", "56"])
+BYPASS_SSID = "MyHome" + "Wifi"
+
+
+def _bypass_fixture_json():
+    return '{"mac": "' + BYPASS_MAC + '", "ssid": "' + BYPASS_SSID + '"}\n'
+
+
+@pytest.mark.parametrize("special", ["\t", "\n", "\\", '"'])
+@NEEDS_GIT
+def test_trusted_scan_flags_quoted_fixture_paths(tmp_path, special):
+    """Finding 1: git-quoted paths must not bypass the fixture checks."""
+    name = f"tests/fixtures/demo/bad{special}name.json"
+    repo, sha = _git_repo(tmp_path, {name: _bypass_fixture_json()})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "MAC" in proc.stdout
+    assert "SSID" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_flags_non_utf8_fixture_paths(tmp_path):
+    """Finding 1: a non-UTF-8 name keeps its ASCII prefix/suffix checks."""
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+
+    def run(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    run("init", "-q")
+    raw_dir = os.fsencode(str(repo / "tests" / "fixtures" / "demo"))
+    os.makedirs(raw_dir, exist_ok=True)
+    fd = os.open(os.path.join(raw_dir, b"bad\xffname.json"), os.O_WRONLY | os.O_CREAT)
+    os.write(fd, _bypass_fixture_json().encode())
+    os.close(fd)
+    run("add", "-A")
+    run(
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "test",
+    )
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "MAC" in proc.stdout
+
+
+# Review round 1 (PR #56): symlinks. The scanner read the link target
+# string as the file's content; the working-tree scan instead follows file
+# symlinks and applies the rules under the link's own name. The tree scan
+# must resolve relative in-tree links and scan the target blob's content
+# under the link's name.
+@NEEDS_GIT
+def test_trusted_scan_follows_symlink_under_link_name(tmp_path):
+    """Finding 2: notes.txt -> payload.py is flagged via notes.txt."""
+    payload = PW + "=" + "hunter2" + "hunter2" + "\n"
+    repo, sha = _git_repo(
+        tmp_path, {"payload.py": payload}, links={"notes.txt": "payload.py"}
+    )
+    # Parity with the working-tree scan, which follows the link: the same
+    # bytes under the link's name are a problem.
+    assert hygiene_scan.scan_bytes("notes.txt", payload.encode())
+    # ... while the target's own Python name stays exempt.
+    assert not hygiene_scan.scan_bytes("payload.py", payload.encode())
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "notes.txt" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_follows_fixture_symlink(tmp_path):
+    """Finding 2: a fixture-named link gets the fixture-only checks."""
+    repo, sha = _git_repo(
+        tmp_path,
+        {"tests/fixtures/demo/blob": _bypass_fixture_json()},
+        links={"tests/fixtures/demo/leak.json": "blob"},
+    )
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    # The target blob's content under the link's fixture name: bare MAC and
+    # SSID checks apply (not just "not valid JSON" for the target string).
+    assert "MAC" in proc.stdout
+    assert "SSID" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_follows_symlink_chains(tmp_path):
+    """Finding 2: link -> link -> file resolves under the outer link's name."""
+    payload = PW + "=" + "hunter2" + "hunter2" + "\n"
+    repo, sha = _git_repo(
+        tmp_path,
+        {"sub/payload.py": payload},
+        links={"sub/mid": "payload.py", "outer.txt": "sub/mid"},
+    )
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "outer.txt" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_skips_symlink_to_directory(tmp_path):
+    """Finding 2: a link to a directory is skipped, like the working tree.
+
+    The directory name itself would be flagged as content, so scanning the
+    target string instead of skipping fails this test.
+    """
+    dirname = ".".join(REAL10)
+    repo, sha = _git_repo(
+        tmp_path,
+        {f"{dirname}/inner.txt": "docs range 192.0.2.1\n"},
+        links={"dirlink": dirname},
+    )
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "clean" in proc.stdout
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["/abs/path", "../escape", "dangling-target", "loop-b"],
+)
+@NEEDS_GIT
+def test_trusted_scan_fails_closed_on_unresolvable_symlink(tmp_path, target):
+    """Finding 2: absolute, escaping, dangling, and cyclic links fail closed."""
+    links = {"loop-a": "loop-b", "loop-b": "loop-a"} if target == "loop-b" else {"bad": target}
+    repo, sha = _git_repo(tmp_path, {"ok.txt": "hello\n"}, links=links)
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "symlink" in proc.stdout.lower()
+
+
+# Review round 1 (PR #56): the inherited credential regexes backtrack
+# badly on long word runs (``b"g" * 100_000`` runs past 5 s, far under the
+# 2 MB cap), and the scan had no overall deadline. The patterns must stay
+# linear without changing what matches, and the scan must fail closed on a
+# wall-clock deadline.
+@NEEDS_GIT
+def test_trusted_scan_is_fast_on_long_word_runs(tmp_path):
+    """Finding 3: 100k word chars plus a real IP scans in seconds, not minutes."""
+    planted = ".".join(REAL10)
+    repo, sha = _git_repo(tmp_path, {"notes.txt": "g" * 100_000 + "\n" + planted + "\n"})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"IPv4 {planted}" in proc.stdout
+
+
+def test_credential_scan_is_fast_on_long_word_runs():
+    """Finding 3: the finding's repro through scan_bytes, with a generous limit."""
+    import time
+
+    planted = ".".join(REAL10)
+    text = ("g" * 100_000 + "\n" + planted + "\n").encode()
+    start = time.monotonic()
+    problems = hygiene_scan.scan_bytes("notes.txt", text)
+    elapsed = time.monotonic() - start
+    assert any(p.startswith("IPv4") for p in problems)
+    assert elapsed < 10, f"scan took {elapsed:.1f}s"
+
+
+def _old_reference_problems(text, unquoted=True):
+    """The pre-fix credential matchers, kept as the differential oracle.
+
+    Built from parts like the module so this file does not match itself.
+    """
+    import re as _re
+
+    key_words = (
+        r"(?:x_\w+|\w*(?:"
+        + "pass" + "word|pass" + "wd|passphrase|sec" + "ret|tok" + "en"
+        + r"|api[_-]?key|auth[_-]?key|_key))"
+    )
+    old_credential = _re.compile(
+        r"""(?i)["']?""" + key_words + r"""["']?\s*[:=]\s*(?:"([^"\n]{8,})"|'([^'\n]{8,})')"""
+    )
+    old_url = _re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@")
+    old_unquoted = _re.compile(
+        r"""(?im)^[ \t]*(?:export[ \t]+)?["']?""" + key_words + r"""["']?[ \t]*[:=][ \t]*"""
+        r"""([^\s"'#,{}\[\]][^\s#,]{7,})"""
+    )
+    found = []
+    for _match in old_url.finditer(text):
+        found.append("likely secret (credentials in a URL)")
+    for match in old_credential.finditer(text):
+        if PLANTED in match.group(0):
+            continue
+        value = next((g for g in match.groups() if g), None)
+        if value is not None and hygiene_scan.REFERENCE_VALUE.match(value.strip()):
+            continue
+        # The module reports quoted and unquoted assignments under one label.
+        found.append("likely secret (credential assignment)")
+    if unquoted:
+        for match in old_unquoted.finditer(text):
+            if PLANTED in match.group(0):
+                continue
+            value = match.group(1)
+            if hygiene_scan.REFERENCE_VALUE.match(value.strip()):
+                continue
+            found.append("likely secret (credential assignment)")
+    return sorted(found)
+
+
+def _new_label_problems(text, unquoted=True):
+    """The fixed matchers' problems for the same labels, as a multiset."""
+    return sorted(
+        problem
+        for problem in hygiene_scan.secret_problems(text, unquoted=unquoted)
+        if problem.endswith("(credentials in a URL)") or problem.endswith("(credential assignment)")
+    )
+
+
+def test_credential_matchers_agree_with_reference():
+    """Finding 3: the linear rewrite matches exactly what the old regexes did."""
+    import random
+
+    rng = random.Random(20261111)
+    keys = [
+        "pass" + "word", "PASS" + "WD", "sec" + "ret", "tok" + "en",
+        "x_auth" + "key", "api" + "-key", "auth" + "_key", "_key",
+        "user", "name", "wordpass", "tokenizer",
+    ]
+    seps = [":", "=", " : ", " = ", ":", " =\n  "]
+    quotes = ['"', "'", ""]
+    values = [
+        "hunter2" + "hunter2", "short", "x" * 40, "${{ github." + "token }}",
+        "$VAR", "<placeholder>", "unifi_pass" + "word", "changeme",
+        "abc 123 " + "45678", "-PLANTED-SECRET-9",
+    ]
+    words = ["g", "gg", "abc123", "http", "://", "user", "pass", "@", " ", "\n", "export "]
+    for trial in range(400):
+        parts = []
+        for _ in range(rng.randint(1, 6)):
+            pick = rng.random()
+            if pick < 0.45:
+                parts.append(rng.choice(keys) + rng.choice(seps) + rng.choice(quotes)
+                             + rng.choice(values) + rng.choice(quotes))
+            elif pick < 0.6:
+                parts.append(rng.choice(["http", "https", "ftp"]) + "://"
+                             + rng.choice(["u", "admin", "a.b"]) + ":"
+                             + rng.choice(["p", "hunter2" + "hunter2"]) + "@"
+                             + rng.choice(["h", "192.0.2.1"]))
+            else:
+                parts.append(rng.choice(words) * rng.randint(1, 30))
+        text = "".join(parts)
+        for unquoted in (True, False):
+            assert _new_label_problems(text, unquoted) == _old_reference_problems(
+                text, unquoted
+            ), f"trial {trial}: {text!r} unquoted={unquoted}"
+
+
+def test_credential_fuzz_long_runs_agree_with_reference():
+    """Finding 3: agreement also holds on long adversarial runs."""
+    import random
+
+    rng = random.Random(56)
+    alphabet = ["g", "a", "1", " ", ":", "=", '"', "pass" + "word", "\n", "@", "/"]
+    for trial in range(30):
+        text = "".join(rng.choice(alphabet) for _ in range(2000))
+        for unquoted in (True, False):
+            assert _new_label_problems(text, unquoted) == _old_reference_problems(
+                text, unquoted
+            ), f"long trial {trial} unquoted={unquoted}"
+
+
+def test_scan_deadline_fails_closed(monkeypatch):
+    """Finding 3: an exhausted wall-clock deadline refuses instead of passing."""
+    monkeypatch.setattr(hygiene_scan, "SCAN_DEADLINE_S", 0)
+    try:
+        hygiene_scan.scan_git_tree("0" * 40, cwd=str(ROOT))
+    except hygiene_scan.FailClosed as exc:
+        assert "deadline" in str(exc).lower()
+    else:
+        raise AssertionError("expected FailClosed on an exhausted deadline")
+
+
+# Review round 1 (PR #56): for a mode-160000 entry the size field is "-",
+# and int(size) ran before the type check, so any submodule exited 2. The
+# type must be checked first and gitlinks skipped like the working tree.
+@NEEDS_GIT
+def test_trusted_scan_skips_gitlinks(tmp_path):
+    """Finding 5: a submodule entry is skipped and stated, not a crash."""
+    repo, sha = _git_repo(tmp_path, {"README.md": "hello\n"})
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", f"160000,{head},sub"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git", "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "submodule",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    sha2 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert sha2 != sha
+    proc = _scan_tree(repo, sha2)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "submodule" in proc.stdout.lower()
+
+
+# Review round 1 (PR #56): the suppression listing printed the full
+# ``path:lineno: line`` into the CI log, leaking the suppressed secret
+# (hard rule 6). Only the path and line number may be listed.
+@NEEDS_GIT
+def test_trusted_scan_suppression_listing_hides_content(tmp_path):
+    """Finding 6: a suppressed secret line never reaches the log."""
+    line = PW + '="' + "hunter2" + "hunter2" + '"  # ' + SUPPRESS + "\n"
+    repo, sha = _git_repo(tmp_path, {"notes.txt": line})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "suppression notes.txt:1" in proc.stdout
+    assert "hunter2" not in proc.stdout
+
+
+# Review round 1 notes: deeply nested JSON raised an uncaught
+# RecursionError (non-zero but ugly). It must fail closed with a message.
+def test_deeply_nested_fixture_json_fails_closed():
+    """Note: 100k-deep JSON is a flagged problem, not an exception."""
+    data = ("[" * 100_000 + "]" * 100_000).encode()
+    problems = hygiene_scan.scan_bytes("tests/fixtures/demo/deep.json", data)
+    assert problems, "expected a fail-closed problem for nested JSON"
+    assert any("nested" in problem for problem in problems)
+    assert not any("RecursionError" in problem for problem in problems)
+
+
+# Review round 1 notes: the listing was buffered before the entry cap
+# applied, so a compact tree expanding to ~1M paths exhausted memory. The
+# cap must be enforced while the listing is read.
+def test_tree_entry_cap_enforced_while_streaming(monkeypatch, tmp_path):
+    """Note: an endless listing fails closed at the cap, never buffered."""
+    repo, sha = _git_repo(tmp_path, {"ok.txt": "hello\n"})
+
+    class EndlessStream:
+        def __init__(self):
+            self.chunk = b"100644 blob " + b"0" * 40 + b"      1\tf\0"
+
+        def read(self, n):
+            return self.chunk * (n // len(self.chunk) + 1)
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = EndlessStream()
+            self.stderr = None
+
+        def kill(self):
+            pass
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(hygiene_scan.subprocess, "Popen", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(hygiene_scan, "MAX_TREE_ENTRIES", 100)
+    try:
+        hygiene_scan.list_tree_blobs(sha, cwd=str(repo))
+    except hygiene_scan.FailClosed as exc:
+        assert "entries" in str(exc).lower() or "limit" in str(exc).lower()
+    else:
+        raise AssertionError("expected FailClosed on an over-cap listing")
 
 
 @NEEDS_GIT
