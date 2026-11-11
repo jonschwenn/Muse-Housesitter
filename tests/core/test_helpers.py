@@ -13,6 +13,8 @@ import socket
 import threading
 import time
 
+import pytest
+
 from .helpers import Canned, ScriptedServer, canned_handler, generate_cert
 
 OK = canned_handler({}, default=Canned(body=b"ok"))
@@ -100,3 +102,24 @@ def test_close_is_bounded_when_a_tls_client_never_handshakes(tmp_path):
     assert elapsed < 4.0
     assert server.peer_bytes == []
     assert server.requests == []
+
+
+def test_close_raises_when_a_connection_thread_is_stuck(monkeypatch):
+    # close() must not return partial records silently: a connection
+    # thread still running after its join is an error.
+    release = threading.Event()
+
+    def blocking(request):
+        release.wait(10)
+        return Canned(body=b"ok")
+
+    monkeypatch.setattr(ScriptedServer, "join_timeout_s", 0.1)
+    server = ScriptedServer(blocking)
+    try:
+        with socket.create_connection(("127.0.0.1", server.port), timeout=5) as sock:
+            sock.sendall(b"GET /x HTTP/1.1\r\nHost: t\r\n\r\n")
+            _wait_for(lambda: server.requests)
+            with pytest.raises(AssertionError, match="still running"):
+                server.close()
+    finally:
+        release.set()

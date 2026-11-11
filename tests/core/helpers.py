@@ -67,6 +67,8 @@ def generate_cert(directory):
 class ScriptedServer:
     """A tiny scripted HTTP server over a plain or TLS socket."""
 
+    join_timeout_s = 5.0  # per thread, in close()
+
     def __init__(self, handler, tls_cert=None, tls_key=None):
         self._handler = handler
         self.connections = 0
@@ -100,7 +102,8 @@ class ScriptedServer:
         still sending is waited for (each handshake or recv times out after
         2 s). Canned sleeps end early once the stop flag is set, and a
         canned drip sends the rest of its body without the delays. If a
-        thread is still alive after a 5 s join, this raises rather than
+        thread is still alive after its own 5 s join (``join_timeout_s``, per
+        thread, so N stuck threads take about 5 x N s), this raises rather than
         let a test read partial records.
         """
         self._stop.set()
@@ -108,10 +111,10 @@ class ScriptedServer:
             self._sock.shutdown(socket.SHUT_RDWR)  # wakes accept() on Linux
         except OSError:
             pass
-        self._thread.join(timeout=5)
+        self._thread.join(timeout=self.join_timeout_s)
         stuck = self._thread.is_alive()
         for worker in list(self._workers):
-            worker.join(timeout=5)
+            worker.join(timeout=self.join_timeout_s)
             stuck = stuck or worker.is_alive()
         self._sock.close()
         if stuck:
