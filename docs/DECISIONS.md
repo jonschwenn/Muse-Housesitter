@@ -605,3 +605,29 @@ handoff's "license not chosen; don't publish."
   records (a cap is simpler and these lists are short); a cap of 20 (a full
   list of hostile emoji names could use about 49 KB of the 90 KB output budget,
   which cannot be paged).
+
+### D30. Split work by model family (2026-11-11, Jon)
+- **Decision:** split work by model family. Muse Spark (`muse-spark-1.3`,
+  provider "Muse Code") writes code and tests, including adversarial
+  testing that tries to break code. Codex (`gpt-6.1-sol`) handles the front
+  end (`web/`) and documentation prose (`docs/`, `AGENTS.md`,
+  `docs/DECISIONS.md` entries, module `SKILL.md` files, and `README.md`,
+  leaving Jon's own introduction as he wrote it, D20). Claude handles
+  orchestration, backend design, briefs, final verification, and PRs.
+  For every doc, including `docs/ARCHITECTURE.md`, Claude supplies the
+  facts and checks accuracy; Codex writes the prose.
+  Every brief that starts work names its model. Gate 2 and gate 3 reviews
+  use a model family other than the one that wrote the change, applying
+  D22's reasoning to the required gates; the deep review in REVIEW.md
+  stays optional. If the assigned agent is unavailable, or for a
+  small fix found in review, another agent may do the work; the PR says so.
+- **Why:** spread token use across providers and get review from another
+  model family. Five audit-fix threads silently defaulted to Claude and
+  hit Claude's usage limit together. Separate threads alone do not spread
+  the work across providers; each brief must name its model.
+- **Rejected:** keeping the split only in issue owner labels (agents not
+  working from issues never see it); one model for everything (one
+  provider's limit stops all work, and same-family review shares blind
+  spots, see D22).
+- **Status:** a two-way door: how we work for now, reversible if it proves
+  too heavy or too light. Revisit with a new entry that supersedes this one.
