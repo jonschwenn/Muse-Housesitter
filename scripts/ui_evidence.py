@@ -337,19 +337,77 @@ def diff_rgba(before: tuple, after: tuple) -> tuple:
     return True, (w, h, bytes(out))
 
 
+def png_size(data: bytes) -> tuple:
+    """Read (width, height) from a PNG's header (IHDR) without decoding it.
+
+    The PNG spec puts IHDR first: bytes 8-12 hold its length (13), 12-16 its
+    type, then width and height (4 bytes each), bit depth, colour type, and
+    interlace. Raises ValueError for anything that is not an 8-bit RGB/RGBA
+    non-interlaced PNG header, the same formats decode_png accepts.
+    """
+    if data[:8] != PNG_MAGIC:
+        raise ValueError("not a PNG file")
+    if len(data) < 8 + 8 + 13:
+        raise ValueError("truncated PNG header")
+    (length,) = struct.unpack(">I", data[8:12])
+    if data[12:16] != b"IHDR" or length != 13:
+        raise ValueError("PNG does not start with an IHDR chunk")
+    width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
+        ">IIBBBBB", data[16:29]
+    )
+    if bit_depth != 8 or color_type not in (2, 6) or interlace != 0:
+        raise ValueError(
+            f"unsupported PNG: {bit_depth}-bit color type {color_type}, "
+            f"interlace {interlace}"
+        )
+    return width, height
+
+
 def clip_to_max_height(shot: bytes) -> tuple:
     """Crop a full-page PNG to MAX_SHOT_HEIGHT_PX rows. Returns (shot, cropped).
 
-    Raises ValueError for undecodable input; callers that already report such
-    shots (check_page, F7 in build_manifest) leave the bytes alone instead.
+    The height comes from the header, so a shot at or under the cap is
+    returned as is without decoding it (pure-Python decoding of a full-page
+    shot takes seconds). Only a taller shot is decoded and cropped.
+
+    Raises ValueError for a missing, malformed, or unsupported header, and
+    for undecodable image data in a shot that needs cropping; callers that
+    already report such shots (check_page, F7 in build_manifest) leave the
+    bytes alone instead.
     """
+    _, height = png_size(shot)
+    if height <= MAX_SHOT_HEIGHT_PX:
+        return shot, False
     width, height, rgba = decode_png(shot)
+    # decode_png's size is the one the crop uses, as before this fast path.
+    # The two only disagree for a non-conforming PNG with a second IHDR.
     if height <= MAX_SHOT_HEIGHT_PX:
         return shot, False
     return (
         encode_png(width, MAX_SHOT_HEIGHT_PX, 6, rgba[:width * MAX_SHOT_HEIGHT_PX * 4]),
         True,
     )
+
+
+def classify_and_diff(before_png: bytes | None, after_png: bytes | None) -> tuple:
+    """Classify a capture pair and keep the diff. Returns (status, diff).
+
+    diff is diff_rgba's (width, height, RGB bytes) for a "changed" pair and
+    None otherwise. Each side is decoded at most once, so the diff image
+    reuses the classification's work.
+    """
+    if before_png is None and after_png is None:
+        raise ValueError("both sides missing")
+    if before_png is None:
+        return "added", None
+    if after_png is None:
+        return "removed", None
+    if before_png == after_png:
+        return "unchanged", None
+    before = decode_png(before_png)
+    after = decode_png(after_png)
+    changed, diff = diff_rgba(before, after)
+    return ("changed", diff) if changed else ("unchanged", None)
 
 
 def classify_pair(before_png: bytes | None, after_png: bytes | None) -> str:
@@ -360,18 +418,7 @@ def classify_pair(before_png: bytes | None, after_png: bytes | None) -> str:
     that differ are always decoded and compared pixel by pixel, so an
     encoder quirk can never count as a visual change.
     """
-    if before_png is None and after_png is None:
-        raise ValueError("both sides missing")
-    if before_png is None:
-        return "added"
-    if after_png is None:
-        return "removed"
-    if before_png == after_png:
-        return "unchanged"
-    before = decode_png(before_png)
-    after = decode_png(after_png)
-    changed, _ = diff_rgba(before, after)
-    return "changed" if changed else "unchanged"
+    return classify_and_diff(before_png, after_png)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -631,15 +678,16 @@ def build_manifest(
             # evidence too: mark the pair changed with no diff image and a
             # note, instead of crashing before the manifest is written.
             diff_error = None
+            diff = None
             try:
-                status = classify_pair(base_png, head_png)
+                status, diff = classify_and_diff(base_png, head_png)
             except ValueError as exc:
                 status = "changed"
                 diff_error = f"diff unavailable: {exc}"
             diff_file = None
             if status == "changed" and diff_error is None:
-                # classify_pair just decoded both sides, so this cannot fail.
-                _, (w, h, rgb) = diff_rgba(decode_png(base_png), decode_png(head_png))
+                # The diff comes from the classification's single decode.
+                w, h, rgb = diff
                 diff_file = diff_name(fixture, view_id)
                 (out_dir / diff_file).write_bytes(encode_png(w, h, 2, rgb))
             if status == "unchanged":

@@ -506,6 +506,36 @@ def test_changed_pair_with_decodable_pngs_still_writes_a_diff(tmp_path):
     assert (out / "typical__index-phone__diff.png").is_file()
 
 
+
+def test_changed_pair_is_decoded_once_per_side(tmp_path, monkeypatch):
+    # Classification already decodes both sides; the diff image reuses that
+    # work instead of decoding both PNGs again.
+    base, head = _manifest_trees(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    before, after = rgba_png(6, 5), rgb_png(6, 5, (200, 1, 1))
+    _write_pair(out, before, after)
+    want_diff = ui_evidence.diff_rgba(
+        ui_evidence.decode_png(before), ui_evidence.decode_png(after)
+    )[1]
+    calls = []
+    real_decode = ui_evidence.decode_png
+
+    def counting_decode(data):
+        calls.append(data)
+        return real_decode(data)
+
+    monkeypatch.setattr(ui_evidence, "decode_png", counting_decode)
+    manifest = ui_evidence.build_manifest(base, head, out, {})
+    assert [c["status"] for c in manifest["captures"]] == ["changed"] * len(VIEWS_UNDER_TEST)
+    assert calls.count(before) == len(VIEWS_UNDER_TEST)
+    assert calls.count(after) == len(VIEWS_UNDER_TEST)
+    assert len(calls) == 2 * len(VIEWS_UNDER_TEST)
+    w, h, rgb = want_diff
+    for view in VIEWS_UNDER_TEST:
+        diff_png = (out / f"typical__{view}__diff.png").read_bytes()
+        assert diff_png == ui_evidence.encode_png(w, h, 2, rgb)
+
 def test_unchanged_pair_drops_its_pngs(tmp_path):
     base, head = _manifest_trees(tmp_path)
     out = tmp_path / "out"
@@ -581,6 +611,73 @@ def test_tall_shot_is_cropped(monkeypatch):
     small = rgb_png(3, 3)
     assert ui_evidence.clip_to_max_height(small) == (small, False)
 
+
+
+def _no_decode(_data):
+    raise AssertionError("decode_png must not run for a shot under the cap")
+
+
+def test_short_shot_is_returned_without_decoding(monkeypatch):
+    # The PNG header (IHDR) already holds the height, so a shot at or under
+    # the cap is never decoded: decoding a full-page shot in pure Python
+    # just to read its height took ~2 s per shot in CI.
+    monkeypatch.setattr(ui_evidence, "MAX_SHOT_HEIGHT_PX", 10)
+    monkeypatch.setattr(ui_evidence, "decode_png", _no_decode)
+    for shot in (rgb_png(3, 3), rgba_png(5, 10)):
+        assert ui_evidence.clip_to_max_height(shot) == (shot, False)
+
+
+def test_short_shot_with_bad_image_data_is_returned_unchanged(monkeypatch):
+    # Only the header is read for a short shot. Before, bad image data raised
+    # ValueError and the capture loop kept the bytes; the result is the same.
+    monkeypatch.setattr(ui_evidence, "MAX_SHOT_HEIGHT_PX", 10)
+    shot = bytearray(rgb_png(4, 4))
+    idat = shot.index(b"IDAT")
+    shot[idat + 4:idat + 8] = b"\xff\xff\xff\xff"
+    shot = bytes(shot)
+    assert ui_evidence.clip_to_max_height(shot) == (shot, False)
+
+
+def test_tall_shot_is_cropped_exactly_as_before(monkeypatch):
+    monkeypatch.setattr(ui_evidence, "MAX_SHOT_HEIGHT_PX", 10)
+    for tall_shot in (rgba_png(3, 12), rgb_png(2, 11, (1, 2, 3))):
+        width, _, rgba = ui_evidence.decode_png(tall_shot)
+        want = ui_evidence.encode_png(width, 10, 6, rgba[:width * 10 * 4])
+        assert ui_evidence.clip_to_max_height(tall_shot) == (want, True)
+
+
+def _bad_header(kind: str) -> bytes:
+    shot = bytearray(rgb_png(4, 4))
+    if kind == "not-png":
+        return b"definitely not a png, but long enough to have a header"
+    if kind == "magic-only":
+        return bytes(shot[:8])
+    if kind == "truncated-ihdr":
+        return bytes(shot[:20])
+    if kind == "first-chunk-not-ihdr":
+        shot[12:16] = b"tEXt"
+        return bytes(shot)
+    if kind == "ihdr-wrong-length":
+        shot[8:12] = (12).to_bytes(4, "big")
+        return bytes(shot)
+    raise AssertionError(kind)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["not-png", "magic-only", "truncated-ihdr", "first-chunk-not-ihdr", "ihdr-wrong-length"],
+)
+def test_clip_rejects_a_missing_or_malformed_header(monkeypatch, kind):
+    monkeypatch.setattr(ui_evidence, "decode_png", _no_decode)
+    with pytest.raises(ValueError):
+        ui_evidence.clip_to_max_height(_bad_header(kind))
+
+
+@pytest.mark.parametrize("kind", ["palette", "sixteen-bit", "interlaced"])
+def test_clip_still_rejects_unsupported_pngs(monkeypatch, kind):
+    monkeypatch.setattr(ui_evidence, "decode_png", _no_decode)
+    with pytest.raises(ValueError, match="unsupported PNG"):
+        ui_evidence.clip_to_max_height(_unsupported_variant(kind))
 
 # Publisher wiring: evidence-publish.yml validates with main's code --------------
 
