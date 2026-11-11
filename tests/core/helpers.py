@@ -77,7 +77,9 @@ class ScriptedServer:
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(16)
-        self._sock.settimeout(0.5)
+        # close() wakes accept() with shutdown(); the short timeout is only
+        # a fallback for platforms where shutdown() does not wake it.
+        self._sock.settimeout(0.05)
         self.port = self._sock.getsockname()[1]
         if tls_cert is not None:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -86,12 +88,25 @@ class ScriptedServer:
         else:
             self._tls = None
         self._stop = threading.Event()
+        self._workers: list[threading.Thread] = []
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
     def close(self):
+        """Stop accepting, then wait for every connection to finish.
+
+        When this returns, ``connections``, ``peer_bytes`` and ``requests``
+        are final: no connection thread is still recording. Canned sleeps
+        and drips end early once the stop flag is set.
+        """
         self._stop.set()
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)  # wakes accept() on Linux
+        except OSError:
+            pass
         self._thread.join(timeout=5)
+        for worker in self._workers:
+            worker.join(timeout=5)
         self._sock.close()
 
     def __enter__(self):
@@ -109,6 +124,7 @@ class ScriptedServer:
             except OSError:
                 return
             thread = threading.Thread(target=self._serve_one, args=(raw,), daemon=True)
+            self._workers.append(thread)
             thread.start()
 
     def _serve_one(self, raw):
@@ -168,9 +184,7 @@ class ScriptedServer:
                 self.requests.append(request)
             canned = self._handler(request)
             if canned.sleep_s:
-                import time
-
-                time.sleep(canned.sleep_s)
+                self._stop.wait(canned.sleep_s)
             text = f"HTTP/1.1 {canned.status} Reason\r\n".encode("latin-1")
             outgoing = dict(canned.headers)
             outgoing.setdefault("Content-Length", str(len(canned.body)))
@@ -188,14 +202,12 @@ class ScriptedServer:
                 sock.close()
                 return
             if canned.drip_s:
-                import time
-
                 for index in range(0, len(canned.body), 1024):
                     try:
                         sock.sendall(canned.body[index:index + 1024])
                     except OSError:
                         break
-                    time.sleep(canned.drip_s)
+                    self._stop.wait(canned.drip_s)
                 sock.close()
                 return
             text = canned.body
