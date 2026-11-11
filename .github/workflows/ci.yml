@@ -42,9 +42,7 @@ jobs:
   test:
     name: test (${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    # Temporary stopgap: recent runs took 542-587 s against a 600 s limit.
-    # The ScriptedServer close fix sets this back to 10.
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
     strategy:
@@ -75,6 +73,10 @@ jobs:
           # No third-party pytest plugin is installed or needed; disabling
           # entry-point autoload closes the plugin-weakening vector (D16).
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          # Missing test prerequisites (openssl, wheel-build tooling)
+          # fail instead of skipping, so a stripped runner or a broken
+          # build can never show up as green.
+          HOUSESITTER_REQUIRE_TEST_TOOLS: "1"
         run: pytest --junitxml=junit.xml -o junit_suite_name=python-${{ steps.setup-python.outputs.python-version }}
       - name: Test results summary
         # Never fails the job: a bad file prints a one-line notice and the
@@ -98,6 +100,7 @@ jobs:
         # the trusted hygiene scan runs in ci-guard (D16).
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          HOUSESITTER_REQUIRE_TEST_TOOLS: "1"
         run: |
           set -euo pipefail
           suites=()

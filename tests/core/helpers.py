@@ -10,13 +10,78 @@ as "a disallowed path never opened a socket".
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import os
 import shutil
 import socket
 import ssl
 import subprocess
 import threading
 from dataclasses import dataclass, field
+
+
+def tools_required():
+    """True when missing test prerequisites must fail instead of skip.
+
+    CI sets ``HOUSESITTER_REQUIRE_TEST_TOOLS=1`` for the ``test`` job, so
+    a stripped runner or a broken build shows up red, never green. With
+    the variable unset (local runs), missing tools skip as before.
+    """
+    return os.environ.get("HOUSESITTER_REQUIRE_TEST_TOOLS") == "1"
+
+
+def require_test_tool(present, message):
+    """Skip when a test prerequisite is missing; fail when it is required.
+
+    ``present`` is whether the tool was found; ``message`` names it.
+    Returns None when the tool is present.
+    """
+    if present:
+        return None
+    if tools_required():
+        import pytest
+
+        pytest.fail(message)
+    import pytest
+
+    pytest.skip(message)
+
+
+def fail_on_proc_error(proc, what):
+    """Fail the test when a completed subprocess failed; return it else.
+
+    ``proc`` is a ``CompletedProcess`` or ``CalledProcessError`` (both
+    carry ``returncode`` and ``stderr``); ``what`` names the step. The
+    failure message carries the tail of stderr.
+    """
+    if proc.returncode != 0:
+        import pytest
+
+        err = proc.stderr
+        if isinstance(err, bytes):
+            tail = err.decode(errors="replace")[-300:]
+        else:
+            tail = str(err or "")[-300:]
+        pytest.fail(f"{what} failed (rc={proc.returncode}): {tail}")
+    return proc
+
+
+@contextlib.contextmanager
+def expect_failure(match=None):
+    """Like ``pytest.raises(pytest.fail.Exception)``, but a skip fails.
+
+    ``pytest.raises`` lets a skip escape, and an escaped skip makes the
+    test skip, not fail; so a regression from fail back to skip would
+    stay green. Here it fails the test.
+    """
+    import pytest
+
+    try:
+        with pytest.raises(pytest.fail.Exception, match=match) as info:
+            yield info
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"expected a failure, but the code skipped: {exc}")
 
 
 @dataclass
@@ -38,14 +103,17 @@ class Canned:
 
 
 def generate_cert(directory):
-    """Create a throwaway self-signed cert; skip when openssl is missing.
+    """Create a throwaway self-signed cert.
+
+    Skips when openssl is missing, unless
+    ``HOUSESITTER_REQUIRE_TEST_TOOLS=1`` demands it and fails instead.
 
     Returns ``(cert_path, key_path, sha256_hex_of_leaf_der)``.
     """
-    if shutil.which("openssl") is None:
-        import pytest
-
-        pytest.skip("openssl is not on PATH: cannot mint a throwaway test cert")
+    require_test_tool(
+        shutil.which("openssl") is not None,
+        "openssl is not on PATH: cannot mint a throwaway test cert",
+    )
     cert_path = str(directory / "cert.pem")
     key_path = str(directory / "key.pem")
     subprocess.run(
