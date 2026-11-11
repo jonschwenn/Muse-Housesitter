@@ -1068,6 +1068,153 @@ def test_scan_deadline_checked_before_reporting_clean(tmp_path, monkeypatch):
     assert "finishing the scan" in calls
 
 
+def test_line_lookup_matches_newline_count():
+    """Finding 2 (round 3): the bisect lookup reports the old count's lines."""
+    import random
+
+    rng = random.Random(20261114)
+    for _ in range(200):
+        text = "".join(
+            rng.choice(["a", "\n", "ab\n", "\r", "x" * 50])
+            for _ in range(rng.randint(1, 50))
+        )
+        line_of = hygiene_scan._line_lookup(text)
+        for _ in range(20):
+            pos = rng.randint(0, len(text))
+            assert line_of(pos) == text.count("\n", 0, pos) + 1, (
+                f"{text!r} at {pos}"
+            )
+
+
+def test_ip_fast_paths_agree_with_ipaddress_reference():
+    """Finding 2 (round 3): integer/head checks decide exactly what parses did."""
+    import ipaddress
+    import random
+
+    rng = random.Random(20261115)
+    quads = [
+        ["192", "0", "2", "0"], ["192", "0", "2", "255"], ["192", "0", "3", "0"],
+        ["191", "255", "255", "255"], ["198", "51", "100", "0"],
+        ["198", "51", "100", "255"], ["198", "51", "101", "0"],
+        ["203", "0", "113", "0"], ["203", "0", "113", "255"],
+        ["203", "0", "114", "0"], ["127", "0", "0", "0"],
+        ["127", "255", "255", "255"], ["128", "0", "0", "0"],
+        ["0", "0", "0", "0"], ["0", "0", "0", "1"], ["255", "0", "0", "0"],
+        ["255", "255", "255", "255"], ["10", "1", "1", "1"],
+        ["010", "000", "000", "001"], ["6", "6", "77", "15402"],
+        ["1", "2", "3", "256"], ["999", "1", "1", "1"],
+    ]
+    for _ in range(500):
+        quads.append([str(rng.randint(0, 999)) for _ in range(4)])
+    # The oracle replays the old slow path per regex match: the fast path
+    # may only change how a matched candidate is decided, never what the
+    # regex matches or which matches are skipped.
+    for quad in quads:
+        text = ".".join(quad) + "\n"
+        got = hygiene_scan.ip_problems(text)
+        expected = []
+        for found in hygiene_scan.IPV4_RE.finditer(text):
+            parts = [int(p) for p in found.group(0).split(".")]
+            if any(p > 255 for p in parts):
+                continue
+            addr = ipaddress.ip_address(".".join(map(str, parts)))
+            if not any(addr in net for net in hygiene_scan.ALLOWED_NETS):
+                expected.append("IPv4 address at line 1")
+        assert got == expected, quad
+    hex4 = ["0", "00", "1", "2001", "db8", "DB8", "ff00", "FF02", "fe80",
+            "ffff", "0000", "0001", "abcd", "1234"]
+    for _ in range(500):
+        groups = [rng.choice(hex4) for _ in range(rng.randint(1, 8))]
+        text = ":".join(groups)
+        if rng.random() < 0.5:
+            at = rng.randint(0, len(groups))
+            text = ":".join(groups[:at]) + "::" + ":".join(groups[at:])
+        text += "\n"
+        got = hygiene_scan.ip_problems(text)
+        expected = []
+        for found in hygiene_scan.IPV6_RE.finditer(text):
+            candidate = found.group(0)
+            if sum(1 for group in candidate.split(":") if group) < 2:
+                continue
+            try:
+                addr = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if not any(addr in net for net in hygiene_scan.ALLOWED_NETS):
+                expected.append("IPv6 address at line 1")
+        assert got == expected, repr(text)
+
+
+# Review round 3 (PR #56), finding 2 (SHOULD-FIX): every problem recounts
+# newlines from the start of the file (``text.count`` per match), so a 2 MB
+# file of repeated hits took ~52 s; and decode sliced the remaining batch
+# buffer per blob, so a clean tree at the old caps ran past 355 s. Line
+# offsets are precomputed once per file and the batch is walked with a
+# cursor; per-check collection stops at MAX_PROBLEMS_PER_CHECK with an exact
+# remainder count.
+@pytest.mark.parametrize(
+    "line",
+    [
+        # Built at run time: a bare documentation-range-exempt literal and
+        # a bare credential-looking literal must never appear in the repo.
+        ".".join(["10", "1", "1", "1"]) + "\n",
+        "tok" + "en=abcdefgh\n",
+    ],
+)
+def test_scan_bytes_is_fast_on_a_2mb_file_of_repeated_hits(line):
+    """Finding 2 (round 3): 2 MB of repeated hits scans in under 2 s."""
+    import time
+
+    data = (line * ((2_000_000 // len(line)) + 1))[:2_000_000].encode()
+    assert len(data) == 2_000_000
+    start = time.monotonic()
+    problems = hygiene_scan.scan_bytes("notes.txt", data)
+    elapsed = time.monotonic() - start
+    assert problems, "expected the repeated hits to be flagged"
+    assert problems[-1].startswith("... and "), problems[-2:]
+    assert elapsed < 2.0, f"scan took {elapsed:.1f}s"
+
+
+@NEEDS_GIT
+@pytest.mark.skipif(
+    os.environ.get("HOUSESITTER_SCAN_CEILING") != "1",
+    reason="ceiling probe only: run with HOUSESITTER_SCAN_CEILING=1",
+)
+def test_max_cap_tree_completes_well_under_deadline(tmp_path):
+    """Finding 2 (round 3): exactly the new caps: 10,000 entries, 32 MB.
+
+    Builds the ceiling tree without creating 10,000 disk files (one blob,
+    referenced 10,000 times through ``git mktree``) and scans it in-process.
+    Skipped by default so CI never pays for it; run it to report the timing.
+    """
+    import time
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def run(*args, **kwargs):
+        return subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, **kwargs
+        )
+
+    run("init", "-q")
+    blob = run("hash-object", "-w", "--stdin", input=b"x" * 3199 + b"\n")
+    blob_sha = blob.stdout.decode().strip()
+    entry = f"100644 blob {blob_sha}\t".encode()
+    tree_input = b"".join(entry + f"f{n:05d}".encode() + b"\n" for n in range(10_000))
+    sha = run("mktree", input=tree_input).stdout.decode().strip()
+    start = time.monotonic()
+    problems, suppressions, files_scanned, bytes_scanned = hygiene_scan.scan_git_tree(
+        sha, cwd=str(repo)
+    )
+    elapsed = time.monotonic() - start
+    print(f"\nceiling: 10,000 entries / 32,000,000 bytes in {elapsed:.1f}s")
+    assert (files_scanned, bytes_scanned) == (10_000, 32_000_000)
+    assert problems == [], problems[:3]
+    assert suppressions == []
+    assert elapsed < 120, f"ceiling scan took {elapsed:.1f}s"
+
+
 # Review round 2 (PR #56), finding 5 (SHOULD-FIX): problem messages
 # printed a fixture's whole offending value (a 500,000-character SSID
 # produced ~500 KB of stdout), and printed paths raw. Messages now name

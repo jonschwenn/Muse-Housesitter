@@ -200,6 +200,14 @@ def _credential_assignment_spans(text: str) -> list[tuple[str, str | None, int]]
         run_start, end = run.span()
         if run_start < consumed:
             continue
+        # The remainder must open with a quote, space, or ``:``/``=``; any
+        # other follower (``.``, ``-``, a letter) fails the rest match, so
+        # the twelve keyword trials below are skipped. Exact: the naive
+        # ``["']?\\s*[:=]`` prefix cannot match anything else.
+        if end < len(text):
+            follower = text[end]
+            if follower not in "\"':=" and not follower.isspace():
+                continue
         best = _key_match_start(text, run_start, end, run.group(0))
         if best is None:
             continue
@@ -225,6 +233,11 @@ def _unquoted_assignment_spans(text: str) -> list[tuple[str, str | None, int]]:
     out = []
     offset = 0
     for line in text.split("\n"):
+        # The naive form needs a ``:`` or ``=`` after the key; a line with
+        # neither cannot match. Exact, and lines of bare hits skip the rest.
+        if "=" not in line and ":" not in line:
+            offset += len(line) + 1
+            continue
         for with_export in (True, False):
             pos = 0
             size = len(line)
@@ -296,6 +309,10 @@ def _jwt_token_spans(text: str) -> list[tuple[int, int]]:
     and the trailing half is one run lookup. Starts inside a consumed match
     are skipped, like finditer's non-overlap.
     """
+    # Every span holds the head literal; without it there is nothing to find.
+    # Exact: the naive regex cannot match either.
+    if _JWT_HEAD not in text:
+        return []
     runs = [(m.start(), m.end()) for m in _JWT_RUN_RE.finditer(text)]
     out = []
     consumed = 0
@@ -352,6 +369,10 @@ def _session_cookie_spans(text: str) -> list[tuple[int, int]]:
     ``=`` would re-scan a shared run every time — the naive form's own
     quadratic trap.)
     """
+    # Every span holds ``=``; without it there is nothing to find. Exact:
+    # the naive regex cannot match either.
+    if "=" not in text:
+        return []
     runs = [(m.start(), m.end()) for m in _COOKIE_SEG_RE.finditer(text)]
     # The naive ``[^;\s\"']*\d`` lookahead succeeds exactly when a digit
     # follows ``=`` inside the value run: digit positions per run, up front
@@ -450,22 +471,45 @@ def decode_bytes(data: bytes) -> str | None:
     return data.decode("utf-8", errors="replace")
 
 
-def _line_of(text: str, pos: int) -> int:
-    """1-based line number of ``pos``: problem messages point, never quote."""
-    return text.count("\n", 0, pos) + 1
+def _line_lookup(text: str):
+    """``pos -> 1-based line number`` for ``text``, built in one linear pass.
+
+    Counting newlines from the start per match (``text.count`` per problem)
+    is quadratic over a file with a hit on every line; the line-start
+    offsets are built once per file here and each lookup bisects them.
+    Problem messages point, never quote.
+    """
+    starts = [0]
+    append = starts.append
+    pos = text.find("\n")
+    while pos != -1:
+        append(pos + 1)
+        pos = text.find("\n", pos + 1)
+
+    def line_of(match_pos: int) -> int:
+        return bisect.bisect_right(starts, match_pos)
+
+    return line_of
 
 
-def _report_line(text: str, pos: int, line_map: list[int] | None) -> int:
+def _report_line(line_of, pos: int, line_map: list[int] | None) -> int:
     """File line for a match in suppression-filtered ``text``.
 
     Detection runs on the filtered text, but the reported line must point
     at the file: ``line_map`` takes each filtered line to its file line.
     Without a map the text is the file.
     """
-    line = _line_of(text, pos)
+    line = line_of(pos)
     if line_map is not None:
         line = line_map[line - 1]
     return line
+
+
+# One hostile file can hold a hit on every line; the CI listing is already
+# capped, but the per-file strings are built before that. Each check below
+# collects at most this many problem strings per file and counts the rest
+# exactly, so time and memory stay bounded while the total stays honest.
+MAX_PROBLEMS_PER_CHECK = 1000
 
 
 def is_fixture_rel(rel_posix: str) -> bool:
@@ -478,37 +522,110 @@ def mac_problems(
 ) -> list[str]:
     # The message names the rule and the line, never the address: values
     # stay out of logs (hard rule 6).
+    line_of = _line_lookup(text)
     found = []
+    overflow = 0
     for pattern in MAC_RES + ([BARE_MAC_RE] if bare else []):
         for match in pattern.finditer(text):
             digits = re.sub("[^0-9a-f]", "", match.group(0).lower())
             if pattern is BARE_MAC_RE and digits.isdigit():
                 continue  # a 12-digit number, e.g. a byte counter
             if not digits.startswith(ALLOWED_MAC_PREFIXES):
-                found.append(f"MAC address at line {_report_line(text, match.start(), line_map)}")
+                if len(found) < MAX_PROBLEMS_PER_CHECK:
+                    found.append(
+                        f"MAC address at line {_report_line(line_of, match.start(), line_map)}"
+                    )
+                else:
+                    overflow += 1
+    if overflow:
+        found.append(f"... and {overflow} more MAC address problem(s) in this file")
     return found
+
+
+def _ipv4_allowed(parts: list[int]) -> bool:
+    """Whether a dotted quad (each part already known to be <= 255) is allowed.
+
+    Integer comparisons against exactly the networks in ALLOWED_NETS, so a
+    file with a hit on every line never pays for an ``ipaddress`` parse per
+    hit. Leading zeros are already folded by the caller's ``int()``.
+    """
+    a, b, c, d = parts
+    return (
+        (a == 192 and b == 0 and c == 2)  # 192.0.2.0/24
+        or (a == 198 and b == 51 and c == 100)  # 198.51.100.0/24
+        or (a == 203 and b == 0 and c == 113)  # 203.0.113.0/24
+        or a == 127  # 127.0.0.0/8
+        or (a == 0 and b == 0 and c == 0 and d == 0)  # 0.0.0.0/32
+        or a == 255  # 255.0.0.0/8
+    )
+
+
+def _ipv6_allowed_head(candidate: str) -> bool | None:
+    """Fast deny for an IPv6 candidate from its first hextet.
+
+    Returns False when the candidate is provably a valid but disallowed
+    address, None when a full parse is needed. Validity comes first: the
+    slow path skips unparseable candidates (``1:2:3:4:5``, ``fe80::1::2``),
+    so the fast path must too — only an exactly-once ``::`` filling at
+    least one group, or eight full groups, parses. Then ``2001`` may open
+    2001:db8::/32, ``ff00``-``ffff`` may open ff00::/8, and a leading or
+    all-zero group may still be ::1, so those also take the slow path.
+    Anything else is valid (regex-shaped groups of at most four hex
+    digits) and outside every allowed net.
+    """
+    if "::" in candidate:
+        if candidate.count("::") != 1:
+            return None
+        if sum(1 for group in candidate.split(":") if group) > 7:
+            return None
+    else:
+        groups = candidate.split(":")
+        if len(groups) != 8 or any(group == "" for group in groups):
+            return None
+    head = candidate.split(":", 1)[0]
+    if head == "" or head.strip("0") == "":
+        return None
+    value = int(head, 16)
+    if value == 0x2001 or 0xFF00 <= value <= 0xFFFF:
+        return None
+    return False
 
 
 def ip_problems(text: str, line_map: list[int] | None = None) -> list[str]:
     # The message names the rule and the line, never the address.
+    line_of = _line_lookup(text)
     found = []
+    overflow = 0
+
+    def emit(kind: str, pos: int) -> None:
+        nonlocal overflow
+        if len(found) < MAX_PROBLEMS_PER_CHECK:
+            found.append(f"{kind} at line {_report_line(line_of, pos, line_map)}")
+        else:
+            overflow += 1
+
     for match in IPV4_RE.finditer(text):
         parts = [int(p) for p in match.group(0).split(".")]
         if any(p > 255 for p in parts):
             continue  # e.g. a version like 6.6.77.15402
-        addr = ipaddress.ip_address(".".join(map(str, parts)))  # tolerates leading zeros
-        if not any(addr in net for net in ALLOWED_NETS):
-            found.append(f"IPv4 address at line {_report_line(text, match.start(), line_map)}")
+        if not _ipv4_allowed(parts):
+            emit("IPv4 address", match.start())
     for match in IPV6_RE.finditer(text):
         candidate = match.group(0)
         if sum(1 for group in candidate.split(":") if group) < 2:
             continue  # e.g. Python slices like [::2]
+        decided = _ipv6_allowed_head(candidate)
+        if decided is False:
+            emit("IPv6 address", match.start())
+            continue
         try:
             addr = ipaddress.ip_address(candidate)
         except ValueError:
             continue
         if not any(addr in net for net in ALLOWED_NETS):
-            found.append(f"IPv6 address at line {_report_line(text, match.start(), line_map)}")
+            emit("IPv6 address", match.start())
+    if overflow:
+        found.append(f"... and {overflow} more IP address problem(s) in this file")
     return found
 
 
@@ -525,7 +642,9 @@ def secret_problems(
 ) -> list[str]:
     # The message names the rule and the line, never the value: values
     # stay out of logs (hard rule 6).
+    line_of = _line_lookup(text)
     found = []
+    overflow = 0
     patterns = SECRET_PATTERNS + (
         [("credential assignment", UNQUOTED_ASSIGNMENT)] if unquoted else []
     )
@@ -538,9 +657,14 @@ def secret_problems(
                 continue
             if value is not None and REFERENCE_VALUE.match(value.strip()):
                 continue
-            found.append(
-                f"likely secret ({label}) at line {_report_line(text, start, line_map)}"
-            )
+            if len(found) < MAX_PROBLEMS_PER_CHECK:
+                found.append(
+                    f"likely secret ({label}) at line {_report_line(line_of, start, line_map)}"
+                )
+            else:
+                overflow += 1
+    if overflow:
+        found.append(f"... and {overflow} more likely-secret problem(s) in this file")
     return found
 
 
@@ -598,14 +722,30 @@ def scan_text(rel_posix: str, text: str) -> list[str]:
             problems.append("fixture JSON is too deeply nested to check")
         else:
             # Line numbers point at the file's own lines, not the
-            # suppression-filtered text the other checks run on.
+            # suppression-filtered text the other checks run on. Offenders
+            # usually share one key ("ssid"), so each key's line is found
+            # once, not once per offender.
+            key_lines: dict[str, int | None] = {}
+            ssid_kept = 0
+            ssid_overflow = 0
             for key, value in offenders:
                 shape = f"SSID value ({len(value)} chars)"
-                at = _ssid_key_line(numbered, key)
+                if key not in key_lines:
+                    key_lines[key] = _ssid_key_line(numbered, key)
+                at = key_lines[key]
                 if at is None:
-                    problems.append(f"{shape} does not end in -example")
+                    problem = f"{shape} does not end in -example"
                 else:
-                    problems.append(f"{shape} at line {at} does not end in -example")
+                    problem = f"{shape} at line {at} does not end in -example"
+                if ssid_kept < MAX_PROBLEMS_PER_CHECK:
+                    problems.append(problem)
+                    ssid_kept += 1
+                else:
+                    ssid_overflow += 1
+            if ssid_overflow:
+                problems.append(
+                    f"... and {ssid_overflow} more SSID problem(s) in this file"
+                )
     return problems
 
 
@@ -935,8 +1075,17 @@ def list_tree_blobs(
     return files
 
 
-def read_blobs(blobs: list[tuple[str, int, str]], *, cwd: str) -> list[bytes]:
-    """Read every blob's bytes in one ``git cat-file --batch`` session."""
+def read_blobs(
+    blobs: list[tuple[str, int, str]], *, cwd: str, start: float | None = None
+) -> list[bytes]:
+    """Read every blob's bytes in one ``git cat-file --batch`` session.
+
+    The batch output is walked with a cursor: each header is found from the
+    current position and each blob is copied exactly once. Slicing the
+    unconsumed suffix per object re-copies the remaining buffer every time,
+    which is quadratic over many blobs. When ``start`` is given (the scan's
+    deadline epoch), the deadline is also checked per blob.
+    """
     if not blobs:
         return []
     proc = subprocess.run(
@@ -951,11 +1100,18 @@ def read_blobs(blobs: list[tuple[str, int, str]], *, cwd: str) -> list[bytes]:
         detail = proc.stderr.decode("utf-8", errors="replace")[:200].strip()
         raise FailClosed(f"git cat-file --batch failed ({detail})")
     contents = []
-    rest = proc.stdout
+    data = proc.stdout
+    pos = 0
     for sha, size, path in blobs:
-        head, _, rest = rest.partition(b"\n")
+        if start is not None:
+            _check_deadline(start, "reading the blobs")
+        end = data.find(b"\n", pos)
+        if end == -1:
+            raise FailClosed(
+                "could not parse git cat-file --batch output; refusing to scan"
+            )
         try:
-            found, objtype, found_size = head.decode("ascii").split(" ")
+            found, objtype, found_size = data[pos:end].decode("ascii").split(" ")
             found_size = int(found_size)
         except ValueError as exc:
             raise FailClosed(
@@ -963,11 +1119,12 @@ def read_blobs(blobs: list[tuple[str, int, str]], *, cwd: str) -> list[bytes]:
             ) from exc
         if found != sha or objtype != "blob" or found_size != size:
             raise FailClosed(f"blob {_display(path)} changed mid-read; refusing to scan")
-        contents.append(rest[:size])
-        rest = rest[size:]
-        if not rest.startswith(b"\n"):
+        pos = end + 1
+        contents.append(data[pos : pos + size])
+        pos += size
+        if data[pos : pos + 1] != b"\n":
             raise FailClosed("could not parse git cat-file --batch output; refusing to scan")
-        rest = rest[1:]
+        pos += 1
     return contents
 
 
@@ -988,7 +1145,7 @@ def scan_git_tree(
     _check_deadline(start, "starting")
     files = list_tree_blobs(sha, cwd=cwd)
     _check_deadline(start, "listing the tree")
-    contents = read_blobs(files, cwd=cwd)
+    contents = read_blobs(files, cwd=cwd, start=start)
     _check_deadline(start, "reading the blobs")
     problems = []
     suppressions = []
