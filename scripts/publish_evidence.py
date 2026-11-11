@@ -103,7 +103,7 @@ def read_text_capped(path: Path, cap: int, what: str, reason: str) -> str:
 
 def check_evidence_text(text: str) -> None:
     """Refuse a comment body that lacks the marker or exceeds the budget."""
-    if not text.startswith(pr_evidence.MARKER):
+    if not text.startswith(pr_evidence.MARKER) and parse_marker(text) is None:
         raise PublishError("comment does not start with the marker", "bad_schema")
     if len(text.encode()) > pr_evidence.MAX_COMMENT_BYTES:
         raise PublishError("comment is too large for a comment", "too_large")
@@ -344,6 +344,8 @@ def render_comment(
     head_sha: str,
     test_results_dir: str | None = None,
     jobs_json: str | None = None,
+    run_id: int | None = None,
+    run_attempt: int | None = None,
 ) -> str:
     """Validate the artifact and build the final comment text.
 
@@ -357,6 +359,14 @@ def render_comment(
         raise ValueError(f"bad PR number: {pr!r}")
     if not pr_evidence.UI_SHA_RE.fullmatch(head_sha or ""):
         raise ValueError(f"bad head SHA: {head_sha!r}")
+
+    def evidence(body: str) -> str:
+        """Stamp the evidence marker (the workflow always passes run ids)."""
+        if run_id is None and run_attempt is None:
+            return body
+        if run_id is None or run_attempt is None:
+            raise ValueError("run_id and run_attempt go together")
+        return stamp_marker(body, head_sha, run_id, run_attempt, "evidence")
     results = read_results(artifact)
     errors = evidence_checks.validate_results(results, main_scenario_ids())
     if errors:
@@ -399,6 +409,7 @@ def render_comment(
         # that manifest has an empty captures list and gets a Web UI section.
         # The text is freshly rebuilt (not pre-checked like the old
         # evidence.md), so the budget check applies here too.
+        text = evidence(text)
         check_evidence_text(text)
         return text
     errors = ui_evidence.validate_artifact(ui_dir)
@@ -423,6 +434,8 @@ def render_comment(
         # repo/pr/head-sha) is deliberately left to propagate as exit 2.
         raise PublishError(f"artifact validation failed: {exc}", "bad_schema") from exc
     if manifest is None:
+        text = evidence(text)
+        check_evidence_text(text)
         return text
     _, _, failures = pr_evidence.render_ui_section(manifest, repo, pr, head_sha)
 
@@ -442,6 +455,7 @@ def render_comment(
         # The Tests line is what tipped it over: drop it rather than let
         # test data refuse the publish (D21 option A).
         body = with_ui(evidence_only)
+    body = evidence(body)
     check_evidence_text(body)
     return body
 
@@ -565,6 +579,8 @@ def cmd_render(args: argparse.Namespace) -> int:
             args.head_sha,
             test_results_dir=args.test_results_dir,
             jobs_json=args.jobs_json,
+            run_id=args.run_id,
+            run_attempt=args.run_attempt,
         )
     except PublishError as exc:
         print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
@@ -632,7 +648,9 @@ def cmd_refusal(args: argparse.Namespace) -> int:
     The workflow posts this as the evidence comment when render refused.
     The reason is read from the file and validated here in Python (never
     interpolated from the shell), and the notice itself is main's fixed
-    text: no PR-supplied content can reach the comment through it.
+    text: no PR-supplied content can reach the comment through it. With
+    the marker arguments the notice carries the parameterized marker
+    (outcome notice); without them it keeps the bare marker.
     """
     try:
         doc = json.loads(Path(args.reason_file).read_text(encoding="utf-8"))
@@ -643,10 +661,26 @@ def cmd_refusal(args: argparse.Namespace) -> int:
         print("publish_evidence: refusal file must be an object", file=sys.stderr)
         return 2
     try:
-        print(evidence_checks.refusal_notice(doc.get("reason")), end="")
+        notice = evidence_checks.refusal_notice(doc.get("reason"))
     except ValueError as exc:
         print(f"publish_evidence: {exc}", file=sys.stderr)
         return 2
+    meta = (args.head_sha, args.run_id, args.run_attempt)
+    if all(value is None for value in meta):
+        print(notice, end="")
+        return 0
+    if any(value is None for value in meta):
+        print(
+            "publish_evidence: --head-sha, --run-id and --run-attempt go together",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        notice = stamp_marker(notice, args.head_sha, args.run_id, args.run_attempt, "notice")
+    except ValueError as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
+    print(notice, end="")
     return 0
 
 
@@ -696,6 +730,226 @@ def cmd_decide_comment(args: argparse.Namespace) -> int:
             args.build_result, args.push_result, args.has_refusal, args.has_comment
         )
     )
+    return 0
+
+
+# Comment identity and concurrent-publisher rules (review round 2, finding 2)
+#
+# Two publisher runs can overlap on one PR: a newer push starts a run while
+# an older attempt still works. The comment job is serialised per PR (a
+# job-level concurrency group keyed by the PR number, cancel-in-progress
+# false), so the lookup below sees every earlier write — but an older
+# attempt can still finish after a newer one, and two same-head runs would
+# otherwise both POST. Every comment body therefore carries a hidden marker
+# built only from trusted event data (head SHA, workflow_run id and
+# attempt, outcome), and the write follows monotonic rules over the
+# existing bot-authored comments: never write when the existing comment is
+# for the same head with a newer (run id, attempt); a notice never replaces
+# an evidence comment for the same head; otherwise write, keeping one
+# marker comment and deleting the rest. Marker-looking text in anyone
+# else's comments is ignored. Residual: GitHub keeps one pending run per
+# concurrency group, so a pending comment job can be displaced by a later
+# arrival; if the displacing run is stale it writes nothing and the PR
+# keeps the previous comment, which states its head SHA — re-running the
+# publisher fixes it.
+
+BOT_LOGIN = "github-actions[bot]"
+COMMENT_MARKER_PREFIX = "<!-- housesitter-evidence"
+COMMENT_OUTCOMES = ("evidence", "notice")
+MARKER_RE = re.compile(
+    r"^<!-- housesitter-evidence head=([0-9a-f]{40}) run=([0-9]+)"
+    r" attempt=([0-9]+) outcome=(evidence|notice) -->$"
+)
+
+
+def _checked_marker_parts(head_sha, run_id, run_attempt, outcome):
+    """Validate trusted event data for a comment marker (ValueError: caller bug)."""
+    if not pr_evidence.UI_SHA_RE.fullmatch(head_sha or ""):
+        raise ValueError(f"bad head SHA: {head_sha!r}")
+    for name, value in (("run id", run_id), ("run attempt", run_attempt)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"bad {name}: {value!r}")
+    if outcome not in COMMENT_OUTCOMES:
+        raise ValueError(f"bad comment outcome: {outcome!r}")
+    return head_sha, run_id, run_attempt, outcome
+
+
+def build_marker(head_sha: str, run_id: int, run_attempt: int, outcome: str) -> str:
+    """The hidden first line of every posted comment body."""
+    head_sha, run_id, run_attempt, outcome = _checked_marker_parts(
+        head_sha, run_id, run_attempt, outcome
+    )
+    return (
+        f"<!-- housesitter-evidence head={head_sha} run={run_id} "
+        f"attempt={run_attempt} outcome={outcome} -->"
+    )
+
+
+def parse_marker(body: object) -> dict | None:
+    """Parse the hidden marker from a comment body.
+
+    Returns None when the body carries no marker, ``{"legacy": True}`` for
+    the bare marker from before markers carried metadata, else the metadata
+    dict (head_sha str, run_id/attempt ints, outcome str).
+    """
+    if not isinstance(body, str):
+        return None
+    first = body.split("\n", 1)[0]
+    if first == pr_evidence.MARKER:
+        return {"legacy": True}
+    match = MARKER_RE.match(first)
+    if match is None:
+        return None
+    head_sha, run_id, attempt, outcome = match.groups()
+    return {
+        "head_sha": head_sha,
+        "run_id": int(run_id),
+        "attempt": int(attempt),
+        "outcome": outcome,
+    }
+
+
+def stamp_marker(
+    body: str, head_sha: str, run_id: int, run_attempt: int, outcome: str
+) -> str:
+    """Replace the leading bare marker with the parameterized one."""
+    if not isinstance(body, str) or not body.startswith(pr_evidence.MARKER):
+        raise ValueError("comment body does not start with the bare marker")
+    return (
+        build_marker(head_sha, run_id, run_attempt, outcome)
+        + body[len(pr_evidence.MARKER) :]
+    )
+
+
+def decide_write(
+    comments: list, head_sha: str, run_id: int, run_attempt: int, outcome: str
+) -> tuple:
+    """Apply the monotonic write rules over the existing issue comments.
+
+    ``comments`` are (id, author login, body) triples; only the workflow's
+    own bot comments carrying the marker count. Returns (action, keep_id,
+    delete_ids): "skip" writes nothing; "post" adds a comment and deletes
+    every other marker comment; "patch" edits keep_id and deletes the rest.
+    """
+    _checked_marker_parts(head_sha, run_id, run_attempt, outcome)
+    new_key = (run_id, run_attempt)
+    markers = []  # (id, head or None, (run, attempt), outcome)
+    for cid, login, body in comments:
+        if login != BOT_LOGIN:
+            continue
+        parsed = parse_marker(body)
+        if parsed is None:
+            continue
+        if parsed.get("legacy"):
+            markers.append((cid, None, (0, 0), "evidence"))
+        else:
+            markers.append(
+                (
+                    cid,
+                    parsed["head_sha"],
+                    (parsed["run_id"], parsed["attempt"]),
+                    parsed["outcome"],
+                )
+            )
+    same_head = [m for m in markers if m[1] == head_sha]
+    if any(key > new_key for _, _, key, _ in same_head):
+        return ("skip", None, [])
+    if outcome == "notice" and any(out == "evidence" for _, _, _, out in same_head):
+        return ("skip", None, [])
+    if not markers:
+        return ("post", None, [])
+    pool = same_head or markers
+    keep = max(pool, key=lambda m: (m[2], m[0]))
+    delete = sorted(cid for cid, _, _, _ in markers if cid != keep[0])
+    return ("patch", keep[0], delete)
+
+
+def _parse_json_docs(raw: str) -> list:
+    """Parse one JSON document or several concatenated ones (``gh
+    --paginate`` prints one response body per page)."""
+    try:
+        return [json.loads(raw)]
+    except ValueError:
+        pass
+    docs = []
+    decoder = json.JSONDecoder()
+    index = 0
+    try:
+        while index < len(raw):
+            while index < len(raw) and raw[index].isspace():
+                index += 1
+            if index >= len(raw):
+                break
+            doc, end = decoder.raw_decode(raw, index)
+            docs.append(doc)
+            index = end
+    except ValueError as exc:
+        raise HeadCheckError(
+            f"cannot parse the comments response: {exc}"
+        ) from exc
+    return docs
+
+
+def fetch_issue_comments(repo: str, pr: int) -> list:
+    """(id, author login, body) for the issue's comments, via the gh CLI."""
+    if not pr_evidence.UI_REPO_RE.fullmatch(repo or ""):
+        raise ValueError(f"bad repo: {repo!r}")
+    if isinstance(pr, bool) or not isinstance(pr, int) or pr <= 0:
+        raise ValueError(f"bad PR number: {pr!r}")
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{repo}/issues/{pr}/comments", "--paginate"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HeadCheckError(f"cannot ask the API for comments: {exc}") from exc
+    if proc.returncode != 0:
+        raise HeadCheckError(f"gh api failed with exit {proc.returncode}")
+    if not proc.stdout.strip():
+        return []
+    comments = []
+    for doc in _parse_json_docs(proc.stdout):
+        if not isinstance(doc, list):
+            raise HeadCheckError("unexpected comments response shape")
+        for item in doc:
+            if not isinstance(item, dict):
+                continue
+            user = item.get("user")
+            login = user.get("login") if isinstance(user, dict) else None
+            cid, body = item.get("id"), item.get("body")
+            if type(cid) is int and isinstance(login, str) and isinstance(body, str):
+                comments.append((cid, login, body))
+    return comments
+
+
+def cmd_decide_write(args: argparse.Namespace) -> int:
+    """Print the comment write plan: SKIP, POST, or PATCH <id>, plus an
+    optional DELETE <ids> line. Only fixed words and API-returned digit ids
+    ever print; the shell carries the plan out after re-validating the ids.
+    """
+    try:
+        new = _checked_marker_parts(
+            args.head_sha, args.run_id, args.run_attempt, args.outcome
+        )
+    except ValueError as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
+    try:
+        comments = fetch_issue_comments(args.repo, args.pr)
+    except (ValueError, HeadCheckError) as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
+    action, keep, delete = decide_write(comments, *new)
+    if action == "skip":
+        print("SKIP")
+    elif action == "post":
+        print("POST")
+    else:
+        print(f"PATCH {keep}")
+    if delete:
+        print(f"DELETE {' '.join(str(cid) for cid in delete)}")
     return 0
 
 
@@ -782,6 +1036,18 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="jobs-API response file for the run attempt (optional)",
     )
+    render.add_argument(
+        "--run-id",
+        default=None,
+        type=int,
+        help="workflow_run id for the comment marker (optional)",
+    )
+    render.add_argument(
+        "--run-attempt",
+        default=None,
+        type=int,
+        help="workflow_run attempt for the comment marker (optional)",
+    )
     render.set_defaults(func=cmd_render)
     subst = sub.add_parser("substitute", help="pin the placeholder to the push SHA")
     subst.add_argument("--comment", required=True)
@@ -791,6 +1057,23 @@ def main(argv: list[str] | None = None) -> int:
         "refusal", help="print the fixed refusal notice for a refusal.json file"
     )
     refusal.add_argument("--reason-file", required=True)
+    refusal.add_argument(
+        "--head-sha",
+        default=None,
+        help="head commit SHA for the comment marker (optional)",
+    )
+    refusal.add_argument(
+        "--run-id",
+        default=None,
+        type=int,
+        help="workflow_run id for the comment marker (optional)",
+    )
+    refusal.add_argument(
+        "--run-attempt",
+        default=None,
+        type=int,
+        help="workflow_run attempt for the comment marker (optional)",
+    )
     refusal.set_defaults(func=cmd_refusal)
     decide = sub.add_parser(
         "decide-comment", help="print what the comment job should post"
@@ -800,6 +1083,18 @@ def main(argv: list[str] | None = None) -> int:
     decide.add_argument("--has-refusal", action="store_true")
     decide.add_argument("--has-comment", action="store_true")
     decide.set_defaults(func=cmd_decide_comment)
+    write = sub.add_parser(
+        "decide-write", help="print the comment write plan for this run"
+    )
+    write.add_argument("--repo", required=True)
+    write.add_argument("--pr", required=True, type=int)
+    write.add_argument("--head-sha", required=True)
+    write.add_argument("--run-id", required=True, type=int)
+    write.add_argument("--run-attempt", required=True, type=int)
+    write.add_argument(
+        "--outcome", required=True, choices=list(COMMENT_OUTCOMES)
+    )
+    write.set_defaults(func=cmd_decide_write)
     check_head = sub.add_parser(
         "check-head", help="exit 0 when the PR head is still fresh"
     )

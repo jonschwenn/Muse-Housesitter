@@ -113,16 +113,20 @@ def _artifact(
 
 def _render(tmp_path, artifact, **kwargs):
     out = tmp_path / "out"
-    rc = publish_evidence.main(
-        [
-            "render",
-            "--artifact-dir", str(artifact),
-            "--out-dir", str(out),
-            "--repo", kwargs.get("repo", REPO),
-            "--pr", str(kwargs.get("pr", PR)),
-            "--head-sha", kwargs.get("head_sha", HEAD_SHA),
+    argv = [
+        "render",
+        "--artifact-dir", str(artifact),
+        "--out-dir", str(out),
+        "--repo", kwargs.get("repo", REPO),
+        "--pr", str(kwargs.get("pr", PR)),
+        "--head-sha", kwargs.get("head_sha", HEAD_SHA),
+    ]
+    if kwargs.get("run_id") is not None:
+        argv += [
+            "--run-id", str(kwargs["run_id"]),
+            "--run-attempt", str(kwargs["run_attempt"]),
         ]
-    )
+    rc = publish_evidence.main(argv)
     return rc, out
 
 
@@ -1692,29 +1696,42 @@ import json, os, pathlib, sys
 args = sys.argv[1:]
 state = pathlib.Path(os.environ["FAKE_STATE"])
 if "-X" in args:
-    method = args[args.index("-X") + 1]
-    posted = ""
+    i = args.index("-X")
+    entry = {"method": args[i + 1], "argv": args}
     for flag in args:
         if flag.startswith("body=@"):
-            posted = pathlib.Path(flag[len("body=@"):]).read_text()
-    (state / "posted.json").write_text(
-        json.dumps({"method": method, "body": posted})
-    )
+            entry["body"] = pathlib.Path(flag[len("body=@"):]).read_text()
+    with (state / "calls.jsonl").open("a") as f:
+        f.write(json.dumps(entry) + "\\n")
     print("")
 elif any("/pulls/" in a for a in args):
-    print(os.environ["HEAD_SHA"])
+    print(os.environ.get("FAKE_HEAD") or os.environ["HEAD_SHA"])
 elif any("/comments" in a for a in args):
-    if "--jq" in args:
-        print("")
-    else:
-        print("[]")
+    listing = state / "listing.json"
+    print(listing.read_text() if listing.exists() else "[]")
 else:
     raise SystemExit(f"unexpected gh call: {args}")
 """
 
 
-def _run_comment_step(tmp_path, monkeypatch, build_result, push_result):
-    """Run the real comment-step shell with a fake gh; return (rc, posted)."""
+def _run_comment_step(
+    tmp_path,
+    monkeypatch,
+    build_result,
+    push_result,
+    files=None,
+    listing=None,
+    evidence_sha="",
+    run_id="100",
+    run_attempt="1",
+    fake_head=None,
+):
+    """Run the real comment-step shell with a fake gh; return (proc, calls).
+
+    ``files`` pre-creates run-dir files (e.g. rendered/comment.md);
+    ``listing`` is the fake issue-comments API answer; every gh write lands
+    in the returned calls list as {"method", "argv", "body"?}.
+    """
     import os
     import subprocess
 
@@ -1728,6 +1745,12 @@ def _run_comment_step(tmp_path, monkeypatch, build_result, push_result):
     gh.chmod(0o755)
     state = tmp_path / "state"
     state.mkdir()
+    if listing is not None:
+        (state / "listing.json").write_text(json.dumps(listing))
+    for name, content in (files or {}).items():
+        path = run / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
     step = tmp_path / "comment-step.sh"
     step.write_text(_comment_step_shell())
     env = {
@@ -1736,26 +1759,410 @@ def _run_comment_step(tmp_path, monkeypatch, build_result, push_result):
         "REPO": REPO,
         "PR": str(PR),
         "HEAD_SHA": HEAD_SHA,
-        "EVIDENCE_SHA": "",
+        "EVIDENCE_SHA": evidence_sha,
         "BUILD_RESULT": build_result,
         "PUSH_RESULT": push_result,
+        "RUN_ID": run_id,
+        "RUN_ATTEMPT": run_attempt,
         "FAKE_STATE": str(state),
     }
+    if fake_head is not None:
+        env["FAKE_HEAD"] = fake_head
     proc = subprocess.run(
         ["bash", str(step)], cwd=run, env=env,
         capture_output=True, text=True, timeout=120,
     )
-    posted = state / "posted.json"
-    return proc, json.loads(posted.read_text()) if posted.exists() else None
+    calls = []
+    calls_path = state / "calls.jsonl"
+    if calls_path.exists():
+        calls = [
+            json.loads(line) for line in calls_path.read_text().splitlines()
+        ]
+    return proc, calls
 
 
 def test_comment_step_posts_notice_with_no_rendered_dir(tmp_path, monkeypatch):
     # Build failed before uploading: no rendered/ directory exists, the
     # download found nothing, and the push was skipped. The fixed
     # publish_failed notice must still reach the PR.
-    proc, posted = _run_comment_step(tmp_path, monkeypatch, "failure", "skipped")
+    proc, calls = _run_comment_step(tmp_path, monkeypatch, "failure", "skipped")
     assert proc.returncode == 0, proc.stderr
-    assert posted is not None, f"nothing posted; stderr: {proc.stderr}"
-    assert posted["method"] == "POST"
-    assert posted["body"].startswith("<!-- housesitter-evidence")
-    assert "`publish_failed`" in posted["body"]
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1, f"expected one POST; stderr: {proc.stderr}"
+    body = posts[0]["body"]
+    assert body.startswith("<!-- housesitter-evidence head=")
+    assert "outcome=notice" in body.split("\n", 1)[0]
+    assert "`publish_failed`" in body
+
+
+# Review round 2, finding 2: monotonic comment writes. -------------------------
+#
+# Overlapping publisher runs used to both POST (duplicates), or let an older
+# attempt's notice replace a newer run's evidence, or PATCH a stale head's
+# body over the current head's. The comment job is now serialised per PR and
+# every body carries a hidden marker (head SHA, run id, attempt, outcome);
+# the write follows monotonic rules over the bot's own marker comments.
+
+OTHER_HEAD = "b" * 40
+BOT = "github-actions[bot]"
+
+
+def _marker(head=HEAD_SHA, run=100, attempt=1, outcome="evidence"):
+    return publish_evidence.build_marker(head, run, attempt, outcome)
+
+
+def _bot_comment(cid, head=HEAD_SHA, run=100, attempt=1, outcome="evidence",
+                 login=BOT):
+    return {
+        "id": cid,
+        "user": {"login": login},
+        "body": _marker(head, run, attempt, outcome) + "\n## Before / after evidence\n",
+    }
+
+
+def _triples(comments):
+    return [
+        (c["id"], c["user"]["login"], c["body"]) for c in comments
+    ]
+
+
+def test_build_marker_rejects_untrusted_shapes():
+    good = _marker()
+    assert good == (
+        f"<!-- housesitter-evidence head={HEAD_SHA} "
+        "run=100 attempt=1 outcome=evidence -->"
+    )
+    for bad in [
+        ("x" * 40, 100, 1, "evidence"),
+        (HEAD_SHA, 0, 1, "evidence"),
+        (HEAD_SHA, -3, 1, "evidence"),
+        (HEAD_SHA, True, 1, "evidence"),
+        (HEAD_SHA, 100, "1", "evidence"),
+        (HEAD_SHA, 100, 1, "refused"),
+    ]:
+        try:
+            publish_evidence.build_marker(*bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"marker accepted {bad!r}")
+
+
+def test_parse_marker_round_trip_and_rejections():
+    assert publish_evidence.parse_marker(_marker()) == {
+        "head_sha": HEAD_SHA,
+        "run_id": 100,
+        "attempt": 1,
+        "outcome": "evidence",
+    }
+    assert publish_evidence.parse_marker(pr_evidence.MARKER + "\nbody") == {
+        "legacy": True
+    }
+    assert publish_evidence.parse_marker("hello") is None
+    assert publish_evidence.parse_marker(_marker() + " trailing") is None
+    assert publish_evidence.parse_marker(None) is None
+
+
+def test_stamp_marker_upgrades_the_bare_marker():
+    body = pr_evidence.MARKER + "\n## Before / after evidence\n"
+    stamped = publish_evidence.stamp_marker(body, HEAD_SHA, 7, 2, "notice")
+    assert stamped.split("\n", 1)[0] == _marker(HEAD_SHA, 7, 2, "notice")
+    assert stamped.endswith("## Before / after evidence\n")
+    try:
+        publish_evidence.stamp_marker("no marker here", HEAD_SHA, 7, 2, "notice")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("stamp accepted a body without the marker")
+
+
+def test_second_same_head_run_patches_instead_of_posting():
+    # Interleaving (a): two same-head runs; the later one sees the earlier
+    # run's comment and patches it instead of posting a duplicate.
+    existing = _triples([_bot_comment(11, run=100)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 101, 1, "evidence"
+    ) == ("patch", 11, [])
+
+
+def test_older_same_head_attempt_never_writes():
+    existing = _triples([_bot_comment(11, run=101)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("skip", None, [])
+
+
+def test_stale_notice_never_replaces_same_head_evidence():
+    # Interleaving (b): attempt B published good evidence for head H, then
+    # the older attempt A finishes with a failed push: A's publish_failed
+    # notice must not replace B's evidence.
+    existing = _triples([_bot_comment(11, run=101, outcome="evidence")])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "notice"
+    ) == ("skip", None, [])
+    # Even a newer notice never replaces same-head evidence.
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 102, 1, "notice"
+    ) == ("skip", None, [])
+
+
+def test_stale_body_never_reaches_decide_write_for_a_moved_head():
+    # Interleaving (c): A read head H1, the head moved, B published H2, and
+    # A's stale body arrives last. A's freshness re-check (expected H1 vs
+    # current H2) stops it before any write, so the H2 comment survives;
+    # decide_write only runs once freshness has established the new head as
+    # current, and then a different-head marker is stale by definition.
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=101)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("patch", 11, [])
+
+
+def test_fresh_head_replaces_a_stale_head_comment():
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=90)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("patch", 11, [])
+
+
+def test_forged_markers_in_other_comments_are_ignored():
+    forged = {
+        "id": 9,
+        "user": {"login": "mallory"},
+        "body": _marker(run=999) + "\nforged",
+    }
+    assert publish_evidence.decide_write(
+        _triples([forged]), HEAD_SHA, 100, 1, "evidence"
+    ) == ("post", None, [])
+
+
+def test_bot_comment_without_a_marker_is_ignored():
+    plain = {"id": 8, "user": {"login": BOT}, "body": "hello"}
+    assert publish_evidence.decide_write(
+        _triples([plain]), HEAD_SHA, 100, 1, "evidence"
+    ) == ("post", None, [])
+
+
+def test_legacy_bare_marker_is_replaced():
+    legacy = {
+        "id": 7,
+        "user": {"login": BOT},
+        "body": pr_evidence.MARKER + "\nold evidence\n",
+    }
+    assert publish_evidence.decide_write(
+        _triples([legacy]), HEAD_SHA, 100, 1, "evidence"
+    ) == ("patch", 7, [])
+
+
+def test_multiple_markers_keep_one_and_delete_the_rest():
+    existing = _triples(
+        [
+            _bot_comment(11, run=90),
+            _bot_comment(12, run=95),
+            _bot_comment(13, head=OTHER_HEAD, run=200),
+        ]
+    )
+    action, keep, delete = publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    )
+    assert action == "patch"
+    assert keep == 12
+    assert delete == [11, 13]
+
+
+def test_no_markers_posts():
+    assert publish_evidence.decide_write([], HEAD_SHA, 100, 1, "evidence") == (
+        "post",
+        None,
+        [],
+    )
+
+
+def _listing_json(*comments):
+    return json.dumps(list(comments))
+
+
+def test_decide_write_subcommand_prints_patch_plan(monkeypatch, capsys):
+    comments = [_bot_comment(5, run=90)]
+
+    def fake_run(argv, **kwargs):
+        assert argv[:2] == ["gh", "api"]
+        return _FakeCompleted(0, _listing_json(*comments))
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        publish_evidence, "subprocess", SimpleNamespace(run=fake_run)
+    )
+    rc = publish_evidence.main(
+        [
+            "decide-write",
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+            "--run-id", "100",
+            "--run-attempt", "1",
+            "--outcome", "evidence",
+        ]
+    )
+    assert rc == 0
+    assert capsys.readouterr().out == "PATCH 5\n"
+
+
+def test_decide_write_subcommand_prints_skip_for_stale(monkeypatch, capsys):
+    comments = [_bot_comment(5, run=200, outcome="evidence")]
+
+    def fake_run(argv, **kwargs):
+        return _FakeCompleted(0, _listing_json(*comments))
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        publish_evidence, "subprocess", SimpleNamespace(run=fake_run)
+    )
+    rc = publish_evidence.main(
+        [
+            "decide-write",
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+            "--run-id", "100",
+            "--run-attempt", "1",
+            "--outcome", "notice",
+        ]
+    )
+    assert rc == 0
+    assert capsys.readouterr().out == "SKIP\n"
+
+
+def test_decide_write_subcommand_fails_loud_when_the_api_fails(monkeypatch):
+    _fake_gh(monkeypatch, returncode=1)
+    rc = publish_evidence.main(
+        [
+            "decide-write",
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+            "--run-id", "100",
+            "--run-attempt", "1",
+            "--outcome", "evidence",
+        ]
+    )
+    assert rc == 2
+
+
+def test_render_stamps_the_evidence_marker(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    rc, out = _render(tmp_path, artifact, run_id=7, run_attempt=2)
+    assert rc == 0
+    first = (out / "comment.md").read_text().split("\n", 1)[0]
+    assert first == _marker(run=7, attempt=2, outcome="evidence")
+
+
+def test_refusal_stamps_the_notice_marker(tmp_path, capsys):
+    (tmp_path / "refusal.json").write_text(json.dumps({"reason": "too_large"}))
+    rc = publish_evidence.main(
+        [
+            "refusal",
+            "--reason-file", str(tmp_path / "refusal.json"),
+            "--head-sha", HEAD_SHA,
+            "--run-id", "7",
+            "--run-attempt", "2",
+        ]
+    )
+    assert rc == 0
+    first = capsys.readouterr().out.split("\n", 1)[0]
+    assert first == _marker(run=7, attempt=2, outcome="notice")
+
+
+def test_refusal_without_marker_args_keeps_the_bare_marker(tmp_path, capsys):
+    (tmp_path / "refusal.json").write_text(json.dumps({"reason": "too_large"}))
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(tmp_path / "refusal.json")]
+    )
+    assert rc == 0
+    assert capsys.readouterr().out.startswith(evidence_checks.REFUSAL_MARKER)
+
+
+def test_comment_job_is_serialised_per_pr():
+    # The comment-writing job — and only that job — carries a concurrency
+    # group keyed by the PR number from resolve's outputs, waiting instead
+    # of cancelling, so one PR's publishers never write at once.
+    text = (
+        ROOT / ".github" / "workflows" / "evidence-publish.yml"
+    ).read_text(encoding="utf-8")
+    comment_at = text.index("\n  comment:")
+    assert text.count("cancel-in-progress") == 1
+    group = "group: evidence-comment-${{ needs.resolve.outputs.pr }}"
+    assert group in text[comment_at:]
+    assert "cancel-in-progress: false" in text[comment_at:]
+
+
+def _evidence_comment(head=HEAD_SHA, run=100, attempt=1):
+    return _marker(head, run, attempt, "evidence") + "\n## Before / after evidence\n"
+
+
+def test_comment_step_patches_the_existing_marker_comment(tmp_path, monkeypatch):
+    # Same head, earlier run already posted: the new run patches that
+    # comment instead of posting a duplicate.
+    listing = [_bot_comment(11, run=90)]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files=files, listing=listing, evidence_sha="c" * 40,
+    )
+    assert proc.returncode == 0, proc.stderr
+    writes = [c for c in calls if c["method"] in ("POST", "PATCH", "DELETE")]
+    assert len(writes) == 1, writes
+    assert writes[0]["method"] == "PATCH"
+    url = next(a for a in writes[0]["argv"] if "repos/" in a)
+    assert url == f"repos/{REPO}/issues/comments/11"
+
+
+def test_comment_step_skips_a_stale_notice_over_newer_evidence(tmp_path, monkeypatch):
+    # Interleaving (b) end to end: good evidence from run 200 is already
+    # posted; this run 100 only has a publish_failed notice. It writes
+    # nothing.
+    listing = [_bot_comment(11, run=200, outcome="evidence")]
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "failure", listing=listing,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [], calls
+
+
+def test_comment_step_stops_when_the_head_moved(tmp_path, monkeypatch):
+    # Interleaving (c) end to end: this run recorded H1 but the PR now
+    # points at H2, so the freshness re-check stops the step before any
+    # lookup or write, and the H2 comment survives untouched.
+    listing = [_bot_comment(11, head=OTHER_HEAD, run=101)]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files=files, listing=listing, evidence_sha="c" * 40,
+        fake_head=OTHER_HEAD,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [], calls
+
+
+def test_comment_step_replaces_a_stale_head_and_dedupes(tmp_path, monkeypatch):
+    # Fresh head, two leftover marker comments: patch one, delete the other.
+    listing = [
+        _bot_comment(11, head=OTHER_HEAD, run=90),
+        _bot_comment(12, head=OTHER_HEAD, run=95),
+    ]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files=files, listing=listing, evidence_sha="c" * 40,
+    )
+    assert proc.returncode == 0, proc.stderr
+    methods = sorted(c["method"] for c in calls)
+    assert methods == ["DELETE", "PATCH"], calls
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    drop = next(c for c in calls if c["method"] == "DELETE")
+    patch_url = next(a for a in patch["argv"] if "repos/" in a)
+    drop_url = next(a for a in drop["argv"] if "repos/" in a)
+    assert patch_url.endswith("/12")
+    assert drop_url.endswith("/11")

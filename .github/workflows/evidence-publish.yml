@@ -173,10 +173,13 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ needs.resolve.outputs.pr }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           python scripts/publish_evidence.py render \
             --artifact-dir artifact --out-dir rendered \
             --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
             --test-results-dir test-results --jobs-json jobs.json
       # Always upload: on refusal the render step fails after writing
       # refusal.json, and the comment job below needs that file to post
@@ -336,6 +339,20 @@ jobs:
     name: comment
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Serialise the comment-writing jobs per PR (review round 2,
+    # finding 2): the group key comes from resolve's outputs (PR digits
+    # validated from the API, never from the artifact), and a queued run
+    # waits instead of displacing the one writing now, so the comment
+    # lookup below sees every earlier write. No workflow-level group
+    # exists: GitHub keeps one pending run per group and a newer arrival
+    # would displace the current head's pending publisher by queue order,
+    # not commit freshness. Residual: a pending comment job can still be
+    # displaced by a later arrival for the same PR; if the displacing run
+    # is stale it writes nothing and the PR keeps the previous comment,
+    # which states its head SHA — re-running the publisher fixes it.
+    concurrency:
+      group: evidence-comment-${{ needs.resolve.outputs.pr }}
+      cancel-in-progress: false
     permissions:
       contents: read
       actions: read
@@ -361,9 +378,13 @@ jobs:
           EVIDENCE_SHA: ${{ needs.push.outputs.evidence_sha }}
           BUILD_RESULT: ${{ needs.build.result }}
           PUSH_RESULT: ${{ needs.push.result }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           set -euo pipefail
           case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
+          case "$RUN_ID" in ''|*[!0-9]*) echo "bad run id: $RUN_ID"; exit 1;; esac
+          case "$RUN_ATTEMPT" in ''|*[!0-9]*) echo "bad run attempt: $RUN_ATTEMPT"; exit 1;; esac
           # A build that died before uploading leaves no rendered/
           # directory (the download above then finds nothing): create it
           # so the publish_failed notice below can still be written and
@@ -377,6 +398,7 @@ jobs:
           # shellcheck disable=SC2086
           action=$(python3 scripts/publish_evidence.py decide-comment \
             --build-result "$BUILD_RESULT" --push-result "$PUSH_RESULT" $flags)
+          outcome=""
           case "$action" in
             nothing)
               echo "nothing to post"
@@ -386,17 +408,25 @@ jobs:
               # Refused: the notice is main's fixed text plus the validated
               # reason code (read from the file in Python, never from the
               # shell), so no PR content can reach the comment through it.
+              # The marker below is stamped from trusted event data only.
+              outcome="notice"
               python3 scripts/publish_evidence.py refusal \
-                --reason-file rendered/refusal.json > rendered/comment.md
+                --reason-file rendered/refusal.json \
+                --head-sha "$HEAD_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+                > rendered/comment.md
               ;;
             publish-failed)
               # The push failed, or the rendered artifact is missing or
               # corrupt: post the fixed notice built only from main's text.
+              outcome="notice"
               printf '{"reason": "publish_failed"}\n' > rendered/refusal.json
               python3 scripts/publish_evidence.py refusal \
-                --reason-file rendered/refusal.json > rendered/comment.md
+                --reason-file rendered/refusal.json \
+                --head-sha "$HEAD_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+                > rendered/comment.md
               ;;
             comment)
+              outcome="evidence"
               python3 scripts/publish_evidence.py substitute \
                 --comment rendered/comment.md --sha "$EVIDENCE_SHA"
               ;;
@@ -405,29 +435,74 @@ jobs:
               exit 1
               ;;
           esac
-          marker='<!-- housesitter-evidence -->'
+          marker='<!-- housesitter-evidence'
           if [ "$(head -c ${#marker} rendered/comment.md)" != "$marker" ]; then
             echo "comment does not start with the marker; not posting"; exit 1
           fi
           if [ "$(wc -c < rendered/comment.md)" -gt 65000 ]; then
             echo "comment is too large; not posting"; exit 1
           fi
-          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" \
-            | head -n 1)
           # Freshness re-check, immediately before posting and after all
-          # preparation and the comment lookup above: the PR may have moved
-          # while this step prepared. Stopping without writing beats
-          # posting for a superseded commit; the newer run publishes.
+          # preparation above: the PR may have moved while this step ran.
+          # Stopping without writing beats posting for a superseded commit;
+          # the newer run publishes.
           fresh_rc=0
           python3 scripts/publish_evidence.py check-head \
             --repo "$REPO" --pr "$PR" --expected "$HEAD_SHA" || fresh_rc=$?
           if [ "$fresh_rc" = 1 ]; then exit 0; fi
           if [ "$fresh_rc" != 0 ]; then exit "$fresh_rc"; fi
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@rendered/comment.md > /dev/null
-            echo "Updated comment $id"
-          else
-            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@rendered/comment.md > /dev/null
-            echo "Posted a new comment"
-          fi
+          # The job is serialised per PR (concurrency above), so this lookup
+          # sees every earlier write. Main's Python applies the monotonic
+          # rules — never write over a same-head comment from a newer run,
+          # and a notice never replaces same-head evidence — and prints one
+          # plan; the shell below only carries out its fixed words and its
+          # digit-only ids (each re-validated before use).
+          plan=$(python3 scripts/publish_evidence.py decide-write \
+            --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --outcome "$outcome")
+          first=$(printf '%s\n' "$plan" | sed -n '1p')
+          second=$(printf '%s\n' "$plan" | sed -n '2p')
+          id=""
+          case "$first" in
+            SKIP)
+              echo "keeping the existing comment"
+              exit 0
+              ;;
+            POST)
+              ;;
+            PATCH\ *)
+              id=${first#PATCH }
+              case "$id" in ''|*[!0-9]*) echo "bad comment id: $id"; exit 1;; esac
+              ;;
+            *)
+              echo "unknown write plan: $first"
+              exit 1
+              ;;
+          esac
+          drops=""
+          case "$second" in
+            '')
+              ;;
+            DELETE|DELETE\ *)
+              drops=${second#DELETE}
+              ;;
+            *)
+              echo "unknown write plan line: $second"
+              exit 1
+              ;;
+          esac
+          case "$first" in
+            POST)
+              gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@rendered/comment.md > /dev/null
+              echo "Posted a new comment"
+              ;;
+            PATCH*)
+              gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@rendered/comment.md > /dev/null
+              echo "Updated comment $id"
+              ;;
+          esac
+          for drop in $drops; do
+            case "$drop" in ''|*[!0-9]*) echo "bad comment id: $drop"; exit 1;; esac
+            gh api -X DELETE "repos/$REPO/issues/comments/$drop" > /dev/null
+            echo "Deleted comment $drop"
+          done

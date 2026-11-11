@@ -754,30 +754,27 @@ def test_publisher_still_publishes_failed_runs():
     assert '"success"' in workflow
 
 
-def test_publisher_has_no_concurrency_group():
+def test_publisher_has_no_workflow_concurrency_group():
     # Deliberately no workflow-level concurrency group (review round 1,
     # findings 7-8): GitHub keeps one pending run per group and a newer
     # arrival displaces it by queue order, not commit freshness, so a late
     # stale run could displace the current head's pending publisher and
-    # then write nothing, losing the current evidence. The owner-branch
-    # key is ambiguous too (alice/bob-fix and alice-bob/fix collide, and
-    # group names are case-insensitive), so PRs could displace each other.
-    # Instead every write re-checks freshness first (see
-    # test_publisher_rechecks_freshness_before_writing): a stale run never
-    # writes, two runs for the same head write the same content, and a run
-    # for a newer head necessarily starts after that push, so it writes
-    # last. No other concurrency control is added.
+    # then write nothing, losing the current evidence. Only the comment
+    # job is serialised, per PR (review round 2, finding 2).
     workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
-    assert "concurrency:" not in workflow
+    assert workflow.count("concurrency:") == 1
+    comment = workflow[workflow.index("\n  comment:"):]
+    assert "group: evidence-comment-${{ needs.resolve.outputs.pr }}" in comment
+    assert "cancel-in-progress: false" in comment
 
 
 def test_publisher_rechecks_freshness_before_writing():
     # The head SHA is verified in resolve, then re-checked through main's
     # check-head immediately before every push (both attempts) and
-    # immediately before posting, after the comment lookup: a moved head
-    # stops the run without writing, and the newer run publishes. The
-    # lookup itself lives in main's Python, so the shell holds no inline
-    # copy that could drift.
+    # immediately before the comment lookup and write: a moved head stops
+    # the run without writing, and the newer run publishes. The comment
+    # lookup and the monotonic write rules live in main's Python
+    # (decide-write), so the shell holds no inline copy that could drift.
     workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
     push = workflow[workflow.index("\n  push:\n"):workflow.index("\n  comment:\n")]
     # Defined once (as require_fresh_head() {) and called immediately
@@ -787,10 +784,11 @@ def test_publisher_rechecks_freshness_before_writing():
     assert push.rindex("require_fresh_head") < push.rindex("git push origin pr-evidence")
     assert 'gh api "repos/$REPO/pulls/$PR" --jq .head.sha' not in workflow
     comment = workflow[workflow.index("\n  comment:\n"):]
-    lookup = comment.index('issues/$PR/comments')
     check = comment.index("check-head")
+    plan = comment.index("decide-write")
     post = comment.index("issues/comments/$id")
-    assert lookup < check < post
+    assert check < plan < post
+    assert 'issues/$PR/comments" --paginate' not in comment
 
 
 def test_publisher_skips_push_when_no_pngs():
