@@ -22,6 +22,7 @@ Patterns are assembled from parts so that this file does not match itself.
 from __future__ import annotations
 
 import argparse
+import bisect
 import ipaddress
 import json
 import os
@@ -75,10 +76,11 @@ PLANTED = "PLANTED-SECRET"
 KEY_WORDS = (
     r"(?:x_\w+|\w*(?:password|passwd|passphrase|secret|token|api[_-]?key|auth[_-]?key|_key))"
 )
-# Linear matchers for the three credential patterns whose naive form
-# backtracks badly. Each naive form starts with an unbounded ``\w*`` (or
-# similar star) with no literal anchor, so on a long run of word characters
-# every start position re-scans the rest: ``b"g" * 100_000`` took minutes.
+# Linear matchers for the five patterns whose naive form backtracks
+# badly. Each naive form re-scans the rest of the input from every start
+# position on a failure, so a long hostile run is quadratic: ``b"g" *
+# 100_000`` took minutes for the credential forms, ``b"eyJ" * n`` takes
+# 0.25/1.0/4.0 s at 30/60/120 KB, and ``"token=-" * 20_000`` exceeds 10 s.
 # The matchers below find the same matches in linear time:
 #
 # - ``_credential_assignment_spans``: a match's key ends with a keyword
@@ -102,13 +104,23 @@ KEY_WORDS = (
 #   ``://`` and taking the leftmost ``[a-z]`` start not yet consumed is
 #   the same set. The right side stops at ``/`` (every later ``://``
 #   holds one), so per-``://`` work is disjoint.
+# - ``_jwt_token_spans``: the greedy first half consumes exactly the
+#   ``[A-Za-z0-9_-]`` run holding ``start + 3`` (backtracking cannot cross
+#   the run's first non-class character), so each start has one candidate
+#   dot — the run's end — and the trailing half is one run lookup.
+# - ``_session_cookie_spans``: the key is the maximal ``\w`` run ending at
+#   ``=`` (only a whole keyword matches, as in the naive form) and the
+#   value is the one ``[^;\s\"']`` run after it, so the lookahead is one
+#   search inside one run and per-``=`` work is disjoint.
 #
 # Each yields ``(group0, value)`` exactly as the naive finditer would
 # (same spans, same values; the unquoted group0 starts at the key rather
 # than at the line's leading spaces, which can hold no PLANTED marker),
 # so PLANTED and reference-value handling in ``secret_problems`` is
-# unchanged. A differential fuzz test in tests/test_hygiene.py pins
-# equality with the naive forms.
+# unchanged. The token and cookie matchers expose span lists
+# (``_jwt_token_spans``, ``_session_cookie_spans``) that a differential
+# fuzz test in tests/test_hygiene.py pins to the naive forms span for
+# span.
 _WORD_CHAR_RE = re.compile(r"\w")
 _CRED_REST_RE = re.compile(r"""["']?\s*[:=]\s*(?:"([^"\n]{8,})"|'([^'\n]{8,})')""")
 _UNQUOTED_REST_RE = re.compile(r"""["']?[ \t]*[:=][ \t]*([^\s"'#,{}\[\]][^\s#,]{7,})""")
@@ -262,6 +274,128 @@ def _url_credential_spans(text: str) -> list[tuple[str, str | None]]:
     return out
 
 
+_JWT_HEAD = "ey" + "J"
+_JWT_RUN_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _jwt_token_spans(text: str) -> list[tuple[int, int]]:
+    """``(start, end)`` for JSON web tokens, linear in the input length.
+
+    The same spans the naive ``eyJ…\\.eyJ…`` regex finds. Per start the
+    naive form re-scans the rest on every failure, so ``b"eyJ" * n`` is
+    quadratic. Instead each maximal ``[A-Za-z0-9_-]`` run is visited once:
+    the regex's greedy first half consumes exactly the run holding
+    ``start + 3`` (backtracking cannot cross the run's first non-class
+    character), so there is one candidate dot per start — the run's end —
+    and the trailing half is one run lookup. Starts inside a consumed match
+    are skipped, like finditer's non-overlap.
+    """
+    runs = [(m.start(), m.end()) for m in _JWT_RUN_RE.finditer(text)]
+    out = []
+    consumed = 0
+    ri = 0
+    nruns = len(runs)
+    start = text.find(_JWT_HEAD)
+    while start != -1:
+        if start < consumed:
+            start = text.find(_JWT_HEAD, start + 1)
+            continue
+        while ri < nruns and runs[ri][1] <= start + 3:
+            ri += 1
+        if ri < nruns and runs[ri][0] <= start + 3 < runs[ri][1]:
+            run_end = runs[ri][1]
+            if (
+                run_end - (start + 3) >= 8
+                and text.startswith(".", run_end)
+                and text.startswith(_JWT_HEAD, run_end + 1)
+            ):
+                rj = ri
+                while rj < nruns and runs[rj][1] <= run_end + 4:
+                    rj += 1
+                if (
+                    rj < nruns
+                    and runs[rj][0] <= run_end + 4 < runs[rj][1]
+                    and runs[rj][1] - (run_end + 4) >= 8
+                ):
+                    trail_end = runs[rj][1]
+                    out.append((start, trail_end))
+                    consumed = trail_end
+                    start = text.find(_JWT_HEAD, trail_end)
+                    continue
+        start = text.find(_JWT_HEAD, start + 1)
+    return out
+
+
+_COOKIE_SEG_RE = re.compile(r"[^;\s\"']+")
+_COOKIE_DIGIT_RE = re.compile(r"\d")
+_COOKIE_ALT_RE = re.compile(r"(?:unifises|token|csrf_token|sessionid|session)", re.IGNORECASE)
+
+
+def _session_cookie_spans(text: str) -> list[tuple[int, int]]:
+    """``(start, end)`` for session cookies, linear in the input length.
+
+    The same spans the naive ``\\b(?:unifises|token|…)`` regex finds. Per
+    ``=`` the naive lookahead re-scans the rest on every failure, so
+    ``"token=-" * n`` is quadratic. Instead each maximal
+    ``[^;\\s\\"']`` run is visited once: the key is the maximal ``\\w``
+    run ending at ``=`` (the ``\\b`` is automatic, and only a whole
+    keyword matches — a longer run like ``mytoken`` can never match, as in
+    the naive form), the value is the one run starting at ``= + 1``, and
+    the digit lookahead is one precomputed flag per run. ``=`` inside a
+    consumed match is skipped, like finditer's non-overlap. (One search per
+    ``=`` would re-scan a shared run every time — the naive form's own
+    quadratic trap.)
+    """
+    runs = [(m.start(), m.end()) for m in _COOKIE_SEG_RE.finditer(text)]
+    # The naive ``[^;\s\"']*\d`` lookahead succeeds exactly when a digit
+    # follows ``=`` inside the value run: digit positions per run, up front
+    # (a digit before the value, e.g. ``1-token=abcdefgh``, must not
+    # count), then one bisection per ``=``.
+    run_digits = [
+        [m.start() for m in _COOKIE_DIGIT_RE.finditer(text, start, end)]
+        for start, end in runs
+    ]
+    out = []
+    consumed = 0
+    ri = 0
+    nruns = len(runs)
+    pos = text.find("=")
+    while pos != -1:
+        if pos < consumed:
+            pos = text.find("=", pos + 1)
+            continue
+        word_start = _wordchar_run_start(text, pos, 0)
+        if _COOKIE_ALT_RE.fullmatch(text[word_start:pos]) is None:
+            pos = text.find("=", pos + 1)
+            continue
+        while ri < nruns and runs[ri][1] <= pos + 1:
+            ri += 1
+        if ri < nruns and runs[ri][0] <= pos + 1 < runs[ri][1]:
+            digits = run_digits[ri]
+            at = bisect.bisect_left(digits, pos + 1)
+            seg_ok = runs[ri][1] - (pos + 1) >= 8 and at < len(digits)
+        else:
+            seg_ok = False
+        if seg_ok:
+            seg_end = runs[ri][1]
+            out.append((word_start, seg_end))
+            consumed = seg_end
+            pos = text.find("=", seg_end)
+            continue
+        pos = text.find("=", pos + 1)
+    return out
+
+
+def _jwt_token_matches(text: str) -> list[tuple[str, str | None]]:
+    """``(group0, None)`` for JSON web tokens (no capture groups)."""
+    return [(text[start:end], None) for start, end in _jwt_token_spans(text)]
+
+
+def _session_cookie_matches(text: str) -> list[tuple[str, str | None]]:
+    """``(group0, None)`` for session cookies (no capture groups)."""
+    return [(text[start:end], None) for start, end in _session_cookie_spans(text)]
+
+
 SECRET_PATTERNS = [
     ("private key", re.compile("-----BEGIN [A-Z ]*" + "PRIVATE " + "KEY-----")),
     ("Muse SDK token", re.compile("mg" + r"st_[A-Za-z0-9_-]{16,}")),
@@ -269,12 +403,9 @@ SECRET_PATTERNS = [
     ("AWS access key", re.compile("AK" + r"IA[0-9A-Z]{16}")),
     ("Slack token", re.compile("xo" + r"x[baprs]-[A-Za-z0-9-]{10,}")),
     ("credentials in a URL", _url_credential_spans),
-    ("JSON web token", re.compile("ey" + r"J[A-Za-z0-9_-]{8,}\.ey" + r"J[A-Za-z0-9_-]{8,}")),
+    ("JSON web token", _jwt_token_matches),
     ("bearer token", re.compile(r"(?i)\bbearer\s+(?=[\w.~+/-]*\d)[\w.~+/-]{16,}")),
-    (
-        "session cookie",
-        re.compile(r"(?i)\b(?:unifises|token|csrf_token|session(?:id)?)=(?=[^;\s\"']*\d)[^;\s\"']{8,}"),
-    ),
+    ("session cookie", _session_cookie_matches),
     (
         "CSRF token value",
         re.compile(
@@ -936,6 +1067,10 @@ def scan_git_tree(
             continue
         sha_found, size_found = target
         check(link_path, bytes_by_sha[sha_found], size_found)
+    # A blob may have run past the deadline while it scanned: never report
+    # success on an expired deadline. (A step-level timeout-minutes in
+    # ci-guard.yml is the hard bound; this is the in-process one.)
+    _check_deadline(start, "finishing the scan")
     return problems, suppressions, len(files) + len(links), scanned_bytes, len(submodule_paths)
 
 

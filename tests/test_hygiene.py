@@ -1122,6 +1122,179 @@ def test_trusted_scan_symlink_into_git_fails_closed(tmp_path):
         hygiene_scan.scan_git_tree(sha, cwd=str(repo))
 
 
+# Review round 2 (PR #56), finding 3 (SHOULD-FIX): the JSON-web-token and
+# session-cookie patterns scan quadratically (``b"eyJ" * n`` takes
+# 0.25/1.0/4.0 s at 30/60/120 KB; ``"token=-" * 20_000`` exceeds 10 s), and
+# the 300 s deadline is checked only between blobs, so a single blob can
+# run past it and expiry during the last blob still passes. The matchers
+# below are linear without changing their match sets, pinned by a
+# differential fuzz against the naive regexes; every pattern gets an
+# adversarial performance test; and the deadline is also checked after the
+# last blob and before reporting success (plus a step-level
+# ``timeout-minutes`` in ci-guard.yml so GitHub kills a stalled scan).
+def _old_spans(pattern, text):
+    return [(m.start(), m.end()) for m in pattern.finditer(text)]
+
+
+def _old_jwt_re():
+    import re as _re
+
+    return _re.compile("ey" + "J[A-Za-z0-9_-]{8,}\\.ey" + "J[A-Za-z0-9_-]{8,}")
+
+
+def _old_cookie_re():
+    import re as _re
+
+    return _re.compile(
+        r"(?i)\b(?:unifises|token|csrf_token|session(?:id)?)=(?=[^;\s\"']*\d)[^;\s\"']{8,}"
+    )
+
+
+def test_jwt_spans_agree_with_naive_reference():
+    """Finding 3 (round 2): the linear JWT matcher finds the same spans."""
+    import random
+
+    old = _old_jwt_re()
+    rng = random.Random(20261112)
+    alphabet = [
+        "eyJ", "e", "y", "J", "ey", "yJ", "A", "0", "-", "_", ".", "=", " ",
+        "\n", "eyJeyJ", "eyJJ", "eJ", "eyJ.",
+    ]
+    for trial in range(300):
+        text = "".join(rng.choice(alphabet) for _ in range(300))
+        assert hygiene_scan._jwt_token_spans(text) == _old_spans(old, text), (
+            f"trial {trial}: {text!r}"
+        )
+
+
+def test_jwt_spans_agree_on_adversarial_runs():
+    """Finding 3 (round 2): agreement on the shapes that backtrack badly."""
+    old = _old_jwt_re()
+    heads = ["eyJ", ".eyJ", "ey", "e", ""]
+    mids = ["A", "A" * 7, "A" * 8, "A" * 100, "-_09az", ".", "..", ".eyJ"]
+    tails = ["", ".eyJ", ".eyJ" + "B" * 7, ".eyJB" * 8, ".eyJ" + "B" * 100, "!"]
+    for head in heads:
+        for mid in mids:
+            for tail in tails:
+                text = head + mid + tail
+                assert hygiene_scan._jwt_token_spans(text) == _old_spans(old, text), (
+                    repr(text)
+                )
+    assert hygiene_scan._jwt_token_spans("eyJ" * 2000) == _old_spans(
+        old, "eyJ" * 2000
+    )
+
+
+def test_session_cookie_spans_agree_with_naive_reference():
+    """Finding 3 (round 2): the linear cookie matcher finds the same spans."""
+    import random
+
+    old = _old_cookie_re()
+    rng = random.Random(20261113)
+    alphabet = [
+        "token", "TOKEN", "Token", "session", "sessionid", "csrf_token",
+        "unifises", "tok", "oken", "mytoken", "=", ";", " ", "\"", "'",
+        "-", "_", "abc123", "12345678", "x" * 20, "\n", "tokeſ", "ß",
+    ]
+    for trial in range(300):
+        text = "".join(rng.choice(alphabet) for _ in range(40))
+        assert hygiene_scan._session_cookie_spans(text) == _old_spans(
+            old, text
+        ), f"trial {trial}: {text!r}"
+
+
+def test_session_cookie_spans_agree_on_adversarial_runs():
+    """Finding 3 (round 2): agreement on the shapes that backtrack badly."""
+    old = _old_cookie_re()
+    for text in [
+        "token=-" * 2000,
+        "token=" + "x" * 2000,
+        "token=" + "1" * 2000,
+        ("token=" + "x" * 7 + ";") * 500,
+        "mytoken=12345678",
+        "csrf_token=" + "12345678",
+        "TOKEN=" + "12345678",
+        "sessionid=" + "12345678",
+        "token=" + "12345678 token=abcdefgh",
+        "token=" + "12345678;token=abcdefgh",
+        # A digit before the value is not the lookahead's digit.
+        "1-token=abcdefgh",
+        "12token=abcdefgh",
+        "token123=abcdefgh",
+    ]:
+        assert hygiene_scan._session_cookie_spans(text) == _old_spans(old, text), (
+            repr(text[:80])
+        )
+
+
+def test_planted_jwt_and_cookie_are_still_skipped():
+    """Finding 3 (round 2): PLANTED-SECRET still exempts the new matchers."""
+    jwt = "eyJ" + "A" * 8 + ".eyJ" + "B" * 8
+    assert hygiene_scan.secret_problems(jwt)
+    assert not hygiene_scan.secret_problems(jwt.replace("AAAA", "PLANTED-SECRET"))
+    cookie = "token=" + "x" * 4 + "PLANTED-SECRET" + "y" * 4
+    assert not hygiene_scan.secret_problems(cookie)
+    assert hygiene_scan.secret_problems("token=" + "x" * 4 + "1234" + "y" * 4)
+
+
+def test_every_pattern_is_fast_on_adversarial_input():
+    """Finding 3 (round 2): every pattern's literal bait at ~200 KB < 2 s."""
+    import time
+
+    baits = {
+        "private key": "-----BEGIN ",
+        "Muse SDK token": "mgst_",
+        "GitHub token": "ghp_",
+        "AWS access key": "AKIA",
+        "Slack token": "xoxb-",
+        "credentials in a URL": "https://",
+        "JSON web token": "eyJ",
+        "bearer token": "bearer ",
+        "session cookie": "token=-",
+        "CSRF token value": "x-csrf-token: ",
+        "credential assignment": 'pass' + 'word="',
+        "MAC": "ab:",
+        "IPv4": "1.",
+    }
+    labels = {label for label, _ in hygiene_scan.SECRET_PATTERNS}
+    assert set(baits) >= labels | {"MAC", "IPv4"}, (
+        "perf test must cover every pattern: " + repr(sorted(labels))
+    )
+    for label, bait in sorted(baits.items()):
+        if label == "MAC":
+            text = (bait * 50000)[:200000]
+            problems = lambda t: hygiene_scan.mac_problems(t)  # noqa: E731
+        elif label == "IPv4":
+            text = (bait * 100000)[:200000]
+            problems = lambda t: hygiene_scan.ip_problems(t)  # noqa: E731
+        elif label == "credential assignment":
+            text = ((bait + "x" * 7 + "\n") * 15000)[:200000]
+            problems = lambda t: hygiene_scan.secret_problems(t)  # noqa: E731
+        else:
+            text = (bait * ((200000 // len(bait)) + 1))[:200000]
+            problems = lambda t: hygiene_scan.secret_problems(t)  # noqa: E731
+        start = time.monotonic()
+        problems(text)
+        elapsed = time.monotonic() - start
+        assert elapsed < 2.0, f"{label}: {elapsed:.1f}s on 200 KB of {bait!r}"
+
+
+def test_scan_deadline_checked_before_reporting_clean(tmp_path, monkeypatch):
+    """Finding 3 (round 2): expiry during the last blob still refuses."""
+    repo, sha = _git_repo(tmp_path, {"ok.txt": "hello\n"})
+    calls = []
+
+    def spy(start, what):
+        calls.append(what)
+        if what == "finishing the scan":
+            raise hygiene_scan.FailClosed("spy: expired at the end")
+
+    monkeypatch.setattr(hygiene_scan, "_check_deadline", spy)
+    with pytest.raises(hygiene_scan.FailClosed):
+        hygiene_scan.scan_git_tree(sha, cwd=str(repo))
+    assert "finishing the scan" in calls
+
+
 @NEEDS_GIT
 def test_fetch_and_scan_end_to_end_like_the_workflow(tmp_path):
     """The workflow's exact command against a local origin with a planted IP."""

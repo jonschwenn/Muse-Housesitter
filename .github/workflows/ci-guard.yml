@@ -55,6 +55,10 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: python scripts/ci_guard.py --repo "$REPO" --pr "$PR"
       - name: Trusted hygiene scan of the PR head tree
+        # Hard bound: GitHub kills a stalled scan and the required check
+        # fails. The in-process SCAN_DEADLINE_S is the inner deadline; this
+        # stays below the job's own timeout.
+        timeout-minutes: 6
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
