@@ -37,6 +37,8 @@ EXACT_PROTECTED = {
     "scripts/ui_evidence.py": "captures screenshots and validates the artifact",
     "scripts/publish_evidence.py": "validates and renders evidence with write tokens",
     "scripts/test_results.py": "parses test XML and renders the Tests line",
+    "scripts/evidence_checks.py": "shared refusal checks the publisher imports",
+    "tests/test_evidence_checks.py": "pins the shared refusal checks",
     # The guard itself and the tests that pin all of the above: editing the
     # tests could mask a weakened script, so they are protected too.
     "scripts/ci_guard.py": "this guard",

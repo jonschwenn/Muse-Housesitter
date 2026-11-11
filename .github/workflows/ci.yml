@@ -107,7 +107,7 @@ jobs:
           for path in tests/test_hygiene.py tests/conformance \
                       tests/test_pr_evidence.py tests/test_ui_evidence.py \
                       tests/test_publish_evidence.py tests/test_ci_guard.py \
-                      tests/test_test_results.py; do
+                      tests/test_test_results.py tests/test_evidence_checks.py; do
             if [ -e "$path" ]; then suites+=("$path"); fi
           done
           test -e tests/test_hygiene.py

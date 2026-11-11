@@ -518,3 +518,12 @@ def test_check_rejects_bad_caller_arguments(tmp_path):
         )
         == 2
     )
+
+
+def test_png_limits_are_pinned():
+    # Loosening a dimension cap silently widens what the publisher accepts,
+    # so the values are pinned here: changing them is a visible change to
+    # this protected test file.
+    assert evidence_checks.PNG_MAX_WIDTH == 4096
+    assert evidence_checks.PNG_MAX_HEIGHT == 120_000
+    assert evidence_checks.PNG_MAX_PIXELS == 16_777_216
