@@ -332,6 +332,20 @@ PNG_MAX_WIDTH = 4096
 PNG_MAX_HEIGHT = 120_000
 PNG_MAX_PIXELS = 16_777_216
 PNG_CHANNELS = {2: 3, 6: 4}  # 8-bit RGB/RGBA non-interlaced: what the pipeline emits
+# Chunk types the pipeline's screenshots contain. A real Chromium capture
+# holds IHDR, IDAT and IEND only (pinned by test); PLTE is legal alongside
+# truecolour data, so it stays allowed. Everything else — text chunks,
+# timestamps, colour profiles, and animation chunks (acTL/fcTL/fdAT) — is
+# refused: either hostile bytes or a sign the capture pipeline changed,
+# and both fail closed.
+PNG_ALLOWED_CHUNKS = frozenset({b"IHDR", b"PLTE", b"IDAT", b"IEND"})
+
+
+def _chunk_name(ctype: bytes) -> str:
+    try:
+        return ctype.decode("ascii")
+    except ValueError:
+        return repr(ctype)
 
 
 def validate_png(data: bytes) -> list[str]:
@@ -351,14 +365,15 @@ def validate_png(data: bytes) -> list[str]:
         body = data[pos + 8 : end - 4]
         (stored_crc,) = struct.unpack(">I", data[end - 4 : end])
         if zlib.crc32(data[pos + 4 : end - 4]) & 0xFFFFFFFF != stored_crc:
-            try:
-                name = ctype.decode("ascii")
-            except ValueError:
-                name = repr(ctype)
-            return [f"PNG CRC mismatch in {name} chunk"]
+            return [f"PNG CRC mismatch in {_chunk_name(ctype)} chunk"]
         if width is None:
             if ctype != b"IHDR" or length != 13:
                 return ["PNG's first chunk must be a 13-byte IHDR"]
+        if not all(0x41 <= byte <= 0x5A or 0x61 <= byte <= 0x7A for byte in ctype):
+            return [f"PNG chunk has a non-letter type name: {_chunk_name(ctype)}"]
+        if ctype not in PNG_ALLOWED_CHUNKS:
+            return [f"PNG has an unexpected {_chunk_name(ctype)} chunk"]
+        if width is None:
             (width, height, bit_depth, color_type, comp, filt, interlace) = (
                 struct.unpack(">IIBBBBB", body)
             )
@@ -391,32 +406,38 @@ def validate_png(data: bytes) -> list[str]:
             if end != len(data):
                 return ["PNG has trailing bytes after IEND"]
             break
-        elif ctype[:1].isupper():
-            # Unknown critical chunk (uppercase first letter): a decoder
-            # that skips it could misread the image.
-            try:
-                name = ctype.decode("ascii")
-            except ValueError:
-                name = repr(ctype)
-            return [f"PNG has an unknown critical chunk {name}"]
         pos = end
     else:
         return ["PNG ends without IEND"]
     if not seen_idat:
         return ["PNG has no IDAT image data"]
+    # The IDAT stream must decode to exactly the IHDR size: height rows of
+    # one filter byte plus width pixels. Interlaced images are rejected
+    # above, so no interlace pass math is needed. The output cap is the
+    # exact size, so memory stays bounded; then the stream must end cleanly
+    # (a truncated stream or garbage after it refuses) and every scanline's
+    # filter byte must be a defined type (0-4).
     expected = height * (1 + width * channels)
     try:
-        decompressor = zlib.decompressobj()
-        out = decompressor.decompress(bytes(idat), expected + 1)
-        if len(out) > expected or decompressor.unconsumed_tail:
-            return ["PNG image data decodes to more than the IHDR size"]
-        out += decompressor.flush()
+        decoder = zlib.decompressobj()
+        out = decoder.decompress(bytes(idat), expected)
     except zlib.error as exc:
         return [f"PNG image data does not decompress: {exc}"]
-    if len(out) < expected:
-        return ["PNG image data is truncated"]
-    if len(out) > expected:
-        return ["PNG image data has extra bytes"]
+    if not decoder.eof:
+        return ["PNG image data is truncated: the zlib stream ends early"]
+    if decoder.unused_data or decoder.unconsumed_tail:
+        return ["PNG image data has trailing bytes after the zlib stream"]
+    if len(out) != expected:
+        return [
+            f"PNG image data decodes to {len(out)} bytes, "
+            f"expected {expected} from IHDR"
+        ]
+    if decoder.flush() != b"":
+        return ["PNG image data has trailing bytes after the zlib stream"]
+    stride = 1 + width * channels
+    for row in range(height):
+        if out[row * stride] > 4:
+            return [f"PNG scanline {row} has an invalid filter byte (IDAT image data)"]
     return []
 
 

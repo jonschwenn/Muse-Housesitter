@@ -367,13 +367,15 @@ def test_unknown_critical_chunk_is_rejected():
     assert evidence_checks.validate_png(data)
 
 
-def test_ancillary_chunk_is_allowed():
+def test_allow_listed_chunks_pass():
+    # Only IHDR/PLTE/IDAT/IEND are accepted (review round 1, finding 5):
+    # the old "ancillary chunks pass" rule is gone.
     ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
     raw = b"".join(b"\x00" + bytes([1, 2, 3, 4]) * 4 for _ in range(4))
     data = (
         b"\x89PNG\r\n\x1a\n"
         + _chunk(b"IHDR", ihdr)
-        + _chunk(b"tEXt", b"comment")  # lowercase first letter: ancillary
+        + _chunk(b"PLTE", bytes([1, 2, 3]))
         + _chunk(b"IDAT", zlib.compress(raw))
         + _chunk(b"IEND", b"")
     )
@@ -574,3 +576,79 @@ def test_render_error_reason_is_fixed_text():
     notice = evidence_checks.refusal_notice("render_error")
     assert notice.startswith("<!-- housesitter-evidence -->\n")
     assert "`render_error`" in notice
+
+
+# Review round 1, finding 5: close the PNG validator gaps. -------------------
+#
+# Passing today and refused after the fix: a truncated zlib stream, garbage
+# after a valid stream, a scanline filter byte of 5, a non-letter chunk
+# type, and animation chunks. Chunk types are allow-listed to what the
+# pipeline's screenshots contain (a real Chromium capture is pinned below:
+# IHDR, IDAT, IEND only), and the IDAT stream must decode to exactly the
+# IHDR size with a clean stream end and valid filter bytes.
+
+
+def _png_idat(width, height, color_type, payload, extra=()):
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + b"".join(_chunk(ctype, body) for ctype, body in extra)
+        + _chunk(b"IDAT", payload)
+        + _chunk(b"IEND", b"")
+    )
+
+
+def _raw_rgba(width=4, height=4, filt=0):
+    return b"".join(
+        bytes([filt]) + bytes([9, 9, 9, 255]) * width for _ in range(height)
+    )
+
+
+def test_truncated_zlib_stream_is_rejected():
+    raw = _raw_rgba()
+    payload = zlib.compress(raw)[:-4]  # adler32 gone, bytes intact
+    assert evidence_checks.validate_png(_png_idat(4, 4, 6, payload)) != []
+
+
+def test_trailing_zlib_data_is_rejected():
+    raw = _raw_rgba()
+    payload = zlib.compress(raw) + zlib.compress(b"garbage")
+    assert evidence_checks.validate_png(_png_idat(4, 4, 6, payload)) != []
+
+
+def test_invalid_filter_byte_is_rejected():
+    payload = zlib.compress(_raw_rgba(filt=5))
+    assert evidence_checks.validate_png(_png_idat(4, 4, 6, payload)) != []
+
+
+def test_non_letter_chunk_type_is_rejected():
+    raw = _raw_rgba()
+    data = _png_idat(4, 4, 6, zlib.compress(raw), extra=[(b"1234", b"")])
+    assert evidence_checks.validate_png(data) != []
+
+
+def test_animation_chunks_are_rejected():
+    raw = _raw_rgba()
+    extra = [
+        (b"acTL", struct.pack(">II", 1, 0)),
+        (b"fcTL", struct.pack(">IIIII", 0, 4, 4, 0, 0) + b"\x00\x00"),
+        (b"fdAT", struct.pack(">I", 0) + zlib.compress(raw)),
+    ]
+    data = _png_idat(4, 4, 6, zlib.compress(raw), extra=extra)
+    assert evidence_checks.validate_png(data) != []
+
+
+def test_unlisted_ancillary_chunk_is_rejected():
+    raw = _raw_rgba()
+    data = _png_idat(4, 4, 6, zlib.compress(raw), extra=[(b"tEXt", b"comment")])
+    assert evidence_checks.validate_png(data) != []
+
+
+def test_real_chromium_screenshot_passes():
+    # Captured locally with Playwright's bundled Chromium (no house data:
+    # a blank probe page), checked in so the allow-list cannot drift past
+    # what the pipeline's screenshots contain. CI's Google Chrome uses the
+    # same screenshot encoder; the green run confirms it still validates.
+    shot = (ROOT / "tests" / "fixtures" / "png" / "chrome-screenshot.png").read_bytes()
+    assert evidence_checks.validate_png(shot) == []
