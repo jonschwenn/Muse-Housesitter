@@ -926,6 +926,202 @@ def test_trusted_scan_forged_metadata_at_read_boundary(tmp_path):
     assert "credential assignment" in proc.stdout
 
 
+# Review round 2 (PR #56), finding 2 (BLOCKER): the resolver removed
+# ``..`` before resolving intermediate symlinks, while the filesystem
+# follows symlinks first. ``alias -> dir/sub`` with
+# ``tests/fixtures/leak.json -> ../../alias/../secret`` read the root
+# ``secret`` instead of ``dir/secret``; valid ``alias/file`` targets were
+# rejected and a link to the repo root was called dangling. Components now
+# resolve in filesystem order, checked against a real checkout below.
+def _git_repo_at(base, files, links=None):
+    """Like _git_repo but rooted at ``base`` so a test can build several."""
+    import shutil as _shutil
+
+    repo = base / "repo"
+    if repo.exists():
+        _shutil.rmtree(repo)
+    repo.mkdir(parents=True)
+
+    def run(*args, **kwargs):
+        return subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, **kwargs
+        )
+
+    run("init", "-q")
+    for rel, text in files.items():
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    for rel, target_str in (links or {}).items():
+        link = repo / rel
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(target_str)
+    run("add", "-A")
+    run(
+        "-c", "user.name=test",
+        "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "test",
+    )
+    return repo, run("rev-parse", "HEAD").stdout.decode().strip()
+
+
+def _tree_maps(repo, sha):
+    """The (kinds, link_targets, dir_paths, submodules) scan_git_tree uses."""
+    files, links, submodules = hygiene_scan.list_tree_blobs(sha, cwd=str(repo))
+    link_contents = hygiene_scan.read_blobs(links, cwd=str(repo))
+    kinds = {}
+    for objsha, size, path in files:
+        kinds[path] = ("file", objsha, size)
+    for objsha, size, path in links:
+        kinds[path] = ("link", objsha, size)
+    for path in submodules:
+        kinds[path] = ("submodule", "", 0)
+    dir_paths = set()
+    for _, _, path in files + links:
+        parts = path.split("/")[:-1]
+        for depth in range(1, len(parts) + 1):
+            dir_paths.add("/".join(parts[:depth]))
+    link_targets = {}
+    for (_, _, path), data in zip(links, link_contents):
+        link_targets[path] = os.fsdecode(data)
+    return kinds, link_targets, dir_paths, submodules
+
+
+_FIXTURE_LEAK = '{"ss' + 'id": "leak' + '-bad"}'
+
+
+@NEEDS_GIT
+def test_trusted_scan_symlink_resolution_matches_realpath(tmp_path):
+    """Finding 2 (round 2): the tree resolution equals the checkout's own."""
+    import os
+
+    ok = "ok\n"
+    cases = [
+        # The reviewer's repro: alias -> dir/sub, link -> ../../alias/../secret.
+        (
+            {"secret": "{}\n", "dir/secret": _FIXTURE_LEAK, "dir/sub/ok": ok},
+            {"alias": "dir/sub", "tests/fixtures/leak.json": "../../alias/../secret"},
+            "tests/fixtures/leak.json",
+        ),
+        # Chains through directory links, with ./, // and sub/../.
+        (
+            {"dir/file": _FIXTURE_LEAK, "dir/sub/ok": ok},
+            {"alias": "dir", "alias2": "alias",
+             "tests/fixtures/x.json": "../../alias2/./sub/../file"},
+            "tests/fixtures/x.json",
+        ),
+        # Doubled slashes collapse like the filesystem's.
+        (
+            {"dir/file": _FIXTURE_LEAK},
+            {"tests/fixtures/x.json": "../../dir//file"},
+            "tests/fixtures/x.json",
+        ),
+        # A link to a directory (via ..) is skipped, not dangling.
+        (
+            {"dir/file": _FIXTURE_LEAK},
+            {"alias": "dir", "tests/fixtures/x.json": "../../alias/.."},
+            "tests/fixtures/x.json",
+        ),
+        # A link to the repo root is a directory, not dangling.
+        (
+            {"dir/file": _FIXTURE_LEAK},
+            {"tests/fixtures/rootlink": "../.."},
+            "tests/fixtures/rootlink",
+        ),
+        # "." is the link's own directory: skipped.
+        (
+            {"dir/file": _FIXTURE_LEAK},
+            {"tests/fixtures/dotlink": "."},
+            "tests/fixtures/dotlink",
+        ),
+    ]
+    for i, (files, links, checked) in enumerate(cases):
+        base = tmp_path / f"linkcase{i}"
+        repo, sha = _git_repo_at(base, files, links)
+        co = base / "co"
+        co.mkdir()
+        for rel, text in files.items():
+            target = co / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+        for rel, target_str in links.items():
+            link = co / rel
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target_str)
+        kinds, link_targets, dir_paths, submodules = _tree_maps(repo, sha)
+        resolved = os.path.realpath(co / checked)
+        if os.path.isfile(co / checked):
+            expected = os.path.relpath(resolved, co).replace(os.sep, "/")
+            got = hygiene_scan._resolve_symlink(
+                checked, link_targets[checked], kinds, link_targets,
+                dir_paths, submodules,
+            )
+            assert got is not None, f"case {i}: filesystem has a file"
+            got_sha, got_size = got
+            # Same tree path, and the blob holds the checkout's bytes.
+            assert _tree_path_for(repo, sha, got_sha) == expected, f"case {i}"
+            data = hygiene_scan.read_blobs(
+                [(got_sha, got_size, expected)], cwd=str(repo)
+            )[0]
+            assert data == (co / expected).read_bytes(), f"case {i}"
+        elif os.path.isdir(co / checked):
+            assert hygiene_scan._resolve_symlink(
+                checked, link_targets[checked], kinds, link_targets,
+                dir_paths, submodules,
+            ) is None, f"case {i}: expected a directory skip"
+            problems, _, _, _, _ = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
+            assert not [p for p in problems if p.startswith(checked + ":")], problems
+        else:
+            with pytest.raises(hygiene_scan.FailClosed):
+                hygiene_scan._resolve_symlink(
+                    checked, link_targets[checked], kinds, link_targets,
+                    dir_paths, submodules,
+                )
+
+
+def _tree_path_for(repo, sha, blob_sha):
+    """First tree path holding ``blob_sha`` (test helper for the parity check)."""
+    files, _, _ = hygiene_scan.list_tree_blobs(sha, cwd=str(repo))
+    for sha_, _, path in files:
+        if sha_ == blob_sha:
+            return path
+    raise AssertionError("blob missing from its own tree")
+
+
+@NEEDS_GIT
+def test_trusted_scan_symlink_repro_reads_dir_secret(tmp_path):
+    """Finding 2 (round 2): the repro's leak is flagged under the link name."""
+    ok = "ok\n"
+    repo, sha = _git_repo(
+        tmp_path,
+        {"secret": "{}\n", "dir/secret": _FIXTURE_LEAK, "dir/sub/ok": ok},
+        links={"alias": "dir/sub", "tests/fixtures/leak.json": "../../alias/../secret"},
+    )
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "tests/fixtures/leak.json" in proc.stdout
+    assert "SSID" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_symlink_into_git_fails_closed(tmp_path):
+    """Finding 2 (round 2): .git is not part of the tree, so it fails closed.
+
+    The checkout really does resolve ``.git/config`` to a file, but the
+    tree listing never contains ``.git``: scanning it would read data
+    outside the commit, so the scanner refuses instead.
+    """
+    repo, sha = _git_repo(
+        tmp_path,
+        {"dir/file": "{}\n"},
+        links={"tests/fixtures/x.json": "../../.git/config"},
+    )
+    with pytest.raises(hygiene_scan.FailClosed):
+        hygiene_scan.scan_git_tree(sha, cwd=str(repo))
+
+
 @NEEDS_GIT
 def test_fetch_and_scan_end_to_end_like_the_workflow(tmp_path):
     """The workflow's exact command against a local origin with a planted IP."""

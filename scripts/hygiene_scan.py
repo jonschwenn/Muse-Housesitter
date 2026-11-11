@@ -702,34 +702,6 @@ def list_tree_blobs(
     return files, links, submodules
 
 
-def _normalize_link_target(link_path: str, target: str) -> str:
-    """Resolve a relative symlink target against the link's directory.
-
-    Absolute targets and escapes past the tree root fail closed: they cannot
-    be resolved inside the tree. The target text is never quoted in
-    messages: a link blob is PR-controlled data and could carry a secret.
-    """
-    if target.startswith("/"):
-        raise FailClosed(
-            f"symlink {_display(link_path)} has an absolute target outside "
-            "the tree; refusing to scan"
-        )
-    stack = link_path.split("/")[:-1]
-    for part in target.split("/"):
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if not stack:
-                raise FailClosed(
-                    f"symlink {_display(link_path)} escapes the tree root; "
-                    "refusing to scan"
-                )
-            stack.pop()
-        else:
-            stack.append(part)
-    return "/".join(stack)
-
-
 def _resolve_symlink(
     link_path: str,
     target: str,
@@ -740,20 +712,62 @@ def _resolve_symlink(
 ) -> tuple | None:
     """Follow one symlink to a tree file, like the working-tree scan does.
 
+    Components resolve in filesystem order, the way the kernel resolves a
+    path: each intermediate symlink expands before the next component is
+    looked up, and ``..`` pops the already-resolved path. (Removing ``..``
+    first, lexically, reads the wrong file when a symlink points through a
+    directory: ``alias -> dir/sub`` with ``../../alias/../secret`` resolves
+    to ``dir/secret``, not the root ``secret``.)
+
     Returns ``(blob_sha, size)`` for the target file, ``None`` when the
     target is a directory (or under a submodule: contents the working-tree
     scan never sees either), and raises :class:`FailClosed` for absolute,
-    escaping, dangling, cyclic, or over-long chains.
+    empty, escaping, dangling, cyclic, or over-long chains, and for paths
+    through a non-directory (a trailing slash on a file, ``file/extra``).
+    The target text is never quoted in messages: a link blob is
+    PR-controlled data and could carry a secret.
     """
+    if target.startswith("/"):
+        raise FailClosed(
+            f"symlink {_display(link_path)} has an absolute target outside "
+            "the tree; refusing to scan"
+        )
+    if target == "":
+        raise FailClosed(
+            f"symlink {_display(link_path)} points outside the tree "
+            "(dangling); refusing to scan"
+        )
     seen = {link_path}
-    current = _normalize_link_target(link_path, target)
-    for _ in range(MAX_SYMLINK_HOPS):
-        if current in dir_paths or any(
-            current == sub or current.startswith(sub + "/") for sub in submodule_paths
+    hops = 0
+    # All directories while components remain; a file is only ever the
+    # final component (anything past it fails, like ENOTDIR).
+    resolved = link_path.split("/")[:-1]
+    queue = target.split("/")
+    pos = 0
+    while pos < len(queue):
+        part = queue[pos]
+        pos += 1
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                raise FailClosed(
+                    f"symlink {_display(link_path)} escapes the tree root; "
+                    "refusing to scan"
+                )
+            resolved.pop()
+            continue
+        candidate = "/".join([*resolved, part]) if resolved else part
+        if any(
+            candidate == sub or candidate.startswith(sub + "/")
+            for sub in submodule_paths
         ):
             return None
-        entry = kinds.get(current)
+        entry = kinds.get(candidate)
         if entry is None:
+            if candidate in dir_paths:
+                resolved.append(part)
+                continue
             raise FailClosed(
                 f"symlink {_display(link_path)} points outside the tree "
                 "(dangling); refusing to scan"
@@ -762,16 +776,61 @@ def _resolve_symlink(
         if kind == "submodule":
             return None
         if kind == "file":
-            return (sha, size)
-        if current in seen:
+            if pos < len(queue):
+                raise FailClosed(
+                    f"symlink {_display(link_path)} passes through "
+                    "a file, not a directory; refusing to scan"
+                )
+            resolved.append(part)
+            continue
+        # A link: expand it in place, like the filesystem does, and resolve
+        # its target before the components that follow.
+        if candidate in seen:
             raise FailClosed(
                 f"symlink {_display(link_path)} loops back on itself "
                 "(cycle); refusing to scan"
             )
-        seen.add(current)
-        current = _normalize_link_target(current, link_targets[current])
+        hops += 1
+        if hops > MAX_SYMLINK_HOPS:
+            raise FailClosed(
+                f"symlink {_display(link_path)} exceeds {MAX_SYMLINK_HOPS} "
+                "hops; refusing to scan"
+            )
+        seen.add(candidate)
+        link_target = link_targets[candidate]
+        if link_target.startswith("/"):
+            raise FailClosed(
+                f"symlink {_display(link_path)} has an absolute target outside "
+                "the tree; refusing to scan"
+            )
+        if link_target == "":
+            raise FailClosed(
+                f"symlink {_display(link_path)} points outside the tree "
+                "(dangling); refusing to scan"
+            )
+        queue = link_target.split("/") + queue[pos:]
+        pos = 0
+    final = "/".join(resolved)
+    if final == "":
+        return None  # the tree root is a directory
+    entry = kinds.get(final)
+    if entry is None:
+        if final in dir_paths:
+            return None
+        raise FailClosed(
+            f"symlink {_display(link_path)} points outside the tree "
+            "(dangling); refusing to scan"
+        )
+    kind, sha, size = entry
+    if kind == "submodule":
+        return None
+    if kind == "file":
+        return (sha, size)
+    # A link as the final component always expands above, so reaching one
+    # here is impossible; fail closed rather than guess.
     raise FailClosed(
-        f"symlink {_display(link_path)} exceeds {MAX_SYMLINK_HOPS} hops; refusing to scan"
+        f"symlink {_display(link_path)} points outside the tree "
+        "(dangling); refusing to scan"
     )
 
 
