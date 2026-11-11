@@ -752,8 +752,10 @@ def cmd_decide_comment(args: argparse.Namespace) -> int:
 # from a newer (run id, attempt), whatever head it is for (review round 3,
 # finding 1: ordering is cross-head and monotonic by CI run, since a
 # genuinely newer push always gets a newer run id); a notice never replaces
-# an evidence comment for the same head; otherwise write, keeping one
-# marker comment and deleting the rest. Marker-looking text in anyone
+# an evidence comment for the same head; a skip still deletes every
+# marker comment except the winner (review round 3, finding 4).
+# Otherwise write, keeping one marker comment and deleting the rest.
+# Marker-looking text in anyone
 # else's comments is ignored. Residual: GitHub keeps one pending run per
 # concurrency group, so a pending comment job can be displaced by a later
 # arrival; if the displacing run is stale it writes nothing and the PR
@@ -828,6 +830,27 @@ def stamp_marker(
     )
 
 
+def _existing_winner(markers: list, head_sha: str):
+    """The marker comment a skip keeps while deleting the other duplicates.
+
+    Same-head evidence always stands — a notice never replaces it, so it
+    is kept even next to a newer same-head notice. Otherwise the newest
+    (run id, attempt) wins, cross-head ordering being monotonic by CI run
+    (review round 3, findings 1 and 4).
+    """
+    same_evidence = [m for m in markers if m[1] == head_sha and m[3] == "evidence"]
+    if same_evidence:
+        return max(same_evidence, key=lambda m: (m[2], m[0]))
+    return max(markers, key=lambda m: (m[2], m[0]))
+
+
+def _skip(markers: list, head_sha: str) -> tuple:
+    """Skip this run's write but still plan the duplicate cleanup."""
+    winner = _existing_winner(markers, head_sha)
+    delete = sorted(cid for cid, _, _, _ in markers if cid != winner[0])
+    return ("skip", None, delete)
+
+
 def decide_write(
     comments: list, head_sha: str, run_id: int, run_attempt: int, outcome: str
 ) -> tuple:
@@ -835,8 +858,9 @@ def decide_write(
 
     ``comments`` are (id, author login, body) triples; only the workflow's
     own bot comments carrying the marker count. Returns (action, keep_id,
-    delete_ids): "skip" writes nothing; "post" adds a comment and deletes
-    every other marker comment; "patch" edits keep_id and deletes the rest.
+    delete_ids): "skip" writes nothing but still deletes every marker
+    comment except the winner; "post" adds a comment and deletes every
+    other marker comment; "patch" edits keep_id and deletes the rest.
     """
     _checked_marker_parts(head_sha, run_id, run_attempt, outcome)
     new_key = (run_id, run_attempt)
@@ -862,13 +886,11 @@ def decide_write(
         # Cross-head ordering (review round 3, finding 1): a newer run
         # already wrote — whatever head it was for — so this run writes
         # nothing. A genuinely newer push always gets a newer CI run id,
-        # so it still wins.
-        return ("skip", None, [])
+        # so it still wins. (This subsumes the old same-head-newer rule.)
+        return _skip(markers, head_sha)
     same_head = [m for m in markers if m[1] == head_sha]
-    if any(key > new_key for _, _, key, _ in same_head):
-        return ("skip", None, [])
     if outcome == "notice" and any(out == "evidence" for _, _, _, out in same_head):
-        return ("skip", None, [])
+        return _skip(markers, head_sha)
     if not markers:
         return ("post", None, [])
     pool = same_head or markers

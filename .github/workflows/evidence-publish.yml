@@ -487,8 +487,9 @@ jobs:
           # rules — never write over any marker comment from a newer run,
           # whatever head it is for (ordering is cross-head by CI run id),
           # and a notice never replaces same-head evidence — and prints one
-          # plan; the shell below only carries out its fixed words and its
-          # digit-only ids (each re-validated before use).
+          # plan (a skip still carries the duplicate deletions); the shell
+          # below only carries out its fixed words and its digit-only ids
+          # (each re-validated before use).
           plan=$(python3 scripts/publish_evidence.py decide-write \
             --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
             --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --outcome "$outcome")
@@ -497,8 +498,10 @@ jobs:
           id=""
           case "$first" in
             SKIP)
+              # A skip writes nothing, but it still carries the duplicate
+              # cleanup below (review round 3, finding 4): every bot
+              # marker comment except the winner is deleted.
               echo "keeping the existing comment"
-              exit 0
               ;;
             POST)
               ;;

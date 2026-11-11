@@ -2375,6 +2375,62 @@ def test_render_without_tests_matches_ci_side_check_at_the_old_cliff(tmp_path):
     assert len(plain.encode()) <= pr_evidence.MAX_COMMENT_BYTES
 
 
+def test_skip_still_deletes_duplicates_for_a_newer_notice():
+    # The reviewer's duplicates-notice repro: two bot evidence comments
+    # for the current head from runs 101 and 99; the failed run 102 only
+    # has a notice, so it writes nothing — but it still deletes the older
+    # duplicate, keeping the winner (newest run 101).
+    existing = _triples([_bot_comment(11, run=101), _bot_comment(12, run=99)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 102, 1, "notice"
+    ) == ("skip", None, [12])
+
+
+def test_skip_still_deletes_duplicates_for_an_older_success():
+    # The reviewer's duplicates-older-success repro: the same leftovers,
+    # and this successful run 100 is older than run 101, so it writes
+    # nothing — but it still deletes the older duplicate.
+    existing = _triples([_bot_comment(11, run=101), _bot_comment(12, run=99)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("skip", None, [12])
+
+
+def test_skip_keeps_same_head_evidence_over_a_newer_notice():
+    # Skip-time winner prefers same-head evidence: the notice never
+    # replaces it, so the evidence stays and the notice goes.
+    existing = _triples(
+        [_bot_comment(11, run=101), _bot_comment(12, run=105, outcome="notice")]
+    )
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 102, 1, "notice"
+    ) == ("skip", None, [12])
+
+
+def test_comment_step_skip_still_deletes_the_older_duplicate(
+    tmp_path, monkeypatch
+):
+    # End to end for both reviewer repros: exit 0 with exactly one DELETE
+    # of the older duplicate and no other write.
+    for run_id, action_args in (
+        ("102", {"build_result": "failure", "push_result": "skipped"}),
+        ("100", {"build_result": "success", "push_result": "success",
+                 "files": {"rendered/comment.md": _evidence_comment() + "body\n"},
+                 "evidence_sha": "c" * 40}),
+    ):
+        listing = [_bot_comment(11, run=101), _bot_comment(12, run=99)]
+        case = tmp_path / f"case-{run_id}"
+        case.mkdir()
+        proc, calls = _run_comment_step(
+            case, monkeypatch, listing=listing, run_id=run_id, **action_args
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert len(calls) == 1, calls
+        assert calls[0]["method"] == "DELETE"
+        url = next(a for a in calls[0]["argv"] if "repos/" in a)
+        assert url.endswith("/12")
+
+
 def test_final_size_check_pins_the_budget_fencepost():
     # The posted body itself is still guarded at exactly the budget: a
     # body of exactly MAX_COMMENT_BYTES passes, one byte more refuses.
