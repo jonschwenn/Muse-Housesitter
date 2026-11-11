@@ -192,7 +192,14 @@ def test_refusal_reasons_are_a_fixed_enum():
         "bad_schema",
         "stale_head",
         "render_error",
+        "publish_failed",
     }
+
+
+def test_publish_failed_notice_is_fixed_text():
+    notice = evidence_checks.refusal_notice("publish_failed")
+    assert notice.startswith("<!-- housesitter-evidence -->\n")
+    assert "`publish_failed`" in notice
 
 
 def test_refusal_notice_is_fixed_text_with_reason_code():

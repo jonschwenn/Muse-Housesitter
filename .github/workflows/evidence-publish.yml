@@ -303,17 +303,21 @@ jobs:
   comment:
     # The only job that can comment. Pins the placeholder to the push SHA,
     # re-checks the marker and size, and edits only the bot's own comment.
-    # On refusal (build failed after writing refusal.json) it posts the
-    # fixed notice instead: every refusal reaches the PR, never silence.
+    # It posts on every outcome — the rendered comment, the fixed refusal
+    # notice, or the fixed publish_failed notice — never silence. The
+    # decision of what to post lives in main's Python (decide-comment, see
+    # scripts/publish_evidence.py); the shell only carries out its word.
     needs: [resolve, build, push]
-    # Build failed means render refused (push is skipped then); build ok
-    # plus push ok means a normal publish. Anything else (e.g. push failed
-    # on its own) stays red without posting.
+    # Build failed means render refused (or crashed before uploading, so the
+    # download below finds nothing); push failed means the images may not
+    # be on the branch. Both still post their fixed notice. A stale head is
+    # the only silent stop, checked in-step below.
     if: >-
       always() &&
       needs.resolve.outputs.found == 'true' &&
-      (needs.build.result == 'failure' ||
-        (needs.build.result == 'success' && needs.push.result == 'success'))
+      (needs.build.result == 'success' || needs.build.result == 'failure') &&
+      (needs.push.result == 'success' || needs.push.result == 'failure' ||
+        needs.push.result == 'skipped')
     name: comment
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -330,6 +334,9 @@ jobs:
         with:
           name: validated-evidence
           path: rendered
+        # A build that died before uploading leaves nothing to download;
+        # stay alive so the publish_failed notice below can still post.
+        continue-on-error: true
       - name: Post or update the evidence comment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -337,6 +344,8 @@ jobs:
           PR: ${{ needs.resolve.outputs.pr }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           EVIDENCE_SHA: ${{ needs.push.outputs.evidence_sha }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUSH_RESULT: ${{ needs.push.result }}
         run: |
           set -euo pipefail
           case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
@@ -348,19 +357,42 @@ jobs:
             echo "head moved ($HEAD_SHA -> $current); stopping without writing"
             exit 0
           fi
-          if [ -f rendered/refusal.json ]; then
-            # Refused: the notice is main's fixed text plus the validated
-            # reason code (read from the file in Python, never from the
-            # shell), so no PR content can reach the comment through it.
-            python3 scripts/publish_evidence.py refusal \
-              --reason-file rendered/refusal.json > rendered/comment.md
-          else
-            if [ ! -f rendered/comment.md ]; then
-              echo "no comment and no refusal to post; not posting"; exit 1
-            fi
-            python3 scripts/publish_evidence.py substitute \
-              --comment rendered/comment.md --sha "$EVIDENCE_SHA"
-          fi
+          flags=""
+          if [ -f rendered/refusal.json ]; then flags="$flags --has-refusal"; fi
+          if [ -f rendered/comment.md ]; then flags="$flags --has-comment"; fi
+          # $flags holds only fixed flag words built above; the printed
+          # action is one fixed word from main's code, never PR content.
+          # shellcheck disable=SC2086
+          action=$(python3 scripts/publish_evidence.py decide-comment \
+            --build-result "$BUILD_RESULT" --push-result "$PUSH_RESULT" $flags)
+          case "$action" in
+            nothing)
+              echo "nothing to post"
+              exit 0
+              ;;
+            refusal-notice)
+              # Refused: the notice is main's fixed text plus the validated
+              # reason code (read from the file in Python, never from the
+              # shell), so no PR content can reach the comment through it.
+              python3 scripts/publish_evidence.py refusal \
+                --reason-file rendered/refusal.json > rendered/comment.md
+              ;;
+            publish-failed)
+              # The push failed, or the rendered artifact is missing or
+              # corrupt: post the fixed notice built only from main's text.
+              printf '{"reason": "publish_failed"}\n' > rendered/refusal.json
+              python3 scripts/publish_evidence.py refusal \
+                --reason-file rendered/refusal.json > rendered/comment.md
+              ;;
+            comment)
+              python3 scripts/publish_evidence.py substitute \
+                --comment rendered/comment.md --sha "$EVIDENCE_SHA"
+              ;;
+            *)
+              echo "unknown comment action: $action"
+              exit 1
+              ;;
+          esac
           marker='<!-- housesitter-evidence -->'
           if [ "$(head -c ${#marker} rendered/comment.md)" != "$marker" ]; then
             echo "comment does not start with the marker; not posting"; exit 1

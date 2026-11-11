@@ -1539,3 +1539,47 @@ def test_refusal_render_error_for_an_unexpected_manifest_type(tmp_path):
     rc, out = _render(tmp_path, artifact)
     assert rc != 0
     assert _refusal_reason(tmp_path, out) == "render_error"
+
+
+# Review round 1, finding 4: the comment job never ends silently. ------------
+#
+# A failed push skipped the comment job, and a build that died before
+# uploading left its download failing: both ended with no notice. The
+# decision of what to post lives here in Python (unit-tested); the workflow
+# only carries it out, falling back to a fixed publish_failed notice built
+# from main's text whenever the rendered artifact is missing or the push
+# failed. A stale head still writes nothing.
+
+
+@pytest.mark.parametrize(
+    "build,push,refusal,comment,action",
+    [
+        ("success", "success", False, True, "comment"),
+        ("failure", "skipped", True, False, "refusal-notice"),
+        ("success", "failure", False, True, "publish-failed"),
+        ("success", "failure", False, False, "publish-failed"),
+        ("success", "success", False, False, "publish-failed"),
+        ("failure", "skipped", False, False, "publish-failed"),
+        ("failure", "skipped", False, True, "publish-failed"),
+        ("cancelled", "skipped", False, False, "nothing"),
+        ("success", "cancelled", False, True, "nothing"),
+    ],
+)
+def test_decide_comment_action(build, push, refusal, comment, action):
+    assert (
+        publish_evidence.decide_comment_action(build, push, refusal, comment)
+        == action
+    )
+
+
+def test_decide_comment_subcommand_prints_only_the_action(capsys):
+    rc = publish_evidence.main(
+        [
+            "decide-comment",
+            "--build-result", "success",
+            "--push-result", "success",
+            "--has-comment",
+        ]
+    )
+    assert rc == 0
+    assert capsys.readouterr().out == "comment\n"

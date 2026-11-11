@@ -73,6 +73,7 @@ REFUSAL_REASONS = (
     "bad_schema",
     "stale_head",
     "render_error",
+    "publish_failed",
 )
 REFUSAL_SENTENCES = {
     "missing": "the CI artifact was missing or unreadable, so there is nothing to show.",
@@ -86,6 +87,10 @@ REFUSAL_SENTENCES = {
     "render_error": (
         "the evidence data broke the publisher while rendering, "
         "so the whole artifact was refused."
+    ),
+    "publish_failed": (
+        "the publisher could not finish publishing, "
+        "so there is no evidence to show."
     ),
 }
 REFUSAL_MARKER = "<!-- housesitter-evidence -->"

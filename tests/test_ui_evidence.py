@@ -1307,3 +1307,24 @@ def test_crop_to_fit_never_crops_eink(tmp_path):
     assert ui_evidence.crop_to_fit(out_dir, manifest, cap=10) is False
     assert "crop_px" not in capture
     assert (out_dir / name).read_bytes() == shot
+
+
+def test_comment_job_covers_failed_builds_and_pushes():
+    # A failed push or a build that died before uploading must still post
+    # the fixed notice (finding 4): the job runs on all three outcomes and
+    # asks main's Python what to post, falling back to publish_failed.
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    job = workflow[workflow.index("\n  comment:\n"):]
+    assert "needs.build.result == 'failure'" in job
+    assert "needs.push.result == 'failure'" in job
+    assert "needs.push.result == 'success'" in job
+    assert "decide-comment" in job
+    assert "publish_failed" in job
+
+
+def test_comment_job_tolerates_a_missing_rendered_artifact():
+    # The download cannot fail the job before it can post: it is tolerant
+    # and the notice fallback below covers a missing comment and refusal.
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    job = workflow[workflow.index("\n  comment:\n"):]
+    assert "continue-on-error: true" in job

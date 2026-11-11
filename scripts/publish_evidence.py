@@ -649,6 +649,55 @@ def cmd_refusal(args: argparse.Namespace) -> int:
     return 0
 
 
+# Comment-job decision (review round 1, finding 4) -------------------------------
+#
+# The comment job must post even when the build or the push failed: a failed
+# push used to skip it, and a build that died before uploading left its
+# download failing. This decision lives here in main's Python so it is
+# unit-tested; the workflow only carries out the printed word. Only the
+# fixed words below ever print: job results are GitHub-provided, never PR
+# content. A stale head is not a failure: the workflow checks freshness
+# separately and writes nothing then.
+
+COMMENT_ACTIONS = ("comment", "refusal-notice", "publish-failed", "nothing")
+
+
+def decide_comment_action(
+    build_result: str, push_result: str, has_refusal: bool, has_comment: bool
+) -> str:
+    """What the comment job should post.
+
+    ``build_result``/``push_result`` are GitHub job results (success,
+    failure, cancelled, skipped); ``has_refusal``/``has_comment`` say
+    whether the (tolerant) download produced those files. Returns one of
+    COMMENT_ACTIONS: post the rendered comment, post the render refusal,
+    post the fixed publish_failed notice, or post nothing.
+    """
+    if build_result not in ("success", "failure"):
+        return "nothing"
+    if push_result not in ("success", "failure", "skipped"):
+        return "nothing"
+    if (
+        build_result == "success"
+        and push_result == "success"
+        and has_comment
+        and not has_refusal
+    ):
+        return "comment"
+    if build_result == "failure" and has_refusal:
+        return "refusal-notice"
+    return "publish-failed"
+
+
+def cmd_decide_comment(args: argparse.Namespace) -> int:
+    print(
+        decide_comment_action(
+            args.build_result, args.push_result, args.has_refusal, args.has_comment
+        )
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -678,6 +727,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     refusal.add_argument("--reason-file", required=True)
     refusal.set_defaults(func=cmd_refusal)
+    decide = sub.add_parser(
+        "decide-comment", help="print what the comment job should post"
+    )
+    decide.add_argument("--build-result", required=True)
+    decide.add_argument("--push-result", required=True)
+    decide.add_argument("--has-refusal", action="store_true")
+    decide.add_argument("--has-comment", action="store_true")
+    decide.set_defaults(func=cmd_decide_comment)
     args = parser.parse_args(argv)
     try:
         return args.func(args)
