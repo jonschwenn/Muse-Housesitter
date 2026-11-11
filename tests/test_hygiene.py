@@ -235,7 +235,7 @@ def test_suppression_marker_skips_only_its_line(tmp_path):
         "a " + ".".join(REAL_IP) + "  <!-- " + SUPPRESS + " -->\n"
         "b " + ".".join(REAL_IP) + "\n"
     )
-    assert scan(flagged) == [f"IPv4 {'.'.join(REAL_IP)}"]
+    assert scan(flagged) == ["IPv4 address at line 2"]
 
 
 def test_scanner_flags_real_ssids():
@@ -317,7 +317,8 @@ def test_trusted_scan_flags_data_despite_pytest_config_bypass(tmp_path):
     )
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 1
-    assert f"IPv4 {planted}" in proc.stdout
+    assert "IPv4 address at line 1" in proc.stdout
+    assert planted not in proc.stdout
 
 
 @NEEDS_GIT
@@ -333,7 +334,8 @@ def test_trusted_scan_flags_data_despite_helpers_patch_bypass(tmp_path):
     )
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 1
-    assert f"IPv4 {planted}" in proc.stdout
+    assert "IPv4 address at line 1" in proc.stdout
+    assert planted not in proc.stdout
 
 
 @NEEDS_GIT
@@ -351,7 +353,8 @@ def test_trusted_scan_flags_data_despite_package_init_patch_bypass(tmp_path):
     )
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 1
-    assert f"IPv4 {planted}" in proc.stdout
+    assert "IPv4 address at line 1" in proc.stdout
+    assert planted not in proc.stdout
 
 
 @NEEDS_GIT
@@ -591,7 +594,8 @@ def test_trusted_scan_is_fast_on_long_word_runs(tmp_path):
     repo, sha = _git_repo(tmp_path, {"notes.txt": "g" * 100_000 + "\n" + planted + "\n"})
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert f"IPv4 {planted}" in proc.stdout
+    assert "IPv4 address at line 2" in proc.stdout
+    assert planted not in proc.stdout
 
 
 def test_credential_scan_is_fast_on_long_word_runs():
@@ -627,9 +631,12 @@ def _old_reference_problems(text, unquoted=True):
         r"""(?im)^[ \t]*(?:export[ \t]+)?["']?""" + key_words + r"""["']?[ \t]*[:=][ \t]*"""
         r"""([^\s"'#,{}\[\]][^\s#,]{7,})"""
     )
+    def at(match):
+        return text.count("\n", 0, match.start()) + 1
+
     found = []
     for _match in old_url.finditer(text):
-        found.append("likely secret (credentials in a URL)")
+        found.append(("likely secret (credentials in a URL)", at(_match)))
     for match in old_credential.finditer(text):
         if PLANTED in match.group(0):
             continue
@@ -637,7 +644,7 @@ def _old_reference_problems(text, unquoted=True):
         if value is not None and hygiene_scan.REFERENCE_VALUE.match(value.strip()):
             continue
         # The module reports quoted and unquoted assignments under one label.
-        found.append("likely secret (credential assignment)")
+        found.append(("likely secret (credential assignment)", at(match)))
     if unquoted:
         for match in old_unquoted.finditer(text):
             if PLANTED in match.group(0):
@@ -645,17 +652,25 @@ def _old_reference_problems(text, unquoted=True):
             value = match.group(1)
             if hygiene_scan.REFERENCE_VALUE.match(value.strip()):
                 continue
-            found.append("likely secret (credential assignment)")
+            found.append(("likely secret (credential assignment)", at(match)))
     return sorted(found)
 
 
 def _new_label_problems(text, unquoted=True):
-    """The fixed matchers' problems for the same labels, as a multiset."""
-    return sorted(
-        problem
-        for problem in hygiene_scan.secret_problems(text, unquoted=unquoted)
-        if problem.endswith("(credentials in a URL)") or problem.endswith("(credential assignment)")
-    )
+    """The fixed matchers' (label, line) pairs for the same labels."""
+    import re as _re
+
+    parsed = []
+    for problem in hygiene_scan.secret_problems(text, unquoted=unquoted):
+        match = _re.fullmatch(r"(likely secret \(.*\)) at line (\d+)", problem)
+        if match is None:
+            continue
+        label, lineno = match.groups()
+        if label.endswith("(credentials in a URL)") or label.endswith(
+            "(credential assignment)"
+        ):
+            parsed.append((label, int(lineno)))
+    return sorted(parsed)
 
 
 def test_credential_matchers_agree_with_reference():
@@ -1295,6 +1310,82 @@ def test_scan_deadline_checked_before_reporting_clean(tmp_path, monkeypatch):
     assert "finishing the scan" in calls
 
 
+# Review round 2 (PR #56), finding 5 (SHOULD-FIX): problem messages
+# printed a fixture's whole offending value (a 500,000-character SSID
+# produced ~500 KB of stdout), and printed paths raw. Messages now name
+# the rule and ``path:line`` and never print the value (at most a short,
+# redacted shape); paths are escaped and cut to 200 characters; total
+# stdout is capped.
+def test_problem_messages_hide_values():
+    """Finding 5 (round 2): every problem points, never quotes."""
+    import re as _re
+
+    mac = ":".join(REAL_MAC)
+    ip4 = ".".join(REAL_IP)
+    ip6 = "fe80" + ":" + ":1"
+    secret = PW + '="' + "hunter2" + "hunter2" + '"'
+    jwt = "eyJ" + "A" * 8 + ".eyJ" + "B" * 8
+    cookie = "session" + "=12345678"
+    text = "\n".join([mac, ip4, ip6, secret, jwt, cookie]) + "\n"
+    problems = hygiene_scan.scan_bytes("notes.txt", text.encode())
+    # MAC, IPv4, IPv6, one quoted assignment, one JWT, one cookie:
+    # `session` is not a credential keyword, so the unquoted matcher stays out.
+    assert len(problems) == 6, problems
+    for value in (mac, ip4, ip6, "hunter2" + "hunter2", jwt, cookie):
+        assert all(value not in problem for problem in problems), problems
+    for problem in problems:
+        assert _re.fullmatch(r".* at line \d+", problem), problem
+    by_line = {}
+    for problem in problems:
+        by_line.setdefault(problem.rsplit(" ", 1)[1], []).append(problem)
+    assert sorted(by_line, key=int) == ["1", "2", "3", "4", "5", "6"]
+
+
+def test_ssid_problem_hides_value():
+    """Finding 5 (round 2): the SSID message carries a shape, not the name."""
+    value = "leak" + "-bad"
+    data = ('{"ssid": "' + value + '"}').encode()
+    problems = hygiene_scan.scan_bytes("tests/fixtures/demo/x.json", data)
+    assert problems == [
+        f"SSID value ({len(value)} chars) at line 1 does not end in -example"
+    ]
+    assert value not in problems[0]
+
+
+def test_display_truncates_and_escapes_paths():
+    """Finding 5 (round 2): printed paths are bounded and terminal-safe."""
+    assert len(hygiene_scan._display("a" * 300)) == 200
+    assert hygiene_scan._display("a\udcff") == "a?"
+    assert "\x1b" not in hygiene_scan._display("a\x1bb")
+    assert "\\x1b" in hygiene_scan._display("a\x1bb")
+    assert "\\n" in hygiene_scan._display("a\nb")
+    assert hygiene_scan._display("a\tb") == "a\tb"
+    assert "caf\u00e9" in hygiene_scan._display("caf\u00e9")
+
+
+def test_print_capped_respects_budget(capsys):
+    """Finding 5 (round 2): total stdout stops at the budget with a marker."""
+    hygiene_scan._print_capped(["x" * 60_000, "y" * 60_000])
+    out = capsys.readouterr().out
+    assert len(out) < 100_000
+    assert "truncated" in out
+    assert out.count("\n") == 2
+
+
+@NEEDS_GIT
+def test_trusted_scan_huge_ssid_stays_small(tmp_path):
+    """Finding 5 (round 2): a 500 KB SSID becomes one short line."""
+    value = "Z" * 500000
+    repo, sha = _git_repo(
+        tmp_path, {"tests/fixtures/huge.json": '{"ssid": "' + value + '"}'}
+    )
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert value not in proc.stdout
+    assert f"SSID value ({len(value)} chars)" in proc.stdout
+    assert len(proc.stdout) < 100_000
+
+
 @NEEDS_GIT
 def test_fetch_and_scan_end_to_end_like_the_workflow(tmp_path):
     """The workflow's exact command against a local origin with a planted IP."""
@@ -1315,4 +1406,5 @@ def test_fetch_and_scan_end_to_end_like_the_workflow(tmp_path):
         timeout=120,
     )
     assert proc.returncode == 1
-    assert f"IPv4 {planted}" in proc.stdout
+    assert "IPv4 address at line 1" in proc.stdout
+    assert planted not in proc.stdout

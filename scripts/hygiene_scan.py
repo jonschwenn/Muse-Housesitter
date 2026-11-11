@@ -113,14 +113,15 @@ KEY_WORDS = (
 #   value is the one ``[^;\s\"']`` run after it, so the lookahead is one
 #   search inside one run and per-``=`` work is disjoint.
 #
-# Each yields ``(group0, value)`` exactly as the naive finditer would
-# (same spans, same values; the unquoted group0 starts at the key rather
-# than at the line's leading spaces, which can hold no PLANTED marker),
-# so PLANTED and reference-value handling in ``secret_problems`` is
-# unchanged. The token and cookie matchers expose span lists
-# (``_jwt_token_spans``, ``_session_cookie_spans``) that a differential
-# fuzz test in tests/test_hygiene.py pins to the naive forms span for
-# span.
+# Each yields ``(group0, value, start)`` exactly as the naive finditer would
+# (same spans, same values, same starts; the unquoted group0 starts at the
+# key rather than at the line's leading spaces, which can hold no PLANTED
+# marker), so PLANTED and reference-value handling in ``secret_problems``
+# is unchanged. ``secret_problems`` reports the line of ``start`` instead
+# of the value, so secrets never reach the log. The token and cookie
+# matchers expose span lists (``_jwt_token_spans``,
+# ``_session_cookie_spans``) that a differential fuzz test in
+# tests/test_hygiene.py pins to the naive forms span for span.
 _WORD_CHAR_RE = re.compile(r"\w")
 _CRED_REST_RE = re.compile(r"""["']?\s*[:=]\s*(?:"([^"\n]{8,})"|'([^'\n]{8,})')""")
 _UNQUOTED_REST_RE = re.compile(r"""["']?[ \t]*[:=][ \t]*([^\s"'#,{}\[\]][^\s#,]{7,})""")
@@ -191,8 +192,8 @@ def _key_match_start(text: str, run_start: int, end: int, run_str: str):
     return best
 
 
-def _credential_assignment_spans(text: str) -> list[tuple[str, str | None]]:
-    """``(group0, value)`` for key-then-quoted-value assignments."""
+def _credential_assignment_spans(text: str) -> list[tuple[str, str | None, int]]:
+    """``(group0, value, start)`` for key-then-quoted-value assignments."""
     out = []
     consumed = 0
     for run in _RUN_RE.finditer(text):
@@ -210,15 +211,19 @@ def _credential_assignment_spans(text: str) -> list[tuple[str, str | None]]:
         # there (a keyword cannot start with a quote), so extend over it.
         start = best[0]
         qstart = start - 1
-        prefix = text[qstart] if qstart >= 0 and text[qstart] in "\"'" else ""
-        out.append((prefix + text[start : rest.end()], value))
+        if qstart >= 0 and text[qstart] in "\"'":
+            group_start, prefix = qstart, text[qstart]
+        else:
+            group_start, prefix = start, ""
+        out.append((prefix + text[start : rest.end()], value, group_start))
         consumed = rest.end()
     return out
 
 
-def _unquoted_assignment_spans(text: str) -> list[tuple[str, str | None]]:
-    """``(group0, value)`` for key-then-bare-value assignments per line."""
+def _unquoted_assignment_spans(text: str) -> list[tuple[str, str | None, int]]:
+    """``(group0, value, start)`` for key-then-bare-value assignments per line."""
     out = []
+    offset = 0
     for line in text.split("\n"):
         for with_export in (True, False):
             pos = 0
@@ -247,13 +252,14 @@ def _unquoted_assignment_spans(text: str) -> list[tuple[str, str | None]]:
             rest = _UNQUOTED_REST_RE.match(line, end)
             if rest is None:
                 continue
-            out.append((line[: rest.end()], rest.group(1)))
+            out.append((line[: rest.end()], rest.group(1), offset))
             break
+        offset += len(line) + 1
     return out
 
 
-def _url_credential_spans(text: str) -> list[tuple[str, str | None]]:
-    """``(group0, None)`` for user:password@ URLs (no capture groups)."""
+def _url_credential_spans(text: str) -> list[tuple[str, str | None, int]]:
+    """``(group0, None, start)`` for user:password@ URLs (no capture groups)."""
     out = []
     consumed = 0
     at = text.find("://")
@@ -268,7 +274,7 @@ def _url_credential_spans(text: str) -> list[tuple[str, str | None]]:
             if start < at:
                 right = _URL_RIGHT_RE.match(text, at + 3)
                 if right is not None:
-                    out.append((text[start : right.end()], None))
+                    out.append((text[start : right.end()], None, start))
                     consumed = right.end()
         at = text.find("://", at + 1)
     return out
@@ -386,14 +392,16 @@ def _session_cookie_spans(text: str) -> list[tuple[int, int]]:
     return out
 
 
-def _jwt_token_matches(text: str) -> list[tuple[str, str | None]]:
-    """``(group0, None)`` for JSON web tokens (no capture groups)."""
-    return [(text[start:end], None) for start, end in _jwt_token_spans(text)]
+def _jwt_token_matches(text: str) -> list[tuple[str, str | None, int]]:
+    """``(group0, None, start)`` for JSON web tokens (no capture groups)."""
+    return [(text[start:end], None, start) for start, end in _jwt_token_spans(text)]
 
 
-def _session_cookie_matches(text: str) -> list[tuple[str, str | None]]:
-    """``(group0, None)`` for session cookies (no capture groups)."""
-    return [(text[start:end], None) for start, end in _session_cookie_spans(text)]
+def _session_cookie_matches(text: str) -> list[tuple[str, str | None, int]]:
+    """``(group0, None, start)`` for session cookies (no capture groups)."""
+    return [
+        (text[start:end], None, start) for start, end in _session_cookie_spans(text)
+    ]
 
 
 SECRET_PATTERNS = [
@@ -442,12 +450,34 @@ def decode_bytes(data: bytes) -> str | None:
     return data.decode("utf-8", errors="replace")
 
 
+def _line_of(text: str, pos: int) -> int:
+    """1-based line number of ``pos``: problem messages point, never quote."""
+    return text.count("\n", 0, pos) + 1
+
+
+def _report_line(text: str, pos: int, line_map: list[int] | None) -> int:
+    """File line for a match in suppression-filtered ``text``.
+
+    Detection runs on the filtered text, but the reported line must point
+    at the file: ``line_map`` takes each filtered line to its file line.
+    Without a map the text is the file.
+    """
+    line = _line_of(text, pos)
+    if line_map is not None:
+        line = line_map[line - 1]
+    return line
+
+
 def is_fixture_rel(rel_posix: str) -> bool:
     """Whether a repo-relative POSIX path gets the fixture-only checks."""
     return rel_posix.startswith("tests/fixtures/") and PurePosixPath(rel_posix).suffix == ".json"
 
 
-def mac_problems(text: str, bare: bool = False) -> list[str]:
+def mac_problems(
+    text: str, bare: bool = False, line_map: list[int] | None = None
+) -> list[str]:
+    # The message names the rule and the line, never the address: values
+    # stay out of logs (hard rule 6).
     found = []
     for pattern in MAC_RES + ([BARE_MAC_RE] if bare else []):
         for match in pattern.finditer(text):
@@ -455,11 +485,12 @@ def mac_problems(text: str, bare: bool = False) -> list[str]:
             if pattern is BARE_MAC_RE and digits.isdigit():
                 continue  # a 12-digit number, e.g. a byte counter
             if not digits.startswith(ALLOWED_MAC_PREFIXES):
-                found.append(f"MAC {match.group(0)}")
+                found.append(f"MAC address at line {_report_line(text, match.start(), line_map)}")
     return found
 
 
-def ip_problems(text: str) -> list[str]:
+def ip_problems(text: str, line_map: list[int] | None = None) -> list[str]:
+    # The message names the rule and the line, never the address.
     found = []
     for match in IPV4_RE.finditer(text):
         parts = [int(p) for p in match.group(0).split(".")]
@@ -467,7 +498,7 @@ def ip_problems(text: str) -> list[str]:
             continue  # e.g. a version like 6.6.77.15402
         addr = ipaddress.ip_address(".".join(map(str, parts)))  # tolerates leading zeros
         if not any(addr in net for net in ALLOWED_NETS):
-            found.append(f"IPv4 {match.group(0)}")
+            found.append(f"IPv4 address at line {_report_line(text, match.start(), line_map)}")
     for match in IPV6_RE.finditer(text):
         candidate = match.group(0)
         if sum(1 for group in candidate.split(":") if group) < 2:
@@ -477,43 +508,54 @@ def ip_problems(text: str) -> list[str]:
         except ValueError:
             continue
         if not any(addr in net for net in ALLOWED_NETS):
-            found.append(f"IPv6 {candidate}")
+            found.append(f"IPv6 address at line {_report_line(text, match.start(), line_map)}")
     return found
 
 
 def _regex_spans(pattern, text: str):
-    """``(group0, value)`` for one compiled pattern, as finditer yields."""
+    """``(group0, value, start)`` for one compiled pattern, as finditer yields."""
     for match in pattern.finditer(text):
         groups = match.groups()
         value = next((g for g in groups if g), None) if groups else None
-        yield match.group(0), value
+        yield match.group(0), value, match.start()
 
 
-def secret_problems(text: str, unquoted: bool = True) -> list[str]:
+def secret_problems(
+    text: str, unquoted: bool = True, line_map: list[int] | None = None
+) -> list[str]:
+    # The message names the rule and the line, never the value: values
+    # stay out of logs (hard rule 6).
     found = []
     patterns = SECRET_PATTERNS + (
         [("credential assignment", UNQUOTED_ASSIGNMENT)] if unquoted else []
     )
     for label, pattern in patterns:
         # A callable entry is a linear matcher (see above) yielding the
-        # same (group0, value) pairs its naive regex would.
+        # same (group0, value, start) triples its naive regex would.
         spans = pattern(text) if callable(pattern) else _regex_spans(pattern, text)
-        for group0, value in spans:
+        for group0, value, start in spans:
             if PLANTED in group0:
                 continue
             if value is not None and REFERENCE_VALUE.match(value.strip()):
                 continue
-            found.append(f"likely secret ({label})")
+            found.append(
+                f"likely secret ({label}) at line {_report_line(text, start, line_map)}"
+            )
     return found
 
 
-def ssid_problems(obj: object) -> list[str]:
+def ssid_problems(obj: object) -> list[tuple[str, str]]:
+    """``(key, value)`` for SSIDs that do not end in ``-example``.
+
+    Callers report the key's line and the value's length, never the value:
+    names are untrusted data and stay out of logs (hard rule 6).
+    """
     found = []
     if isinstance(obj, dict):
         for key, value in obj.items():
             if key.lower() in SSID_KEYS and isinstance(value, str) and value:
                 if not value.endswith("-example"):
-                    found.append(f"SSID {value!r} does not end in -example")
+                    found.append((key, value))
             found.extend(ssid_problems(value))
     elif isinstance(obj, list):
         for item in obj:
@@ -521,23 +563,49 @@ def ssid_problems(obj: object) -> list[str]:
     return found
 
 
+def _ssid_key_line(lines: list[str], key: str) -> int | None:
+    """1-based line holding the JSON ``"key"``, if it is on one line."""
+    quoted = f'"{key}"'
+    for number, line in enumerate(lines, 1):
+        if quoted in line:
+            return number
+    return None
+
+
 def scan_text(rel_posix: str, text: str) -> list[str]:
-    """Scan decoded text of the file at repo-relative ``rel_posix``."""
-    lines = [line for line in text.splitlines() if SUPPRESS not in line]
-    checked = "\n".join(lines)
+    """Scan decoded text of the file at repo-relative ``rel_posix``.
+
+    Problem messages name the rule and the line, never the offending
+    value (at most a short shape like ``SSID value (23 chars)``).
+    """
+    numbered = text.splitlines()
+    kept = [number for number, line in enumerate(numbered, 1) if SUPPRESS not in line]
+    checked = "\n".join(line for line in numbered if SUPPRESS not in line)
     suffix = PurePosixPath(rel_posix).suffix
     problems = (
-        mac_problems(checked, bare=is_fixture_rel(rel_posix))
-        + ip_problems(checked)
-        + secret_problems(checked, unquoted=suffix not in UNQUOTED_EXEMPT_SUFFIXES)
+        mac_problems(checked, bare=is_fixture_rel(rel_posix), line_map=kept)
+        + ip_problems(checked, line_map=kept)
+        + secret_problems(
+            checked, unquoted=suffix not in UNQUOTED_EXEMPT_SUFFIXES, line_map=kept
+        )
     )
     if is_fixture_rel(rel_posix):
         try:
-            problems += ssid_problems(json.loads(text))
+            offenders = ssid_problems(json.loads(text))
         except ValueError:
             problems.append("fixture is not valid JSON")
         except RecursionError:
             problems.append("fixture JSON is too deeply nested to check")
+        else:
+            # Line numbers point at the file's own lines, not the
+            # suppression-filtered text the other checks run on.
+            for key, value in offenders:
+                shape = f"SSID value ({len(value)} chars)"
+                at = _ssid_key_line(numbered, key)
+                if at is None:
+                    problems.append(f"{shape} does not end in -example")
+                else:
+                    problems.append(f"{shape} at line {at} does not end in -example")
     return problems
 
 
@@ -600,14 +668,51 @@ def _git(args: list[str], *, cwd: str) -> bytes:
 
 
 def _display(path: str) -> str:
-    """Make a blob path safe for a single log line.
+    """Make a blob path safe for a bounded log line.
 
     Surrogates from non-UTF-8 names become ``?`` so printing never raises
     ``UnicodeEncodeError``; valid UTF-8 (including non-ASCII) passes
-    through, and newlines cannot inject fake annotations.
+    through; newlines become ``\\n`` so one path cannot inject extra lines;
+    other control characters (including ESC) are escaped so the path cannot
+    drive the terminal; and the result is cut to ``_MAX_DISPLAY_PATH``
+    characters, since file names are PR-controlled data. File names are
+    already public in the PR, so printing a bounded, escaped path is fine.
     """
     safe = path.encode("utf-8", errors="replace").decode("utf-8")
-    return safe.replace("\n", "\\n").replace("\r", "\\r")
+    out = []
+    for char in safe:
+        if char == "\n":
+            out.append("\\n")
+        elif char == "\r":
+            out.append("\\r")
+        elif char == "\t" or char.isprintable():
+            out.append(char)
+        elif ord(char) < 256:
+            out.append(f"\\x{ord(char):02x}")
+        else:
+            out.append(f"\\u{ord(char):04x}")
+    return "".join(out)[:_MAX_DISPLAY_PATH]
+
+
+# Printed paths are cut here (see _display), and total stdout is capped in
+# main(): a hostile tree cannot flood the workflow log, while the problem
+# and suppression counts stay exact.
+_MAX_DISPLAY_PATH = 200
+_MAX_LOG_CHARS = 100_000
+
+
+def _print_capped(lines: list[str]) -> None:
+    """Print ``lines`` up to a total budget, then stop with a marker."""
+    shown = 0
+    for line in lines:
+        if shown + len(line) + 1 > _MAX_LOG_CHARS:
+            print(
+                "hygiene-scan: ... output truncated "
+                f"(over {_MAX_LOG_CHARS} chars; counts above stay exact)"
+            )
+            return
+        print(line)
+        shown += len(line) + 1
 
 
 def fetch_pr_head(*, cwd: str) -> str:
@@ -1055,6 +1160,7 @@ def scan_git_tree(
         for problem in scan_text(path, text):
             problems.append(f"{_display(path)}: {problem}")
         for lineno, _ in suppression_lines(text):
+            # The path is escaped and bounded; the line content never is.
             suppressions.append(f"{_display(path)}:{lineno}")
 
     for (_, size, path), data in zip(files, contents):
@@ -1101,30 +1207,38 @@ def main(argv: list[str] | None = None) -> int:
     except FailClosed as exc:
         print(f"::error::{escape_data(f'hygiene-scan: fail closed: {exc}')}")
         return 2
-    print(f"hygiene-scan: scanned {files_scanned} file(s), {bytes_scanned} byte(s)")
+    lines = [
+        f"hygiene-scan: scanned {files_scanned} file(s), {bytes_scanned} byte(s)"
+    ]
     if submodules:
-        print(
+        lines.append(
             "hygiene-scan: skipped "
             f"{submodules} submodule(s) (directories, not scanned)"
         )
     shown = problems[:MAX_LISTED_PROBLEMS]
     for problem in shown:
-        print(f"::error::{escape_data(f'hygiene-scan: {problem}')}")
+        lines.append(f"::error::{escape_data(f'hygiene-scan: {problem}')}")
     if len(problems) > len(shown):
         more = len(problems) - len(shown)
-        print(f"::error::{escape_data(f'hygiene-scan: ... and {more} more problem(s)')}")
-    print(f"hygiene-scan: {len(suppressions)} line(s) carry {SUPPRESS!r}:")
+        lines.append(
+            f"::error::{escape_data(f'hygiene-scan: ... and {more} more problem(s)')}"
+        )
+    lines.append(f"hygiene-scan: {len(suppressions)} line(s) carry {SUPPRESS!r}:")
     for line in suppressions[:MAX_LISTED_SUPPRESSIONS]:
-        print(f"hygiene-scan: suppression {line}")
+        lines.append(f"hygiene-scan: suppression {line}")
     if len(suppressions) > MAX_LISTED_SUPPRESSIONS:
         more = len(suppressions) - MAX_LISTED_SUPPRESSIONS
-        print(f"hygiene-scan: ... and {more} more suppression(s)")
+        lines.append(f"hygiene-scan: ... and {more} more suppression(s)")
     if not suppressions:
-        print("hygiene-scan: no suppression lines")
+        lines.append("hygiene-scan: no suppression lines")
     if problems:
-        print(f"::error::{escape_data(f'hygiene-scan: {len(problems)} problem(s) found')}")
+        lines.append(
+            f"::error::{escape_data(f'hygiene-scan: {len(problems)} problem(s) found')}"
+        )
+        _print_capped(lines)
         return 1
-    print("hygiene-scan: clean")
+    lines.append("hygiene-scan: clean")
+    _print_capped(lines)
     return 0
 
 
