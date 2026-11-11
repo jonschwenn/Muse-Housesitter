@@ -86,23 +86,27 @@ PR #1 predates the tooling and has no evidence.
   `bad_schema`, `stale_head`, `render_error`, or `publish_failed`.
   These mean missing or unreadable input, a size-limit breach, an invalid
   screenshot, invalid evidence data, a mismatched artifact head, a render
-  failure, or a publishing failure, respectively. `publish_failed` covers
-  a failed image push or a missing or corrupt rendered artifact. Refusals
-  and publish failures post fixed notices. A stale or ambiguous PR lookup
-  still publishes nothing. The head is re-checked immediately before every
-  push attempt. The comment job is serialised per PR with the job-level
-  group `evidence-comment-<PR>` and `cancel-in-progress: false`; there is no
-  workflow-level group. Inside that job, the head check runs before the
-  comment lookup; a moved head stops without writing. Every evidence or
+  failure, or a publishing failure, respectively. `publish_failed` covers a
+  failed image push or any failure to read or validate the rendered comment
+  or refusal file, including an unknown refusal reason. These failures fall
+  back to the fixed notice under the same publishing checks. A stale or
+  ambiguous PR lookup still publishes nothing. The head is re-checked
+  immediately before every push attempt. The comment job is serialised per
+  PR with the job-level group `evidence-comment-<PR>` and
+  `cancel-in-progress: false`; there is no workflow-level group. Inside that
+  job, the head is checked before the comment lookup and again immediately
+  before writing; a moved head stops without writing. Every evidence or
   notice body starts with a hidden marker carrying the head SHA, run id,
   attempt and outcome from trusted event data. Main's `decide-write` reads
-  only the bot's own marker comments: a newer run's comment for the same
-  head is kept (ordered by run id, then attempt), and a notice never replaces
-  evidence for that head. When writing, it keeps one bot marker comment and
-  removes duplicates. GitHub keeps only one pending job per group: a later
-  arrival can replace it. If that later run is stale, it writes nothing;
-  the previous comment stays and names its head SHA. Re-run the publisher
-  to recover the missing update (D34).
+  only the bot's own marker comments: a comment from a newer CI run is kept
+  (ordered by run id, then attempt), whatever head it names. A genuinely
+  newer push gets a newer CI run id, so it can still publish. A notice never
+  replaces same-head evidence. Even when it skips writing, the job removes
+  duplicate bot marker comments, keeping the winner: the newest run, with
+  same-head evidence preferred over notices. GitHub keeps only one pending
+  job per group: a later arrival can replace it. If that later run is stale,
+  it writes nothing; the previous comment stays and names its head SHA.
+  Re-run the publisher to recover the missing update (D34).
 - Each CI `test` job runs pytest with `--junitxml`, writes a results table
   to its job summary page, and uploads `test-results-<matrix python>`.
   The publisher downloads the XML and reads the run attempt's test-job
@@ -126,11 +130,13 @@ PR #1 predates the tooling and has no evidence.
   - Jon's option A (D21): missing or invalid results or unusable job data
     degrade only the Tests line: `results unavailable`, `no test jobs
     found`, or `no valid results file`. To fit the comment size budget,
-    failing names are dropped first (counts and verdicts stay), then a
-    fixed short line is used, and if even that doesn't fit, the line is
-    left out. Test data never blocks the publish or hides
-    the screenshots and diffs reviewers need. Invalid UI artifacts still
-    refuse the evidence and produce the fixed notice.
+    failing names are dropped first (counts and verdicts stay), then a fixed
+    short line is used, and if even that doesn't fit, the line is left out.
+    Both CI and the publisher reserve room for the longest hidden marker
+    when fitting text, Tests and UI sections; the final stamped body must
+    still fit the comment budget. Test data never blocks the publish or
+    hides the screenshots and diffs reviewers need. Invalid UI artifacts
+    still refuse the evidence and produce the fixed notice.
 - Trust model (the fine print that makes the above honest). The `CI`
   workflow runs on `pull_request`, so its file comes from the PR: a PR that
   edits `ci.yml` controls that run's jobs, including what the artifact

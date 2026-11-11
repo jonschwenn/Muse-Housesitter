@@ -263,9 +263,10 @@ handoff's "license not chosen; don't publish."
     PRs get comments too. Artifact refusals and publish failures produce a
     fixed notice with a reason code; stale or ambiguous PR lookups publish
     nothing. The head is re-checked immediately before every push attempt
-    and, inside the serialised per-PR comment job, before comment lookup.
-    A moved head writes nothing. Trusted markers keep newer same-head
-    comments and prevent notices replacing same-head evidence; writes
+    and, inside the serialised per-PR comment job, before comment lookup
+    and again immediately before writing. A moved head writes nothing.
+    Trusted markers keep comments from newer CI runs across heads and
+    prevent notices replacing same-head evidence. Even skipped writes
     remove duplicate bot marker comments. There is no workflow-level group.
     D34 records the ordering rules and remaining pending-job limit.
   - `ci-guard.yml` on `pull_request_target` runs from the base commit and
@@ -349,7 +350,7 @@ handoff's "license not chosen; don't publish."
   stream with no trailing data, decoding to exactly the size declared by IHDR.
   Each scanline's filter byte must be 0–4. The head is re-checked immediately
   before every push attempt and, inside the serialised comment job, before
-  comment lookup.
+  comment lookup and again immediately before writing.
   Permissions are unchanged. See D33–D35.
 
 ### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
@@ -438,7 +439,10 @@ handoff's "license not chosen; don't publish."
     cannot establish whether the test job passed.
 - **Amended (2026-11-11, Jon):** updated the bad-data paragraph above:
   invalid UI evidence now produces a fixed refusal notice (D34). Bad test
-  data still degrades only the Tests line.
+  data still degrades only the Tests line. Both CI and the publisher reserve
+  room for the longest hidden marker when fitting the text, Tests and UI
+  sections. The final stamped body must still fit the comment budget, so
+  adding the marker cannot make accepted evidence too large to publish.
 
 ### D22. Optional deep red-team review on a different model family (2026-11-08, Jon)
 - **Decision:** explicitly consider an optional deep review on a different
@@ -685,7 +689,9 @@ handoff's "license not chosen; don't publish."
   publish failure, using only its own text and one reason code: `missing`,
   `too_large`, `bad_png`, `bad_schema`, `stale_head`, `render_error`, or
   `publish_failed`. `render_error` means rendering failed; `publish_failed`
-  covers a failed image push or a missing or corrupt rendered artifact.
+  covers a failed image push or any failure to read or validate the rendered
+  comment or refusal file, including an unknown refusal reason. The fallback
+  notice follows the same freshness and ordering checks.
   Stale or ambiguous PR lookups and a moved head at the final freshness
   checks still stop without writing.
 - **Why:** PR #43's 40.3 MB of screenshots exceeded the 40 MB cap. The
@@ -696,19 +702,22 @@ handoff's "license not chosen; don't publish."
   one pending run per group, and a late stale run can replace the current
   head's pending run regardless of commit age, losing its evidence. An
   owner-and-branch key can also collide across PRs.
-- **Comment ordering:** only the comment job is serialised, using the
-  per-PR job-level group `evidence-comment-<PR>` with
-  `cancel-in-progress: false`, so comment lookup sees earlier writes. The
-  head check runs first. Every evidence or notice body carries a hidden
-  marker with the head SHA, run id, attempt and outcome from trusted event
-  data. Only the bot's own marker comments count. A newer same-head comment
-  is kept (ordered by run id, then attempt); a notice never replaces
-  same-head evidence. A write keeps one bot marker comment and removes
-  duplicates. This prevents overlapping comment writes without queuing the
-  whole publisher. GitHub still keeps only one pending job per group: a
-  later arrival can replace a pending comment job. If that later run is
-  stale, it writes nothing and the previous comment stays, naming its head
-  SHA. Re-running the publisher recovers the missing update.
+- **Comment ordering:** only the comment job is serialised, using the per-PR
+  job-level group `evidence-comment-<PR>` with `cancel-in-progress: false`,
+  so comment lookup sees earlier writes. The head is checked before comment
+  lookup and again immediately before writing. Every evidence or notice body
+  carries a hidden marker with the head SHA, run id, attempt and outcome
+  from trusted event data. Only the bot's own marker comments count. A
+  comment from a newer CI run is kept (ordered by run id, then attempt),
+  whatever head it names. A genuinely newer push gets a newer CI run id, so
+  it can still publish. A notice never replaces same-head evidence. Even a
+  skipped write removes duplicate bot marker comments, keeping the newest
+  run with same-head evidence preferred over notices. This prevents
+  overlapping comment writes without queuing the whole publisher. GitHub
+  still keeps only one pending job per group: a later arrival can replace a
+  pending comment job. If that later run is stale, it writes nothing and the
+  previous comment stays, naming its head SHA. Re-running the publisher
+  recovers the missing update.
 - **Status:** in effect from PR #57.
 
 ### D35. Crop oversized screenshot sets to fit (2026-11-11, Jon)

@@ -47,23 +47,28 @@ after the PR. Merged branches clean themselves up.
      download the test-results artifacts and read job conclusions from the
      API; no permission was widened.
 
-The publisher re-checks the head immediately before every push attempt.
-Only the comment job is serialised, with the per-PR job-level group
+The publisher re-checks the head immediately before every push attempt. Only
+the comment job is serialised, with the per-PR job-level group
 `evidence-comment-<PR>` and `cancel-in-progress: false`; there is no
-workflow-level group. Inside that job, the head check precedes the comment
-lookup. A moved head writes nothing. Every evidence or notice body has a
-hidden marker with the head SHA, run id, attempt and outcome from trusted
-event data. Only the bot's own marker comments count: a newer run's comment
-for the same head is kept, and a notice never replaces same-head evidence.
-A write keeps one bot marker comment and removes duplicates. GitHub keeps
-only one pending job per group; a later arrival can replace it. If that run
-is stale, the previous comment stays, naming its head SHA. Re-run the
-publisher to recover the missing update (D34).
+workflow-level group. Inside that job, the head is checked before comment
+lookup and again immediately before writing. A moved head writes nothing.
+Every evidence or notice body has a hidden marker with the head SHA, run id,
+attempt and outcome from trusted event data. Only the bot's own marker
+comments count: a comment from a newer CI run is kept (run id, then
+attempt), whatever head it names. A genuinely newer push gets a newer CI run
+id, so it can still publish. A notice never replaces same-head evidence.
+Even a skipped write removes duplicate bot marker comments, keeping the
+newest run with same-head evidence preferred over notices. GitHub keeps only
+one pending job per group; a later arrival can replace it. If that run is
+stale, the previous comment stays, naming its head SHA. Re-run the publisher
+to recover the missing update (D34).
 
-Artifact refusals and publish failures produce a fixed notice with a
-reason code; `publish_failed` covers a failed image push or a missing or
-corrupt rendered artifact. Stale or ambiguous PR lookups still stop without
-writing. These controls add no permissions.
+Artifact refusals and publish failures produce a fixed notice with a reason
+code; `publish_failed` covers a failed image push or any failure to read or
+validate the rendered comment or refusal file, including an unknown refusal
+reason. The fallback notice follows the same freshness and ordering checks.
+Stale or ambiguous PR lookups still stop without writing. These controls add
+no permissions.
 
 Click **Save** in each section.
 
