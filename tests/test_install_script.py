@@ -1,21 +1,16 @@
-"""Hermetic tests for install/install.sh: dry-run only, fake system tools.
+"""Hermetic installer tests with temporary homes and fake system tools.
 
-Every test runs the script with ``--dry-run`` and a PATH whose ``id``,
-``getent``, ``sudo``, and ``systemctl`` are shell shims backed by a tmp
-dir. ``HOUSESITTER_TEST_ROOT`` (the script's documented test-only
-override) redirects the system paths there. Nothing real is changed:
-the ``sudo`` shim only logs calls, and dry-run tests assert it logged
-none.
-
-A real (non-dry-run) install is not tested here: it needs root
-(``install -o root -g root`` fails unprivileged), and the venv plus pip
-build needs network and tens of seconds, which the default hermetic run
-and this file's time budget forbid.
+Dry-run tests check plans without executing sudo. Partial real installs
+execute only the two home setup commands, then refuse venv creation.
+Upgrade stops before the pip build; uninstall executes only allow-listed
+removals under the temporary system root. No real sudo or network is used.
+The venv/pip build and privileged ownership changes remain untested.
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -564,3 +559,98 @@ def test_uninstall_dry_run_leaves_a_foreign_symlink(lab):
     assert f"would run: sudo rm -f {link}" not in proc.stdout
     assert link.is_symlink()
     assert os.readlink(link) == "/usr/bin/something-else"
+
+
+@pytest.fixture
+def executing_lab(lab):
+    """Execute only reviewed home setup and temporary uninstall removals."""
+    shim = lab["home"].parents[1] / "shim" / "bin" / "sudo"
+    home_commands = (
+        'umask 077; mkdir -p "$1/.config/housesitter/secrets" && chmod 700 '
+        '"$1/.config/housesitter" "$1/.config/housesitter/secrets"',
+        'umask 077; f="$1/.config/housesitter/config.json"; '
+        'if [ -e "$f" ] || [ -L "$f" ]; then exit 0; fi; set -C; cat > "$f"',
+    )
+    allowed = "|".join(shlex.quote(command) for command in home_commands)
+    write_shim(
+        shim,
+        'printf "%s\\n" "$*" >> "$FAKE_SUDO_LOG"\n'
+        'if [ "$#" -eq 8 ] && [ "$1" = "-u" ] && [ "$2" = "$FAKE_USER" ] '
+        '&& [ "$3" = "-H" ] && [ "$4" = "sh" ] && [ "$5" = "-c" ] '
+        '&& [ "$7" = "sh" ] && [ "$8" = "$FAKE_HOME" ]; then\n'
+        f'  case "$6" in {allowed}) shift 3; exec "$@" ;; esac\n'
+        'fi\n'
+        'if [ "$#" -eq 3 ] && [ "$1" = "rm" ]; then\n'
+        '  case "$2:$3" in\n'
+        '    "-rf:$HOUSESITTER_TEST_ROOT/opt/housesitter"|'
+        '"-f:$HOUSESITTER_TEST_ROOT/usr/local/bin/housesitter"|'
+        '"-f:$HOUSESITTER_TEST_ROOT/etc/musegadget/commands.d/housesitter.example.json") '
+        'exec /bin/rm "$2" "$3" ;;\n'
+        '  esac\n'
+        'fi\n'
+        'echo "test shim refused privileged build or unexpected command" >&2\n'
+        'exit 97\n',
+    )
+    return lab
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_real_install_sets_private_home_and_preserves_config(executing_lab, existing):
+    lab = executing_lab
+    config_dir = lab["home"] / ".config/housesitter"
+    config = config_dir / "config.json"
+    original = b'{"owner_setting": true}\n'
+    if existing:
+        config_dir.mkdir(parents=True)
+        config.write_bytes(original)
+        config.chmod(0o600)
+    proc = run_script("install", "--run-as", USER)
+    assert proc.returncode == 1, proc.stderr
+    assert "could not create the venv" in proc.stderr
+    assert config.read_bytes() == (original if existing else
+                                   (ROOT / "install/config.example.json").read_bytes())
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    for directory in (config_dir, config_dir / "secrets"):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert not (lab["root"] / "opt/housesitter").exists()
+    calls = sudo_calls(lab).splitlines()
+    assert len(calls) == 4  # trust check, two home commands, refused venv
+    assert all(call.startswith(f"-u {USER} -H sh -c ") for call in calls[1:3])
+    assert calls[-1] == f"python3 -m venv {lab['root']}/opt/housesitter"
+
+
+@pytest.mark.parametrize("command", ["upgrade", "uninstall"])
+def test_real_upgrade_or_uninstall_keeps_owner_files(executing_lab, command):
+    lab = executing_lab
+    files = {}
+    for relative in (".config/housesitter/config.json",
+                     ".config/housesitter/secrets/unifi_password",
+                     ".local/share/housesitter/snapshots/example.json"):
+        path = lab["home"] / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"PLANTED-SECRET-owner-file\n")
+        path.chmod(0o600)
+        files[path] = (path.read_bytes(), path.stat().st_mode)
+    prefix = lab["root"] / "opt/housesitter"
+    prefix.mkdir(parents=True)
+    (prefix / "installed-marker").write_text("installed", encoding="utf-8")
+    link = lab["root"] / "usr/local/bin/housesitter"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(prefix / "bin/housesitter")
+    dropin = lab["root"] / "etc/musegadget/commands.d/housesitter.example.json"
+    dropin.parent.mkdir(parents=True)
+    dropin.write_text("{}", encoding="utf-8")
+    proc = run_script(command)
+    if command == "upgrade":
+        assert proc.returncode == 1, proc.stderr
+        assert "could not upgrade Housesitter" in proc.stderr
+        assert "mktemp -d /tmp/housesitter-src." in sudo_calls(lab)
+        assert prefix.is_dir() and link.is_symlink() and dropin.is_file()
+    else:
+        assert proc.returncode == 0, proc.stderr
+        assert not prefix.exists()
+        assert not link.is_symlink()
+        assert not dropin.exists()
+    for path, (content, mode) in files.items():
+        assert path.read_bytes() == content
+        assert path.stat().st_mode == mode
