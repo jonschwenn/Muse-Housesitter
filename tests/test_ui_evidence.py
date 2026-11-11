@@ -754,6 +754,29 @@ def test_publisher_still_publishes_failed_runs():
     assert '"success"' in workflow
 
 
+def test_publisher_serialises_runs_per_pr_branch():
+    # Two runs for one PR must never overlap: the older run finishing last
+    # would overwrite the newer run's comment and images. The key is the
+    # head owner plus the head branch (fork-safe, from the trusted event),
+    # and runs queue (no cancel-in-progress) so the newest run acts last.
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    assert (
+        "evidence-publish-${{ github.event.workflow_run.head_repository.owner.login }}"
+        in workflow
+    )
+    assert "github.event.workflow_run.head_branch" in workflow
+    assert "cancel-in-progress: true" not in workflow
+
+
+def test_publisher_rechecks_freshness_before_writing():
+    # The head SHA is verified in resolve, then re-checked immediately
+    # before pushing images and again immediately before posting: a moved
+    # head stops the run without writing, and the newer run publishes.
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    assert workflow.count("stopping without writing") == 2
+    assert 'gh api "repos/$REPO/pulls/$PR" --jq .head.sha' in workflow
+
+
 def test_publisher_skips_push_when_no_pngs():
     workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
     assert "no PNGs to push for this head SHA" in workflow

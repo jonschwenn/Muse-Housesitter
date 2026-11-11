@@ -42,6 +42,17 @@ on:
 
 permissions: {}
 
+# One publisher run per PR branch at a time. Two runs for the same PR
+# overlap when a push lands while the previous CI run is still publishing;
+# without this, the older run can finish last and overwrite the newer run's
+# comment and images. The key is the head owner plus the head branch: that
+# pair identifies the PR (forks included, via the owner), and it comes from
+# the trusted workflow_run event payload, never from the artifact.
+# cancel-in-progress is false (the default), so overlapping runs queue
+# instead of cancelling: the newest run acts last and has the final word.
+concurrency:
+  group: evidence-publish-${{ github.event.workflow_run.head_repository.owner.login }}-${{ github.event.workflow_run.head_branch }}
+
 jobs:
   resolve:
     # PR runs only; push runs to main have no PR to comment on.
@@ -100,7 +111,8 @@ jobs:
 
   build:
     # Download the untrusted artifact, validate it with main's code, and
-    # render the final comment (still carrying the push-SHA placeholder).
+    # render the final comment (still carrying the push-SHA placeholder),
+    # or record the refusal reason when the artifact is invalid.
     needs: resolve
     if: needs.resolve.outputs.found == 'true'
     name: build
@@ -206,6 +218,15 @@ jobs:
           case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
           if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "bad head SHA: $HEAD_SHA"; exit 1
+          fi
+          # Freshness re-check, immediately before pushing: the PR may have
+          # moved since resolve. A stale push would pin images (and the
+          # comment below) to a superseded commit, so stop without writing;
+          # the newer run publishes instead.
+          current="$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)"
+          if [ "$current" != "$HEAD_SHA" ]; then
+            echo "head moved ($HEAD_SHA -> $current); stopping without writing"
+            exit 0
           fi
           # No checkout of any code happens here: a fresh git directory that
           # only ever contains the validated files main's renderer selected.
@@ -314,10 +335,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.resolve.outputs.pr }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           EVIDENCE_SHA: ${{ needs.push.outputs.evidence_sha }}
         run: |
           set -euo pipefail
           case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
+          # Freshness re-check, immediately before posting: the PR may have
+          # moved since resolve or the push. Stopping without writing beats
+          # posting for a superseded commit; the newer run publishes.
+          current="$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)"
+          if [ "$current" != "$HEAD_SHA" ]; then
+            echo "head moved ($HEAD_SHA -> $current); stopping without writing"
+            exit 0
+          fi
           if [ -f rendered/refusal.json ]; then
             # Refused: the notice is main's fixed text plus the validated
             # reason code (read from the file in Python, never from the
