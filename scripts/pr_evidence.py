@@ -80,6 +80,11 @@ UI_BROWSER_NAMES = {
 }
 UI_BROWSER_VERSION_RE = re.compile(r"[0-9]+(\.[0-9]+){0,3}")
 UI_BROWSER_VERSION_MAX_LEN = 32
+# Valid ``crop_px`` heights a manifest may record (Decision 5): ui_evidence
+# crops full-page shots down these steps when the push cap would refuse
+# them. Must equal ui_evidence.CROP_STEPS[1:] (pinned by test); this module
+# never imports ui_evidence, so it keeps its own copy.
+UI_CROP_HEIGHTS = (6000, 4000, 3000)
 
 
 class Refused(Exception):
@@ -317,6 +322,12 @@ def select_ui_captures(manifest: dict) -> tuple:
         if diff_error is not None and not isinstance(diff_error, str):
             dropped += 1
             continue
+        crop_px = cap.get("crop_px")
+        if crop_px is not None and (
+            type(crop_px) is not int or crop_px not in UI_CROP_HEIGHTS
+        ):
+            dropped += 1
+            continue
         need = {"added": ("head",), "removed": ("base",), "changed": ("base", "head")}.get(
             status, ()
         )
@@ -459,7 +470,15 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
                     )
                     # A code span, like the table: no markdown or HTML renders.
                     block.append("Diff unavailable: " + code_span(reason) + ".")
-                block += [""]
+            if cap.get("crop_px") is not None:
+                # select_ui_captures above kept only valid heights, so this
+                # int is safe to format: fixed words plus the recorded
+                # height. A cropped shot shows only the top of the page.
+                block.append(
+                    f"Cropped at {cap['crop_px']:,} px to fit the size limit; "
+                    "changes below this line are not shown."
+                )
+            block += [""]
         block += ["</details>", ""]
         details.append((fixture, "\n".join(block)))
 

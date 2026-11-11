@@ -1203,3 +1203,107 @@ def test_added_sentence_names_the_page_not_the_web_dir():
     )
     assert ADDED_SENTENCE in full
     assert "the base has no `web/`" not in full
+
+
+# Crop to fit (Decision 5) ----------------------------------------------------
+#
+# When the captures would exceed the push cap, full-page shots are cropped
+# shorter step by step, largest first, until the total fits. PRs under the
+# cap keep byte-identical shots.
+
+
+def _crop_capture(out_dir, fixture, view, height, width=64, status="changed"):
+    """Write base/head PNGs (deterministic noise: incompressible) and a manifest entry."""
+    import random
+
+    rng = random.Random(1234)
+    pixels = bytes(rng.randrange(256) for _ in range(width * height * 3))
+    shot = ui_evidence.encode_png(width, height, 2, pixels)
+    names = {}
+    for side in ("base", "head"):
+        name = f"{fixture}__{view}__{side}.png"
+        (out_dir / name).write_bytes(shot)
+        names[side] = name
+    return {
+        "fixture": fixture,
+        "view": view,
+        "status": status,
+        "base": names["base"],
+        "head": names["head"],
+        "diff": None,
+        "head_problems": [],
+    }
+
+
+def test_crop_to_fit_keeps_small_sets_byte_identical(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    capture = _crop_capture(out_dir, "small", "index-desktop", 200)
+    before = (out_dir / capture["base"]).read_bytes()
+    manifest = {"version": 1, "captures": [capture]}
+    assert ui_evidence.crop_to_fit(out_dir, manifest) is True
+    assert (out_dir / capture["base"]).read_bytes() == before
+    assert "crop_px" not in capture
+
+
+def test_crop_to_fit_crops_largest_first_until_fit(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    big = _crop_capture(out_dir, "big", "index-desktop", 5000)
+    small = _crop_capture(out_dir, "small", "index-desktop", 5000, width=16)
+    manifest = {"version": 1, "captures": [big, small]}
+    small_total = (out_dir / small["base"]).stat().st_size * 2
+    # A cap that fits only once the big capture steps down once.
+    step = ui_evidence._crop_png((out_dir / big["base"]).read_bytes(), 4000)
+    cap = len(step) * 2 + small_total + 100
+    assert ui_evidence.crop_to_fit(out_dir, manifest, cap=cap) is True
+    # The big capture was cropped (recorded height), the small one untouched.
+    assert big["crop_px"] == 4000
+    assert "crop_px" not in small
+    _, height = ui_evidence.png_size((out_dir / big["base"]).read_bytes())
+    assert height == 4000
+    total = sum(p.stat().st_size for p in out_dir.glob("*.png"))
+    assert total <= cap
+
+
+def test_crop_to_fit_steps_down_to_the_minimum(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    capture = _crop_capture(out_dir, "big", "index-desktop", 5000, width=8)
+    manifest = {"version": 1, "captures": [capture]}
+    data = (out_dir / capture["base"]).read_bytes()
+    smallest = ui_evidence._crop_png(data, ui_evidence.CROP_STEPS[-1])
+    # A cap that fits only at the minimum step.
+    assert ui_evidence.crop_to_fit(out_dir, manifest, cap=len(smallest) * 2 + 100) is True
+    assert capture["crop_px"] == ui_evidence.CROP_STEPS[-1]
+    _, height = ui_evidence.png_size((out_dir / capture["base"]).read_bytes())
+    assert height == ui_evidence.CROP_STEPS[-1]
+
+
+def test_crop_to_fit_fails_when_the_minimum_still_does_not_fit(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    capture = _crop_capture(out_dir, "big", "index-desktop", 8000, width=8)
+    manifest = {"version": 1, "captures": [capture]}
+    assert ui_evidence.crop_to_fit(out_dir, manifest, cap=10) is False
+
+
+def test_crop_to_fit_never_crops_eink(tmp_path):
+    out_dir = tmp_path / "ui"
+    out_dir.mkdir()
+    shot = ui_evidence.encode_png(800, 480, 2, b"\x00" * 800 * 480 * 3)
+    name = "typical__eink__head.png"
+    (out_dir / name).write_bytes(shot)
+    capture = {
+        "fixture": "typical",
+        "view": "eink",
+        "status": "added",
+        "base": None,
+        "head": name,
+        "diff": None,
+        "head_problems": [],
+    }
+    manifest = {"version": 1, "captures": [capture]}
+    assert ui_evidence.crop_to_fit(out_dir, manifest, cap=10) is False
+    assert "crop_px" not in capture
+    assert (out_dir / name).read_bytes() == shot

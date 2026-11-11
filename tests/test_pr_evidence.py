@@ -953,3 +953,45 @@ def test_render_from_results_lists_removed_scenarios():
 def test_render_from_results_marks_author_attested():
     body = pr_evidence.render_text_from_results(_results_doc(), "c" * 40)
     assert "produced by the PR's own CI run" in body
+
+
+def test_cropped_capture_shows_a_warning(tmp_path):
+    manifest = _ui_manifest(
+        _ui_capture(
+            status="changed",
+            base="typical__index-phone__base.png",
+            head="typical__index-phone__head.png",
+            diff="typical__index-phone__diff.png",
+            crop_px=4000,
+        )
+    )
+    full, _, _ = pr_evidence.render_ui_section(manifest, UI_REPO, UI_PR, UI_SHA)
+    assert "Cropped at 4,000 px to fit the size limit" in full
+    assert "changes below this line are not shown" in full
+
+
+def test_invalid_crop_px_drops_the_capture():
+    manifest = _ui_manifest(_ui_capture(crop_px="4000"))
+    kept, dropped = pr_evidence.select_ui_captures(manifest)
+    assert (kept, dropped) == ([], 1)
+    manifest = _ui_manifest(_ui_capture(crop_px=1234))
+    kept, dropped = pr_evidence.select_ui_captures(manifest)
+    assert (kept, dropped) == ([], 1)
+
+
+def test_valid_crop_px_values_are_kept():
+    for height in (6000, 4000, 3000):
+        manifest = _ui_manifest(_ui_capture(crop_px=height))
+        kept, dropped = pr_evidence.select_ui_captures(manifest)
+        assert dropped == 0
+        assert kept[0][0]["crop_px"] == height
+
+
+def test_crop_height_steps_match_ui_evidence():
+    ui_spec = importlib.util.spec_from_file_location(
+        "ui_evidence", ROOT / "scripts" / "ui_evidence.py"
+    )
+    ui_evidence = importlib.util.module_from_spec(ui_spec)
+    ui_spec.loader.exec_module(ui_evidence)
+    assert ui_evidence.CROP_STEPS[0] == ui_evidence.MAX_SHOT_HEIGHT_PX
+    assert list(pr_evidence.UI_CROP_HEIGHTS) == list(ui_evidence.CROP_STEPS[1:])
