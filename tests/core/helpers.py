@@ -67,6 +67,8 @@ def generate_cert(directory):
 class ScriptedServer:
     """A tiny scripted HTTP server over a plain or TLS socket."""
 
+    join_timeout_s = 5.0  # per thread, in close()
+
     def __init__(self, handler, tls_cert=None, tls_key=None):
         self._handler = handler
         self.connections = 0
@@ -77,7 +79,9 @@ class ScriptedServer:
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(16)
-        self._sock.settimeout(0.5)
+        # close() wakes accept() with shutdown(); the short timeout is only
+        # a fallback for platforms where shutdown() does not wake it.
+        self._sock.settimeout(0.05)
         self.port = self._sock.getsockname()[1]
         if tls_cert is not None:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -86,13 +90,35 @@ class ScriptedServer:
         else:
             self._tls = None
         self._stop = threading.Event()
+        self._workers: list[threading.Thread] = []
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
     def close(self):
+        """Stop accepting, then wait for every connection to finish.
+
+        When this returns, ``connections``, ``peer_bytes`` and ``requests``
+        are final: no connection thread is still recording. A connection
+        still sending is waited for (each handshake or recv times out after
+        2 s). Canned sleeps end early once the stop flag is set, and a
+        canned drip sends the rest of its body without the delays. If a
+        thread is still alive after its own 5 s join (``join_timeout_s``, per
+        thread, so N stuck threads take about 5 x N s), this raises rather than
+        let a test read partial records.
+        """
         self._stop.set()
-        self._thread.join(timeout=5)
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)  # wakes accept() on Linux
+        except OSError:
+            pass
+        self._thread.join(timeout=self.join_timeout_s)
+        stuck = self._thread.is_alive()
+        for worker in list(self._workers):
+            worker.join(timeout=self.join_timeout_s)
+            stuck = stuck or worker.is_alive()
         self._sock.close()
+        if stuck:
+            raise AssertionError("ScriptedServer.close(): a server thread is still running")
 
     def __enter__(self):
         return self
@@ -109,6 +135,7 @@ class ScriptedServer:
             except OSError:
                 return
             thread = threading.Thread(target=self._serve_one, args=(raw,), daemon=True)
+            self._workers.append(thread)
             thread.start()
 
     def _serve_one(self, raw):
@@ -116,6 +143,7 @@ class ScriptedServer:
             self.connections += 1
         sock = raw
         try:
+            raw.settimeout(2.0)
             if self._tls is not None:
                 try:
                     sock = self._tls.wrap_socket(raw, server_side=True)
@@ -168,9 +196,7 @@ class ScriptedServer:
                 self.requests.append(request)
             canned = self._handler(request)
             if canned.sleep_s:
-                import time
-
-                time.sleep(canned.sleep_s)
+                self._stop.wait(canned.sleep_s)
             text = f"HTTP/1.1 {canned.status} Reason\r\n".encode("latin-1")
             outgoing = dict(canned.headers)
             outgoing.setdefault("Content-Length", str(len(canned.body)))
@@ -188,14 +214,12 @@ class ScriptedServer:
                 sock.close()
                 return
             if canned.drip_s:
-                import time
-
                 for index in range(0, len(canned.body), 1024):
                     try:
                         sock.sendall(canned.body[index:index + 1024])
                     except OSError:
                         break
-                    time.sleep(canned.drip_s)
+                    self._stop.wait(canned.drip_s)
                 sock.close()
                 return
             text = canned.body
