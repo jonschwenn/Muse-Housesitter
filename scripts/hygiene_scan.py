@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Iterable, Iterator
 from pathlib import PurePosixPath
 
 HEX = "[0-9A-Fa-f]"
@@ -512,6 +513,87 @@ def _check_deadline(start: float, what: str) -> None:
         )
 
 
+# Size of one read() from the ls-tree pipe. Tests shrink it to force
+# splits inside records.
+_LS_TREE_CHUNK = 65536
+
+# A record's metadata (before the TAB): mode, object type, SHA, and the
+# space-padded size ("-" for gitlinks). The type is ``blob`` or ``commit``
+# (``-r`` never lists trees); anything else is a corrupt listing.
+_TREE_RECORD_RE = re.compile(r"([0-7]{6}) (blob|commit) ([0-9a-f]{40}) +([0-9]+|-)")
+
+# Modes git can list here: plain files, executables, symlinks, gitlinks.
+_FILE_MODES = ("100644", "100755")
+
+
+def _parse_tree_record(record: bytes) -> tuple[str, str, str, int | None, str]:
+    """Split one NUL-terminated ls-tree record; fail closed on anything else.
+
+    Returns ``(mode, objtype, sha, size, path)`` with ``size`` None for a
+    gitlink. Records split only on NUL, so a forged ``100644 blob
+    <clean> ...`` inside a filename stays path bytes; the metadata before
+    the first TAB must then match strictly.
+    """
+    meta, sep, raw_path = record.partition(b"\t")
+    if not sep or not raw_path:
+        raise FailClosed("could not parse the tree listing; refusing to scan")
+    try:
+        meta_text = meta.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise FailClosed(
+            "could not parse the tree listing; refusing to scan"
+        ) from exc
+    match = _TREE_RECORD_RE.fullmatch(meta_text)
+    if match is None:
+        raise FailClosed("could not parse the tree listing; refusing to scan")
+    mode, objtype, sha, size = match.groups()
+    if mode == "120000":
+        if objtype != "blob":
+            raise FailClosed("could not parse the tree listing; refusing to scan")
+    elif mode == "160000":
+        if objtype != "commit":
+            raise FailClosed("could not parse the tree listing; refusing to scan")
+    elif mode in _FILE_MODES:
+        if objtype != "blob":
+            raise FailClosed("could not parse the tree listing; refusing to scan")
+    else:
+        raise FailClosed("could not parse the tree listing; refusing to scan")
+    if objtype == "commit":
+        if size != "-":
+            raise FailClosed("could not parse the tree listing; refusing to scan")
+        size_int: int | None = None
+    else:
+        try:
+            size_int = int(size)
+        except ValueError as exc:
+            raise FailClosed(
+                "could not parse the tree listing; refusing to scan"
+            ) from exc
+    # Decoded like the filesystem; only the ASCII prefix and suffix the
+    # checks rely on survive any byte sequence.
+    return mode, objtype, sha, size_int, os.fsdecode(raw_path)
+
+
+def _iter_tree_records(chunks: Iterable[bytes]) -> Iterator[bytes]:
+    """Yield complete NUL-terminated records from raw ls-tree output.
+
+    A record split across two reads is kept whole: only bytes up to a NUL
+    are yielded, and the incomplete tail waits for the next chunk. Any
+    trailing bytes without a terminator are a corrupt listing.
+    """
+    buf = b""
+    for chunk in chunks:
+        buf += chunk
+        while True:
+            cut = buf.find(b"\0")
+            if cut == -1:
+                break
+            yield buf[:cut]
+            buf = buf[cut + 1 :]
+    if buf:
+        raise FailClosed("could not parse the tree listing; refusing to scan")
+
+
 def list_tree_blobs(
     sha: str, *, cwd: str
 ) -> tuple[list[tuple[str, int, str]], list[tuple[str, int, str]], list[str]]:
@@ -549,73 +631,57 @@ def list_tree_blobs(
     submodules: list[str] = []
     total = 0
     entries = 0
-    buf = b""
-    try:
+
+    def read_chunks() -> Iterator[bytes]:
         while True:
             if time.monotonic() - listed > 300:
                 raise FailClosed("git ls-tree did not complete; refusing to scan")
             try:
-                chunk = proc.stdout.read(65536)
+                chunk = proc.stdout.read(_LS_TREE_CHUNK)
             except OSError as exc:
                 raise FailClosed(
                     f"could not read the tree listing ({exc}); refusing to scan"
                 ) from exc
-            if chunk:
-                buf += chunk
-            while True:
-                record, sep, buf = buf.partition(b"\0")
-                if not sep:
-                    break
-                if not record:
-                    continue
-                entries += 1
-                if entries > MAX_TREE_ENTRIES:
-                    raise FailClosed(
-                        f"tree lists more than {MAX_TREE_ENTRIES} entries "
-                        "(limit reached while reading); refusing to scan"
-                    )
-                meta, _, raw_path = record.partition(b"\t")
-                try:
-                    # The size is space-padded, so split on runs.
-                    mode, objtype, objsha, size = meta.decode("ascii").split()
-                except ValueError as exc:
-                    raise FailClosed(
-                        "could not parse the tree listing; refusing to scan"
-                    ) from exc
-                # Decoded like the filesystem; only the ASCII prefix and
-                # suffix matter to the checks, so any byte sequence is safe.
-                path = os.fsdecode(raw_path)
-                if objtype == "commit":
-                    submodules.append(path)  # a gitlink: a directory, not a file
-                    continue
-                if objtype != "blob":
-                    raise FailClosed(
-                        f"unexpected {objtype} entry in the tree listing; refusing to scan"
-                    )
-                try:
-                    size_int = int(size)
-                except ValueError as exc:
-                    raise FailClosed(
-                        "could not parse the tree listing; refusing to scan"
-                    ) from exc
-                if size_int > MAX_FILE_BYTES:
-                    raise FailClosed(
-                        f"blob {_display(path)} is {size_int} bytes "
-                        f"(limit {MAX_FILE_BYTES}); refusing to scan"
-                    )
-                total += size_int
-                if total > MAX_TOTAL_BYTES:
-                    raise FailClosed(
-                        f"tree holds more than {MAX_TOTAL_BYTES} bytes; refusing to scan"
-                    )
-                if mode == "120000":
-                    links.append((objsha, size_int, path))
-                else:
-                    files.append((objsha, size_int, path))
             if not chunk:
-                break
-        if buf:
-            raise FailClosed("could not parse the tree listing; refusing to scan")
+                return
+            yield chunk
+
+    try:
+        for record in _iter_tree_records(read_chunks()):
+            if time.monotonic() - listed > 300:
+                raise FailClosed("git ls-tree did not complete; refusing to scan")
+            if not record:
+                raise FailClosed(
+                    "could not parse the tree listing; refusing to scan"
+                )
+            entries += 1
+            if entries > MAX_TREE_ENTRIES:
+                raise FailClosed(
+                    f"tree lists more than {MAX_TREE_ENTRIES} entries "
+                    "(limit reached while reading); refusing to scan"
+                )
+            mode, objtype, objsha, size_or_none, path = _parse_tree_record(record)
+            # A gitlink is a directory, not a file: skipped, like the
+            # working-tree scan, which never sees inside submodules either.
+            if objtype == "commit":
+                submodules.append(path)
+                continue
+            assert size_or_none is not None  # blobs always carry a size
+            size_int = size_or_none
+            if size_int > MAX_FILE_BYTES:
+                raise FailClosed(
+                    f"blob {_display(path)} is {size_int} bytes "
+                    f"(limit {MAX_FILE_BYTES}); refusing to scan"
+                )
+            total += size_int
+            if total > MAX_TOTAL_BYTES:
+                raise FailClosed(
+                    f"tree holds more than {MAX_TOTAL_BYTES} bytes; refusing to scan"
+                )
+            if mode == "120000":
+                links.append((objsha, size_int, path))
+            else:
+                files.append((objsha, size_int, path))
         try:
             proc.wait(timeout=300)
         except subprocess.TimeoutExpired as exc:

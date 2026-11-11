@@ -819,6 +819,113 @@ def test_tree_entry_cap_enforced_while_streaming(monkeypatch, tmp_path):
         raise AssertionError("expected FailClosed on an over-cap listing")
 
 
+# Review round 2 (PR #56), finding 1 (BLOCKER): when a tree record was
+# split across two 64 KiB reads, the scanner dropped the incomplete tail
+# and parsed the next chunk's filename bytes as record metadata, so a
+# filename holding forged "100644 blob <clean> ..." text aligned to the
+# boundary made the scan read a clean blob instead of the real one. The
+# tail is kept across reads; only complete NUL-terminated records parse,
+# and every record is validated strictly.
+def _sample_listing():
+    """Three records: plain, forged metadata inside a name, and a symlink."""
+    clean = b"0" * 40
+    return (
+        b"100644 blob " + b"a" * 40 + b"       2\tok.txt\0"
+        + b"100644 blob " + b"b" * 40 + b"      29\ttests/fixtures/100644 blob "
+        + clean + b"       2\tordinary.json\0"
+        + b"120000 blob " + b"c" * 40 + b"       9\tlink.txt\0"
+    )
+
+
+def test_tree_records_survive_splits_at_every_offset():
+    """Finding 1 (round 2): a record split at any byte still parses whole."""
+    whole = _sample_listing()
+    expected = list(hygiene_scan._iter_tree_records([whole]))
+    assert len(expected) == 3
+    for cut in range(1, len(whole)):
+        split = list(hygiene_scan._iter_tree_records([whole[:cut], whole[cut:]]))
+        assert split == expected, f"split at byte {cut}"
+    mode, objtype, sha, size, path = hygiene_scan._parse_tree_record(expected[0])
+    assert (mode, objtype, sha, size, path) == ("100644", "blob", "a" * 40, 2, "ok.txt")
+    _, _, _, _, forged_path = hygiene_scan._parse_tree_record(expected[1])
+    assert forged_path == (
+        "tests/fixtures/100644 blob " + "0" * 40 + "       2\tordinary.json"
+    )
+
+
+def test_tree_record_stream_rejects_unterminated_tail():
+    """Finding 1 (round 2): trailing bytes without a NUL fail closed."""
+    with pytest.raises(hygiene_scan.FailClosed):
+        list(hygiene_scan._iter_tree_records([b"100644 blob " + b"a" * 40]))
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        b"",
+        b"100644 blob " + b"a" * 40 + b"       2ok.txt",
+        b"100644 tree " + b"a" * 40 + b"       2\tdir",
+        b"120000 commit " + b"a" * 40 + b"       2\tl",
+        b"160000 blob " + b"a" * 40 + b"       -\tsub",
+        b"10064 blob " + b"a" * 40 + b"       2\tshort",
+        b"100755 blob " + b"xyz" + b"       2\tshort",
+        b"100644 blob " + b"a" * 40 + b"       X\tbadsize",
+        b"100644 blob " + b"a" * 40 + b"       -\tnegsize",
+        b"100644 blob " + b"a" * 40 + b"       2\t",
+        b"100644 blob " + b"\xff" * 40 + b"       2\tnonascii",
+    ],
+)
+def test_tree_record_parser_rejects_malformed(record):
+    """Finding 1 (round 2): anything unexpected fails closed, never guessed."""
+    with pytest.raises(hygiene_scan.FailClosed):
+        hygiene_scan._parse_tree_record(record)
+
+
+@NEEDS_GIT
+def test_trusted_scan_split_records_still_flag_the_leak(tmp_path, monkeypatch):
+    """Finding 1 (round 2): tiny reads split every record; the leak is flagged."""
+    monkeypatch.setattr(hygiene_scan, "_LS_TREE_CHUNK", 7)
+    leak = PW + '="' + "hunter2" + "hunter2" + '"\n'
+    repo, sha = _git_repo(tmp_path, {"notes.txt": leak, "other.txt": "hello\n"})
+    problems, _, _, _, _ = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
+    assert any("credential assignment" in p for p in problems), problems
+
+
+@NEEDS_GIT
+def test_trusted_scan_forged_metadata_at_read_boundary(tmp_path):
+    """Finding 1 (round 2): forged metadata aligned to byte 65536 still flags."""
+    leak = (PW + '="' + "hunter2" + "hunter2" + '"\n').encode()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+
+    def run(*args, **kwargs):
+        return subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, **kwargs
+        )
+
+    run("init", "-q")
+    for n in range(920):
+        (repo / f"a{n:04d}.txt").write_bytes(b"ok")
+    (repo / ("b" * 78)).write_bytes(b"ok")
+    safe = run("hash-object", "--stdin", input=b"ok").stdout.decode().strip()
+    spoof = f"100644 blob {safe}       2\tordinary.json"
+    (repo / "tests" / "fixtures").mkdir(parents=True)
+    (repo / "tests" / "fixtures" / spoof).write_bytes(leak)
+    run("add", "-A")
+    run(
+        "-c", "user.name=test",
+        "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "test",
+    )
+    sha = run("rev-parse", "HEAD").stdout.decode().strip()
+    raw = run("ls-tree", "-r", "-z", "--long", sha).stdout
+    # The forged filename itself must start exactly at the 64 KiB read cut.
+    assert raw[65536:].startswith(spoof.encode()), "repro alignment broke"
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "credential assignment" in proc.stdout
+
+
 @NEEDS_GIT
 def test_fetch_and_scan_end_to_end_like_the_workflow(tmp_path):
     """The workflow's exact command against a local origin with a planted IP."""
