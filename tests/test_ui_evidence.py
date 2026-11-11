@@ -754,18 +754,21 @@ def test_publisher_still_publishes_failed_runs():
     assert '"success"' in workflow
 
 
-def test_publisher_serialises_runs_per_pr_branch():
-    # Two runs for one PR must never overlap: the older run finishing last
-    # would overwrite the newer run's comment and images. The key is the
-    # head owner plus the head branch (fork-safe, from the trusted event),
-    # and runs queue (no cancel-in-progress) so the newest run acts last.
+def test_publisher_has_no_concurrency_group():
+    # Deliberately no workflow-level concurrency group (review round 1,
+    # findings 7-8): GitHub keeps one pending run per group and a newer
+    # arrival displaces it by queue order, not commit freshness, so a late
+    # stale run could displace the current head's pending publisher and
+    # then write nothing, losing the current evidence. The owner-branch
+    # key is ambiguous too (alice/bob-fix and alice-bob/fix collide, and
+    # group names are case-insensitive), so PRs could displace each other.
+    # Instead every write re-checks freshness first (see
+    # test_publisher_rechecks_freshness_before_writing): a stale run never
+    # writes, two runs for the same head write the same content, and a run
+    # for a newer head necessarily starts after that push, so it writes
+    # last. No other concurrency control is added.
     workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
-    assert (
-        "evidence-publish-${{ github.event.workflow_run.head_repository.owner.login }}"
-        in workflow
-    )
-    assert "github.event.workflow_run.head_branch" in workflow
-    assert "cancel-in-progress: true" not in workflow
+    assert "concurrency:" not in workflow
 
 
 def test_publisher_rechecks_freshness_before_writing():

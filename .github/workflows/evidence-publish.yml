@@ -42,16 +42,18 @@ on:
 
 permissions: {}
 
-# One publisher run per PR branch at a time. Two runs for the same PR
-# overlap when a push lands while the previous CI run is still publishing;
-# without this, the older run can finish last and overwrite the newer run's
-# comment and images. The key is the head owner plus the head branch: that
-# pair identifies the PR (forks included, via the owner), and it comes from
-# the trusted workflow_run event payload, never from the artifact.
-# cancel-in-progress is false (the default), so overlapping runs queue
-# instead of cancelling: the newest run acts last and has the final word.
-concurrency:
-  group: evidence-publish-${{ github.event.workflow_run.head_repository.owner.login }}-${{ github.event.workflow_run.head_branch }}
+# Deliberately no workflow-level concurrency group here (review round 1,
+# findings 7-8, Claude's design decision): GitHub keeps one pending run per
+# group and a newer arrival displaces it by queue order, not commit
+# freshness, so a late stale run could displace the current head's pending
+# publisher and then write nothing, losing the current evidence. The
+# owner-plus-branch key is ambiguous too (alice/bob-fix and alice-bob/fix
+# collide, and group names are case-insensitive), so unrelated PRs could
+# displace each other. Instead, every write below re-checks freshness
+# first: a stale run never writes, two runs for the same head write the
+# same content, and a run for a newer head necessarily starts after that
+# push, so it writes last. The pr-evidence push keeps its fetch-and-retry
+# for concurrent pushes to the branch; no other concurrency control exists.
 
 jobs:
   resolve:
