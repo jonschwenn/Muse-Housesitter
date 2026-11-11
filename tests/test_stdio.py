@@ -2697,10 +2697,14 @@ class TestGuardDownProductionBound:
     """W2: a guard-down production refusal is watchdog-bounded and ends
     with a hard exit, so a stalled reader cannot hang it."""
 
-    def test_guard_down_full_stdout_exits_1(self, tmp_path):
+    def test_guard_down_full_stdout_exits_1(self, tmp_path, monkeypatch):
         # The designated production-watchdog test: the ONLY test that
         # runs the real 5 s seal watchdog end to end (every other
         # watchdog-fires test uses the helper's shortened 1 s one).
+        # Clear the test-only overrides so a stray value in the
+        # environment cannot shorten this run.
+        monkeypatch.delenv("HOUSESITTER_STDIO_WATCHDOG_S", raising=False)
+        monkeypatch.delenv("HOUSESITTER_STDIO_SLOW_S", raising=False)
         read_fd, write_fd = os.pipe()
         try:
             _set_pipe_capacity(read_fd, write_fd, 4096)
@@ -2714,6 +2718,8 @@ class TestGuardDownProductionBound:
             elapsed = time.monotonic() - start
             assert proc.returncode == 1
             # The 5 s watchdog fired: bounded, not instant, not a hang.
+            # The lower bound proves the production timing really ran.
+            assert elapsed >= 4
             assert elapsed < 12
         finally:
             if write_fd >= 0:
