@@ -3351,3 +3351,15 @@ def test_odd_upstream_value_never_breaks_snapshot(
     assert outcome.envelope["data"] == expected.data()
     assert outcome.envelope["warnings"] == expected.warnings
     assert outcome.envelope["source"] == expected.source
+    # What was saved reads back unchanged: collection never writes a value
+    # that get's re-validation (§4.4) would call damaged or rewrite.
+    assert info["saved_obj"]["data"] == outcome.envelope["data"]
+    readback = runner.run_command(
+        "housesitter.unifi_wifi.get", {"id": outcome.envelope["saved"]},
+        registry=Registry.from_classes([UniFiWifi]),
+        env={"HOME": info["home"]},
+    )
+    assert readback.exit_code == 0, readback.envelope
+    assert readback.envelope["data"] == outcome.envelope["data"]
+    assert readback.envelope["warnings"] == outcome.envelope["warnings"]
+    assert readback.envelope["source"] == outcome.envelope["source"]

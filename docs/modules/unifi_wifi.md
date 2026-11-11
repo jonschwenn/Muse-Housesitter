@@ -556,8 +556,9 @@ The tests check:
   is made missing, null, `""`, a list, an object, `true`, `2**60`, or a
   20-digit numeric string on one record of the `unifi_os` house. The
   snapshot still succeeds with the declared types, every other record is
-  unchanged, and the affected output is null, `"unknown"`, or the record
-  dropped or moved as §4 says.
+  unchanged, and the affected output is null, `"unknown"`, the string kept
+  as sent where §4 allows it, or the record dropped or moved as §4 says.
+  Each case's saved snapshot reads back unchanged through `get`.
 - No-AP ordering, de-duplication, cap warning, full summary count, identifier
   policy, and unchanged compact form.
 - `get` accepts a snapshot saved without `no_ap_clients`, preserves older
