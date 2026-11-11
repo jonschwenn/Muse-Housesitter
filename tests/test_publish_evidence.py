@@ -264,6 +264,37 @@ def test_refusal_bad_png_for_a_fake_screenshot(tmp_path):
     assert _refusal_reason(tmp_path, out) == "bad_png"
 
 
+def test_refusal_bad_png_for_a_bad_crc(tmp_path):
+    # Magic bytes alone pass; the structural check must still refuse.
+    artifact = _artifact(tmp_path)
+    path = artifact / "ui_out" / "typical__index-phone__head.png"
+    bad = bytearray(path.read_bytes())
+    bad[40] ^= 0xFF
+    path.write_bytes(bytes(bad))
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_png"
+
+
+def test_repo_encoder_output_passes_structure_check(tmp_path):
+    # The pipeline's own encoder output must validate: no false refusals
+    # on honest screenshots.
+    artifact = _artifact(tmp_path)
+    out = tmp_path / "out"
+    rc = publish_evidence.main(
+        [
+            "render",
+            "--artifact-dir", str(artifact),
+            "--out-dir", str(out),
+            "--repo", REPO,
+            "--pr", str(PR),
+            "--head-sha", HEAD_SHA,
+        ]
+    )
+    assert rc == 0
+    assert (out / "comment.md").exists()
+
+
 def test_refusal_bad_schema_for_unknown_scenario_id(tmp_path):
     bad = _results()
     bad["scenarios"][0]["id"] = "forged-scenario"

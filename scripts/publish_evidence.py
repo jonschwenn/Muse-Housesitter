@@ -404,6 +404,11 @@ def render_comment(
             "artifact validation failed: " + "; ".join(errors[:10]),
             evidence_checks.artifact_refusal_reason(errors),
         )
+    png_errors = validate_png_files(ui_dir)
+    if png_errors:
+        raise PublishError(
+            "screenshot validation failed: " + "; ".join(png_errors[:10]), "bad_png"
+        )
     try:
         manifest = pr_evidence.load_ui_manifest(ui_dir)
     except (OSError, ValueError, RecursionError) as exc:
@@ -438,6 +443,36 @@ def render_comment(
     return body
 
 
+def validate_png_files(ui_dir: Path) -> list[str]:
+    """Run the structural PNG check over every capture-named file.
+
+    ``validate_artifact`` checks names, caps, and magic bytes; this parses
+    the structure (S5: chunk lengths, CRC of every chunk, IHDR caps, IEND
+    placement, bounded IDAT decompression). Render calls it before building
+    the comment and copy calls it again before pushing (defense in depth:
+    the directory is re-read, never trusted from the earlier pass).
+    """
+    problems: list[str] = []
+    try:
+        entries = sorted(ui_dir.iterdir())
+    except OSError as exc:
+        raise PublishError(f"cannot list UI directory: {exc}", "missing") from exc
+    for entry in entries:
+        if entry.name == ui_evidence.MANIFEST_NAME:
+            continue
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        if not ui_evidence.CAPTURE_RE.fullmatch(entry.name):
+            continue  # validate_artifact already refuses these
+        try:
+            data = entry.read_bytes()
+        except OSError as exc:
+            raise PublishError(f"cannot read {entry.name}: {exc}", "missing") from exc
+        for problem in evidence_checks.validate_png(data):
+            problems.append(f"{entry.name}: {problem}")
+    return problems
+
+
 def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
     """Copy exactly the pictured PNGs and manifest. Returns file names.
 
@@ -465,6 +500,11 @@ def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
             "manifest must be an object with a list of capture objects", "bad_schema"
         )
     kept, _ = pr_evidence.select_ui_captures(data)
+    png_errors = validate_png_files(ui_dir)
+    if png_errors:
+        raise PublishError(
+            "screenshot validation failed: " + "; ".join(png_errors[:10]), "bad_png"
+        )
     referenced: set[str] = set()
     for _, files in kept:
         referenced.update(files)

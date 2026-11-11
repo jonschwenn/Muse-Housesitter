@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 import re
+import struct
 import sys
+import zlib
 from pathlib import Path
 
 RESULTS_FILENAME = "results.json"
@@ -267,6 +269,111 @@ def load_known_scenario_ids(scenarios_path: Path) -> set[str]:
     """Read the scenario ids from a ``tests/evidence/scenarios.json`` file."""
     data = json.loads(scenarios_path.read_text(encoding="utf-8"))
     return {entry["id"] for entry in data["scenarios"]}
+
+
+# PNG structure validation (S5) -------------------------------------------------
+#
+# The old check looked at 8 magic bytes only. This parses the structure:
+# chunk lengths within the file, CRC of every chunk, IHDR first with sane
+# dimensions, an allow-list of colour types, IEND last with no trailing
+# bytes, and a bounded decompression of IDAT. Stdlib only.
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+# Sane dimension caps. Height matches ui_evidence.MAX_PAGE_HEIGHT_PX (pinned
+# by test): captures are viewport-wide and page-cropped, so anything bigger
+# is either hostile or broken. Width has no capture-side cap; 4096 (4K)
+# leaves wide headroom over the 1280 CSS px viewports. The pixel cap keeps
+# the bounded decompression below ~64 MiB of output.
+PNG_MAX_WIDTH = 4096
+PNG_MAX_HEIGHT = 120_000
+PNG_MAX_PIXELS = 16_777_216
+PNG_CHANNELS = {2: 3, 6: 4}  # 8-bit RGB/RGBA non-interlaced: what the pipeline emits
+
+
+def validate_png(data: bytes) -> list[str]:
+    """Validate PNG structure. Returns a list of errors; empty means valid."""
+    if data[:8] != PNG_MAGIC:
+        return ["not a PNG file"]
+    pos = 8
+    width = height = channels = None
+    idat = bytearray()
+    seen_idat = False
+    while pos + 8 <= len(data):
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        ctype = data[pos + 4 : pos + 8]
+        end = pos + 12 + length
+        if end > len(data):
+            return ["truncated PNG chunk"]
+        body = data[pos + 8 : end - 4]
+        (stored_crc,) = struct.unpack(">I", data[end - 4 : end])
+        if zlib.crc32(data[pos + 4 : end - 4]) & 0xFFFFFFFF != stored_crc:
+            try:
+                name = ctype.decode("ascii")
+            except ValueError:
+                name = repr(ctype)
+            return [f"PNG CRC mismatch in {name} chunk"]
+        if width is None:
+            if ctype != b"IHDR" or length != 13:
+                return ["PNG's first chunk must be a 13-byte IHDR"]
+            (width, height, bit_depth, color_type, comp, filt, interlace) = (
+                struct.unpack(">IIBBBBB", body)
+            )
+            if width < 1 or height < 1:
+                return ["PNG dimensions must be positive"]
+            if width > PNG_MAX_WIDTH or height > PNG_MAX_HEIGHT:
+                return [
+                    f"PNG dimensions {width}x{height} exceed "
+                    f"{PNG_MAX_WIDTH}x{PNG_MAX_HEIGHT}"
+                ]
+            if width * height > PNG_MAX_PIXELS:
+                return [f"PNG claims {width * height} pixels, over the cap"]
+            if bit_depth != 8 or color_type not in PNG_CHANNELS or interlace != 0:
+                return [
+                    "PNG must be 8-bit RGB/RGBA non-interlaced "
+                    f"(bit depth {bit_depth}, colour type {color_type}, "
+                    f"interlace {interlace})"
+                ]
+            if comp != 0 or filt != 0:
+                return ["PNG uses an unknown compression or filter method"]
+            channels = PNG_CHANNELS[color_type]
+        elif ctype == b"IHDR":
+            return ["PNG has more than one IHDR"]
+        elif ctype == b"IDAT":
+            seen_idat = True
+            idat += body
+        elif ctype == b"IEND":
+            if length != 0:
+                return ["PNG IEND chunk must be empty"]
+            if end != len(data):
+                return ["PNG has trailing bytes after IEND"]
+            break
+        elif ctype[:1].isupper():
+            # Unknown critical chunk (uppercase first letter): a decoder
+            # that skips it could misread the image.
+            try:
+                name = ctype.decode("ascii")
+            except ValueError:
+                name = repr(ctype)
+            return [f"PNG has an unknown critical chunk {name}"]
+        pos = end
+    else:
+        return ["PNG ends without IEND"]
+    if not seen_idat:
+        return ["PNG has no IDAT image data"]
+    expected = height * (1 + width * channels)
+    try:
+        decompressor = zlib.decompressobj()
+        out = decompressor.decompress(bytes(idat), expected + 1)
+        if len(out) > expected or decompressor.unconsumed_tail:
+            return ["PNG image data decodes to more than the IHDR size"]
+        out += decompressor.flush()
+    except zlib.error as exc:
+        return [f"PNG image data does not decompress: {exc}"]
+    if len(out) < expected:
+        return ["PNG image data is truncated"]
+    if len(out) > expected:
+        return ["PNG image data has extra bytes"]
+    return []
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -9,6 +9,8 @@ scenario ids that exist in MAIN's scenarios list unless marked new-in-PR.
 from __future__ import annotations
 
 import importlib.util
+import struct
+import zlib
 from pathlib import Path
 
 import pytest
@@ -242,3 +244,164 @@ def test_artifact_reason_bad_schema_for_the_rest():
         evidence_checks.artifact_refusal_reason(["manifest names a missing file: x"])
         == "bad_schema"
     )
+
+
+# Part 3 (S5): real PNG validation. ------------------------------------------
+#
+# Crafted by hand (struct + zlib), never with the repo's own encoder, so a
+# bug in the encoder cannot mask a hole in the validator.
+
+
+def _chunk(ctype, data):
+    return (
+        struct.pack(">I", len(data))
+        + ctype
+        + data
+        + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
+    )
+
+
+def _png(width=4, height=4, color_type=6, bit_depth=8, interlace=0, raw=None):
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+    if raw is None:
+        raw = b"".join(b"\x00" + bytes([9, 9, 9, 255][:channels]) * width for _ in range(height))
+    ihdr = struct.pack(">IIBBBBB", width, height, bit_depth, color_type, 0, 0, interlace)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", zlib.compress(raw))
+        + _chunk(b"IEND", b"")
+    )
+
+
+def test_valid_png_passes():
+    assert evidence_checks.validate_png(_png()) == []
+    assert evidence_checks.validate_png(_png(color_type=2)) == []
+
+
+def test_non_png_is_rejected():
+    assert evidence_checks.validate_png(b"not a png")
+
+
+def test_truncated_chunk_is_rejected():
+    assert evidence_checks.validate_png(_png()[:-10])
+
+
+def test_bad_crc_is_rejected():
+    bad = bytearray(_png())
+    bad[40] ^= 0xFF  # inside the IDAT payload: the stored CRC no longer matches
+    assert any("CRC" in e for e in evidence_checks.validate_png(bytes(bad)))
+
+
+def test_trailing_bytes_are_rejected():
+    assert any(
+        "trailing" in e for e in evidence_checks.validate_png(_png() + b"junk")
+    )
+
+
+def test_huge_dimensions_are_rejected_without_decompressing():
+    # 100000x100000 claims ~40 GB of pixels: the caps must fire first, so
+    # the header is crafted directly (no pixel buffer is ever allocated).
+    ihdr = struct.pack(">IIBBBBB", 100_000, 100_000, 8, 6, 0, 0, 0)
+    data = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", zlib.compress(b"\x00" * 100))
+        + _chunk(b"IEND", b"")
+    )
+    assert evidence_checks.validate_png(data)
+
+
+def test_zero_dimensions_are_rejected():
+    assert evidence_checks.validate_png(_png(width=0, height=4))
+
+
+def test_unsupported_colour_type_is_rejected():
+    assert evidence_checks.validate_png(_png(color_type=0))
+    assert evidence_checks.validate_png(_png(color_type=3))
+
+
+def test_unsupported_bit_depth_or_interlace_is_rejected():
+    assert evidence_checks.validate_png(_png(bit_depth=16))
+    assert evidence_checks.validate_png(_png(interlace=1))
+
+
+def test_missing_idat_is_rejected():
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
+    data = b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IEND", b"")
+    assert any("IDAT" in e or "image data" in e for e in evidence_checks.validate_png(data))
+
+
+def test_missing_iend_is_rejected():
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
+    raw = b"".join(b"\x00" + bytes([1, 2, 3, 4]) * 4 for _ in range(4))
+    data = (
+        b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw))
+    )
+    assert evidence_checks.validate_png(data)
+
+
+def test_first_chunk_must_be_ihdr():
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
+    data = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"tEXt", b"comment")
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IEND", b"")
+    )
+    assert any("IHDR" in e for e in evidence_checks.validate_png(data))
+
+
+def test_unknown_critical_chunk_is_rejected():
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
+    raw = b"".join(b"\x00" + bytes([1, 2, 3, 4]) * 4 for _ in range(4))
+    data = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"ABcD", b"mystery")  # uppercase first letter: critical
+        + _chunk(b"IDAT", zlib.compress(raw))
+        + _chunk(b"IEND", b"")
+    )
+    assert evidence_checks.validate_png(data)
+
+
+def test_ancillary_chunk_is_allowed():
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
+    raw = b"".join(b"\x00" + bytes([1, 2, 3, 4]) * 4 for _ in range(4))
+    data = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"tEXt", b"comment")  # lowercase first letter: ancillary
+        + _chunk(b"IDAT", zlib.compress(raw))
+        + _chunk(b"IEND", b"")
+    )
+    assert evidence_checks.validate_png(data) == []
+
+
+def test_decompression_bomb_is_rejected_with_a_bound():
+    # A 4x4 RGBA image holds 68 bytes of scanlines; this IDAT decodes to
+    # far more. The bound is the IHDR size, so memory stays flat.
+    bomb = _chunk(b"IDAT", zlib.compress(bytes(10_000)))
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
+    data = b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + bomb + _chunk(b"IEND", b"")
+    assert evidence_checks.validate_png(data)
+
+
+def test_corrupt_image_data_is_rejected():
+    ihdr = struct.pack(">IIBBBBB", 4, 4, 8, 6, 0, 0, 0)
+    data = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", b"\x78\x9c\xff\xffnot-zlib")
+        + _chunk(b"IEND", b"")
+    )
+    assert evidence_checks.validate_png(data)
+
+
+def test_png_height_cap_matches_capture_page_cap():
+    spec = importlib.util.spec_from_file_location(
+        "ui_evidence_height_pin", ROOT / "scripts" / "ui_evidence.py"
+    )
+    ui_evidence = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ui_evidence)
+    assert evidence_checks.PNG_MAX_HEIGHT == ui_evidence.MAX_PAGE_HEIGHT_PX
