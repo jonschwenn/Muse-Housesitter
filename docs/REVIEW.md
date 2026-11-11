@@ -129,7 +129,13 @@ PR #1 predates the tooling and has no evidence.
   Fork PRs touching protected paths always fail; a maintainer must recreate
   the change on a branch here. Main's trusted hygiene scanner also reads
   the PR head tree's files as data through git plumbing. It never checks
-  out, imports, or runs PR code (D31–D32).
+  out, imports, or runs PR code. Relative file links inside the tree are
+  scanned under the link's name; directory links and links into submodules
+  are skipped. Submodules are skipped with a count. Unresolvable links
+  fail the check, as does exceeding a byte cap, the tree-entry cap, or the
+  300-second deadline. The entry cap applies while reading the tree.
+  Suppression listings show only `path:line`, never the suppressed content
+  (D31–D32).
 - Web UI screenshots work the same way, with the browser in the loop. In
   the `evidence` job, `scripts/ui_evidence.py` serves each tree's own
   `scripts/dev_dashboard.py` with that tree's own `web/` and fixtures, and

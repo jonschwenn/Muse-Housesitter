@@ -659,8 +659,17 @@ handoff's "license not chosen; don't publish."
   `scripts/hygiene_scan.py` over the PR head tree as data. It fetches git
   objects, verifies the head SHA against the event, and reads blobs through
   `git ls-tree` and `git cat-file --batch`. It never checks out, imports, or
-  runs the PR there. This trusted copy makes hygiene tamper-proof against
-  PR code. The re-run in `ci.yml`, "Protected suites, fresh process
+  runs the PR there. Relative file links inside the tree resolve to target
+  blobs, scanned under each link's own name. Directory links and links
+  into submodules are skipped; submodules are skipped with a count in the
+  output. Absolute, escaping, dangling, looping, or overlong link chains
+  fail the check. The scan has a 300-second deadline and byte and tree-entry
+  caps; the entry cap is enforced while reading the tree. Exceeding a limit
+  fails the check. Suppression listings show only `path:line` for each
+  `hygiene: ok` line, up to the listing cap, with a count of any remainder.
+  They never print the suppressed content, which could contain a secret.
+  This trusted copy makes hygiene tamper-proof against PR code. The re-run
+  in `ci.yml`, "Protected suites, fresh process
   (honest-mistake check)", still runs PR code and pytest config.
   The protected list also adds `.pytest.ini`, `pyproject.toml` and
   `setup.py` in any directory, `tests/core/helpers.py`,
@@ -668,7 +677,9 @@ handoff's "license not chosen; don't publish."
   The full list in D16 includes pytest and ruff config names, interpreter
   start-up hooks (`sitecustomize.py`, `usercustomize.py`, `*.pth`), and
   test package initialisers. A test pins that the protected suites' local
-  imports from `tests/` and file loads from `scripts/` are protected.
+  imports from `tests/` and file loads from `scripts/` are protected. It
+  follows their imports transitively, including submodule imports written
+  as `from package import submodule`.
 - **Why:** widening the list stops the cheapest edits, but is only a partial
   defence. Conformance, the import lint, and the stdio-guard tests must run
   PR code and cannot be made tamper-proof this way. Human review of every
