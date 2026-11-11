@@ -42,7 +42,9 @@ jobs:
   test:
     name: test (${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # Temporary stopgap: recent runs took 542-587 s against a 600 s limit.
+    # The ScriptedServer close fix sets this back to 10.
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
