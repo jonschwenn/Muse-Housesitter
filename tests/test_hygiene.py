@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1370,15 +1371,9 @@ def test_ssid_problem_hides_value():
     assert value not in problems[0]
 
 
-def test_display_truncates_and_escapes_paths():
-    """Finding 5 (round 2): printed paths are bounded and terminal-safe."""
-    assert len(hygiene_scan._display("a" * 300)) == 200
-    assert hygiene_scan._display("a\udcff") == "a?"
-    assert "\x1b" not in hygiene_scan._display("a\x1bb")
-    assert "\\x1b" in hygiene_scan._display("a\x1bb")
-    assert "\\n" in hygiene_scan._display("a\nb")
-    assert hygiene_scan._display("a\tb") == "a\tb"
-    assert "caf\u00e9" in hygiene_scan._display("caf\u00e9")
+def test_display_hides_unsafe_paths():
+    for path in ("a" * 300, "a\udcff", "a\x1bb", "a\nb", "a\tb", "caf\u00e9"):
+        assert re.fullmatch(r"\[path [1-9][0-9]*\]", hygiene_scan._display(path))
 
 
 def test_print_capped_respects_budget(capsys):
@@ -1405,24 +1400,12 @@ def test_print_capped_budgets_bytes_not_characters(capsys):
 
 
 def _display_id(path: str) -> str:
-    """The ``[redacted path <id>]`` the scanner prints for this path."""
-    import hashlib as _hashlib
-    import os as _os
-
-    digest = _hashlib.sha256(_os.fsencode(path)).hexdigest()[:8]
-    return f"[redacted path {digest}]"
+    """Display number assigned in this test process."""
+    return hygiene_scan._display(path)
 
 
 def test_display_replaces_secret_shaped_names_with_stable_ids():
-    """Findings 1 and 5 (round 4): a secret-shaped name never prints.
-
-    The credential detector is anchored at line starts, so it flagged
-    ``password=...`` but not ``dir/password=...``. Every detector now runs
-    on each path component and the whole path; a hit prints a stable id of
-    the path bytes instead of the name, so two secret-shaped names stay
-    distinguishable without revealing either. Planted and reference-like
-    values stay readable, as in secret_problems.
-    """
+    """Secret-shaped names get distinct, repeatable run-local numbers."""
     token_a = "gh" + "p_" + "Q" * 30
     token_b = "mg" + "st_" + "R" * 30
     sensitive = [
@@ -1441,10 +1424,10 @@ def test_display_replaces_secret_shaped_names_with_stable_ids():
     # Distinct names get distinct ids; repeats are stable.
     assert hygiene_scan._display(token_a) != hygiene_scan._display(token_b)
     assert hygiene_scan._display(token_a) == hygiene_scan._display(token_a)
-    # Ordinary, planted, and reference-like names still print in full.
+    # Safe ordinary and planted names print in full; assignments stay opaque.
     assert hygiene_scan._display("notes.txt") == "notes.txt"
     assert hygiene_scan._display("PLANTED-SECRET-notes") == "PLANTED-SECRET-notes"
-    assert hygiene_scan._display(PW + "=changeme") == PW + "=changeme"
+    assert re.fullmatch(r"\[path [1-9][0-9]*\]", hygiene_scan._display(PW + "=changeme"))
 
 
 @NEEDS_GIT
@@ -1493,8 +1476,8 @@ def test_trusted_scan_suppression_listing_redacts_secret_name(tmp_path):
     assert token not in proc.stdout
     assert PW not in proc.stdout
     assert "AbCd123456" not in proc.stdout
-    assert f"suppression {_display_id(token)}:1" in proc.stdout
-    assert f"suppression {_display_id(nested)}:1" in proc.stdout
+    assert "suppression [path 2]:1" in proc.stdout
+    assert "suppression [path 1]:1" in proc.stdout
     assert _display_id(token) != _display_id(nested)
 
 
@@ -1508,7 +1491,7 @@ def test_trusted_scan_problem_listing_redacts_nested_secret_name(tmp_path):
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert PW not in proc.stdout
     assert "AbCd123456" not in proc.stdout
-    assert f"hygiene-scan: {_display_id(nested)}: IPv4 address at line 1" in proc.stdout
+    assert "hygiene-scan: [path 1]: IPv4 address at line 1" in proc.stdout
 
 
 @NEEDS_GIT
@@ -1520,7 +1503,7 @@ def test_trusted_scan_symlink_error_redacts_nested_secret_name(tmp_path):
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert PW not in proc.stdout
     assert "AbCd123456" not in proc.stdout
-    assert _display_id(link) in proc.stdout
+    assert "[path 1]" in proc.stdout
 
 
 @NEEDS_GIT
@@ -1532,7 +1515,7 @@ def test_trusted_scan_oversized_blob_error_redacts_secret_name(tmp_path):
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "fail closed" in proc.stdout
     assert token not in proc.stdout
-    assert _display_id(token) in proc.stdout
+    assert "[path 1]" in proc.stdout
 
 
 @NEEDS_GIT
@@ -1571,3 +1554,55 @@ def test_fetch_and_scan_end_to_end_like_the_workflow(tmp_path):
     assert proc.returncode == 1
     assert "IPv4 address at line 1" in proc.stdout
     assert planted not in proc.stdout
+
+@pytest.mark.parametrize(
+    "boundary", ["\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+@pytest.mark.parametrize("channel", ["suppression", "problem", "oversize", "symlink", "submodule"])
+@NEEDS_GIT
+def test_path_boundaries_never_disclose_secrets(tmp_path, boundary, channel):
+    """PR #61: every output channel hides splitlines credential paths."""
+    value = "AbCd" + "123456"
+    name = "dir/" + boundary + PW + "=" + value + ".txt"
+    data = {
+        "suppression": "# hygiene: ok\n",
+        "problem": ".".join(REAL10) + "\n",
+        "oversize": "Z" * (hygiene_scan.MAX_FILE_BYTES + 1),
+        "symlink": "",
+        "submodule": "",
+    }[channel]
+    if channel == "symlink":
+        repo, sha = _git_repo(tmp_path, {"target.txt": "hello\n"}, links={name: "target.txt"})
+    elif channel == "submodule":
+        repo, _ = _git_repo(tmp_path, {"target.txt": "hello\n"})
+        entry = f"160000 commit {'1' * 40}\t{boundary}{PW}={value}.txt\0"
+        sub = subprocess.check_output(
+            ["git", "mktree", "-z", "--missing"], cwd=repo, input=entry.encode()
+        ).decode().strip()
+        sha = subprocess.check_output(
+            ["git", "mktree"], cwd=repo, input=f"040000 tree {sub}\tdir\n".encode()
+        ).decode().strip()
+    else:
+        repo, sha = _git_repo(tmp_path, {name: data})
+    proc = _scan_tree(repo, sha)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == (0 if channel == "suppression" else 1 if channel == "problem" else 2)
+    assert "[path 1]" in output
+    for part in (value, value[:4], value[4:]):
+        assert part not in output
+
+
+def test_display_current_tree_verbatim():
+    paths = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT)
+    for raw in paths.split(b"\0"):
+        if raw:
+            path = os.fsdecode(raw)
+            assert hygiene_scan._display(path) == path
+
+
+def test_display_uses_run_local_counters():
+    first = hygiene_scan._display("one unsafe name")
+    second = hygiene_scan._display("two unsafe names")
+    assert first != second
+    assert hygiene_scan._display("one unsafe name") == first
+    assert re.fullmatch(r"\[path [1-9][0-9]*\]", first)

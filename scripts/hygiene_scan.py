@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import bisect
-import hashlib
 import ipaddress
 import json
 import os
@@ -891,7 +890,8 @@ def _path_is_sensitive(path: str) -> bool:
     carry one.
     """
     detectors = SECRET_PATTERNS + [("credential assignment", UNQUOTED_ASSIGNMENT)]
-    for candidate in (path, *path.split("/")):
+    for raw in (path, *path.split("/")):
+        candidate = "\n".join(raw.splitlines())
         for _label, pattern in detectors:
             entries = (
                 pattern(candidate)
@@ -907,44 +907,22 @@ def _path_is_sensitive(path: str) -> bool:
     return False
 
 
+_DISPLAY_IDS: dict[str, int] = {}
+
+
 def _display(path: str) -> str:
-    """Make a blob path safe for a bounded log line.
+    """Show plainly safe names; assign every other name a run-local number.
 
-    A path any secret detector fires on (see :func:`_path_is_sensitive`)
-    never prints: it becomes ``[redacted path <id>]``, where the id is 8
-    hex chars of the SHA-256 of the path bytes — stable, so repeats of one
-    file match up, and distinct, so two secret-shaped names stay apart.
-    Anything else prints escaped and bounded: surrogates from non-UTF-8
-    names become ``?`` so printing never raises ``UnicodeEncodeError``;
-    valid UTF-8 (including non-ASCII) passes through; newlines become
-    ``\\n`` so one path cannot inject extra lines; other control
-    characters (including ESC) are escaped so the path cannot drive the
-    terminal; and the result is cut to ``_MAX_DISPLAY_PATH`` characters,
-    since file names are PR-controlled data.
+    Numbers contain no information derived from the name and stay stable
+    across all output channels within one scan.
     """
-    if _path_is_sensitive(path):
-        digest = hashlib.sha256(os.fsencode(path)).hexdigest()[:8]
-        return f"[redacted path {digest}]"
-    safe = path.encode("utf-8", errors="replace").decode("utf-8")
-    out = []
-    for char in safe:
-        if char == "\n":
-            out.append("\\n")
-        elif char == "\r":
-            out.append("\\r")
-        elif char == "\t" or char.isprintable():
-            out.append(char)
-        elif ord(char) < 256:
-            out.append(f"\\x{ord(char):02x}")
-        else:
-            out.append(f"\\u{ord(char):04x}")
-    return "".join(out)[:_MAX_DISPLAY_PATH]
+    if re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", path) and not _path_is_sensitive(path):
+        return path
+    if path not in _DISPLAY_IDS:
+        _DISPLAY_IDS[path] = len(_DISPLAY_IDS) + 1
+    return f"[path {_DISPLAY_IDS[path]}]"
 
 
-# Printed paths are cut here (see _display), and total stdout is capped in
-# main(): a hostile tree cannot flood the workflow log, while the problem
-# and suppression counts stay exact.
-_MAX_DISPLAY_PATH = 200
 # The stdout budget counts encoded UTF-8 bytes, not characters: multibyte
 # names would otherwise multiply the byte count past the cap.
 _MAX_LOG_BYTES = 100_000
@@ -1265,6 +1243,7 @@ def scan_git_tree(
     the check outright (see :func:`list_tree_blobs`): links are never
     resolved, so there is no link target to scan and no submodule to skip.
     """
+    _DISPLAY_IDS.clear()
     start = time.monotonic()
     _check_deadline(start, "starting")
     files = list_tree_blobs(sha, cwd=cwd)
@@ -1293,7 +1272,7 @@ def scan_git_tree(
             if SUPPRESS not in line:
                 continue
             suppression_total += 1
-            # The path is escaped and bounded; the line content never is.
+            # Only the safe display name is listed, never the line content.
             if len(suppressions) < MAX_LISTED_SUPPRESSIONS:
                 suppressions.append(f"{shown}:{lineno}")
 
