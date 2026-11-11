@@ -322,9 +322,10 @@ jobs:
     # The only job that can comment. Pins the placeholder to the push SHA,
     # re-checks the marker and size, and edits only the bot's own comment.
     # It posts on every outcome — the rendered comment, the fixed refusal
-    # notice, or the fixed publish_failed notice — never silence. The
-    # decision of what to post lives in main's Python (decide-comment, see
-    # scripts/publish_evidence.py); the shell only carries out its word.
+    # notice, or the fixed publish_failed notice — never silence. A corrupt
+    # rendered file falls back to the publish_failed notice the same way.
+    # The decision of what to post lives in main's Python (decide-comment,
+    # see scripts/publish_evidence.py); the shell only carries out its word.
     needs: [resolve, build, push]
     # Build failed means render refused (or crashed before uploading, so the
     # download below finds nothing); push failed means the images may not
@@ -390,6 +391,24 @@ jobs:
           # so the publish_failed notice below can still be written and
           # posted instead of failing this step with no comment.
           mkdir -p rendered
+          # Fixed fallback (review round 3, finding 2): any failure to
+          # read or validate the rendered comment or refusal file posts
+          # main's fixed publish_failed notice — main's text plus trusted
+          # event data only, never PR content — instead of ending with no
+          # comment. Subject to the same freshness and ordering rules
+          # below; the shell only carries out these fixed words.
+          write_publish_failed_notice() {
+            outcome="notice"
+            printf '{"reason": "publish_failed"}\n' > rendered/refusal.json
+            python3 scripts/publish_evidence.py refusal \
+              --reason-file rendered/refusal.json \
+              --head-sha "$HEAD_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+              > rendered/comment.md
+          }
+          comment_is_postable() {
+            [ "$(head -c ${#marker} rendered/comment.md 2>/dev/null)" = "$marker" ] && \
+            [ "$(wc -c < rendered/comment.md 2>/dev/null)" -le 65000 ]
+          }
           flags=""
           if [ -f rendered/refusal.json ]; then flags="$flags --has-refusal"; fi
           if [ -f rendered/comment.md ]; then flags="$flags --has-comment"; fi
@@ -409,11 +428,15 @@ jobs:
               # reason code (read from the file in Python, never from the
               # shell), so no PR content can reach the comment through it.
               # The marker below is stamped from trusted event data only.
+              # A corrupt or unknown refusal file falls back to the fixed
+              # publish_failed notice instead of ending with no comment.
               outcome="notice"
-              python3 scripts/publish_evidence.py refusal \
+              if ! python3 scripts/publish_evidence.py refusal \
                 --reason-file rendered/refusal.json \
                 --head-sha "$HEAD_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
-                > rendered/comment.md
+                > rendered/comment.md; then
+                write_publish_failed_notice
+              fi
               ;;
             publish-failed)
               # The push failed, or the rendered artifact is missing or
@@ -427,8 +450,12 @@ jobs:
               ;;
             comment)
               outcome="evidence"
-              python3 scripts/publish_evidence.py substitute \
-                --comment rendered/comment.md --sha "$EVIDENCE_SHA"
+              # A corrupt rendered comment falls back to the fixed
+              # publish_failed notice instead of ending with no comment.
+              if ! python3 scripts/publish_evidence.py substitute \
+                --comment rendered/comment.md --sha "$EVIDENCE_SHA"; then
+                write_publish_failed_notice
+              fi
               ;;
             *)
               echo "unknown comment action: $action"
@@ -436,11 +463,14 @@ jobs:
               ;;
           esac
           marker='<!-- housesitter-evidence'
-          if [ "$(head -c ${#marker} rendered/comment.md)" != "$marker" ]; then
-            echo "comment does not start with the marker; not posting"; exit 1
+          # A rendered comment that fails validation (wrong marker, over
+          # the size cap) falls back the same way; if even the fixed
+          # notice failed, main's own text is broken: stop loudly.
+          if ! comment_is_postable; then
+            write_publish_failed_notice
           fi
-          if [ "$(wc -c < rendered/comment.md)" -gt 65000 ]; then
-            echo "comment is too large; not posting"; exit 1
+          if ! comment_is_postable; then
+            echo "fixed notice failed validation; not posting"; exit 1
           fi
           # Freshness re-check, after all preparation above and before the
           # lookup below: the PR may have moved while this step ran.

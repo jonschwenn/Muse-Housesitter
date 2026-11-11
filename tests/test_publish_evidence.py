@@ -2257,3 +2257,61 @@ def test_comment_step_rechecks_the_head_after_the_lookup(tmp_path, monkeypatch):
 
 def test_comment_step_checks_the_head_twice():
     assert _comment_step_shell().count("check-head") >= 2
+
+
+# Review round 3, finding 2: corrupt rendered files fall back. -------------
+#
+# A corrupt rendered/comment.md (success path) or rendered/refusal.json
+# (refusal path) used to end the step with no comment at all (exit 1 and
+# 2). Any failure to read or validate those files now falls back to the
+# fixed publish_failed notice — built only from main's text and trusted
+# event data — subject to the same freshness and ordering rules.
+
+
+def _posted_notice_body(calls):
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1, f"expected one POST; calls: {calls}"
+    return posts[0]["body"]
+
+
+def test_comment_step_falls_back_to_notice_on_corrupt_comment(
+    tmp_path, monkeypatch
+):
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files={"rendered/comment.md": "truncated"},
+        evidence_sha="c" * 40,
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = _posted_notice_body(calls)
+    assert body.split("\n", 1)[0].endswith("outcome=notice -->")
+    assert "`publish_failed`" in body
+    assert "truncated" not in body
+
+
+def test_comment_step_falls_back_to_notice_on_corrupt_refusal(
+    tmp_path, monkeypatch
+):
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "failure", "skipped",
+        files={"rendered/refusal.json": "{"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = _posted_notice_body(calls)
+    assert body.split("\n", 1)[0].endswith("outcome=notice -->")
+    assert "`publish_failed`" in body
+
+
+def test_comment_step_falls_back_to_notice_on_rejected_refusal_reason(
+    tmp_path, monkeypatch
+):
+    # Valid JSON but not a reason the publisher knows: the refusal
+    # subcommand rejects it, so the fixed notice posts instead.
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "failure", "skipped",
+        files={"rendered/refusal.json": '{"reason": "nope"}'},
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = _posted_notice_body(calls)
+    assert "`publish_failed`" in body
+    assert "nope" not in body
