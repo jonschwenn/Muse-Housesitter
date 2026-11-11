@@ -194,13 +194,13 @@ PR #1 predates the tooling and has no evidence.
   - The workflow lists at most 200 problem records and 1,000 suppression
     locations, with counts of any remainder. Every `hygiene: ok` line is
     counted; listed suppressions show only `path:line`, never their content.
-    Printed paths, including those in errors, have secret-shaped parts
-    replaced with `[redacted]` before escaping control characters and
-    cutting to 200 characters. Planted-secret and reference-like text
-    remains readable under the scanner's existing exceptions. Output is
-    capped at 100,000 UTF-8 bytes, including the truncation marker.
-    Counts remain exact within each listing's scope: the workflow counts
-    problem records, including per-file remainder records.
+    A printed path, including one in an error, appears as itself only if
+    it uses plain ASCII letters, digits, `.`, `_`, `/` and `-`, is at most
+    200 characters, and no secret pattern matches it or any path component.
+    Every other path appears as `[path N]`. The number repeats for that
+    path within one scan, resets each scan, and is not derived from the
+    name. Output is capped at 100,000 UTF-8 bytes, including the truncation
+    marker. Capped problem and suppression lists keep exact totals.
 
   **Protected-suite import check.** A test in `tests/test_ci_guard.py`
   checks that local imports from `tests/` and file loads from `scripts/`
