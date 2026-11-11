@@ -636,13 +636,11 @@ def suppression_lines(text: str) -> list[tuple[int, str]]:
 # is ~150 files / ~4 MB with no blob over 600 KB; the caps leave wide headroom
 # and fail closed (exit 2) instead of skipping silently when exceeded.
 MAX_FILE_BYTES = 2_000_000
-MAX_TOTAL_BYTES = 64_000_000
-MAX_TREE_ENTRIES = 100_000
+MAX_TOTAL_BYTES = 32_000_000
+MAX_TREE_ENTRIES = 10_000
 # An overall wall-clock deadline for the tree scan: regexes are linear, but a
 # hostile tree must not stall the job. Checked between phases and blobs.
 SCAN_DEADLINE_S = 300
-# Symlink chains (link -> link -> ...) are followed this far, then refused.
-MAX_SYMLINK_HOPS = 40
 # Problem and suppression listings are capped so a hostile tree cannot flood
 # the workflow log; the counts stay exact.
 MAX_LISTED_PROBLEMS = 200
@@ -832,14 +830,15 @@ def _iter_tree_records(chunks: Iterable[bytes]) -> Iterator[bytes]:
 
 def list_tree_blobs(
     sha: str, *, cwd: str
-) -> tuple[list[tuple[str, int, str]], list[tuple[str, int, str]], list[str]]:
-    """List entries in the tree at ``sha``.
+) -> list[tuple[str, int, str]]:
+    """List the regular-blob entries in the tree at ``sha``.
 
-    Returns ``(files, links, submodules)``: ``(blob_sha, size, path)`` for
-    regular blobs, the same for mode-120000 symlink blobs, and the paths of
-    skipped submodule (gitlink) entries. Submodules are directories, not
-    files: the working-tree scan never sees inside them either, so they
-    are skipped, not scanned.
+    Returns ``(blob_sha, size, path)`` for regular blobs. Any symlink entry
+    (mode 120000) or gitlink entry (mode 160000) anywhere in the tree fails
+    the check: symlinks and submodules are not allowed in this repo. A link
+    can smuggle an out-of-tree path (``..`` past a submodule, a repeated
+    alias) past per-entry scanning, so resolving them is refused outright
+    instead of attempted.
 
     Paths come from plain ``git ls-tree -r -z --long`` output, whose
     NUL-terminated records carry raw path bytes: unlike ``--format=%(path)``,
@@ -863,8 +862,6 @@ def list_tree_blobs(
     )
     listed = time.monotonic()
     files: list[tuple[str, int, str]] = []
-    links: list[tuple[str, int, str]] = []
-    submodules: list[str] = []
     total = 0
     entries = 0
 
@@ -897,11 +894,14 @@ def list_tree_blobs(
                     "(limit reached while reading); refusing to scan"
                 )
             mode, objtype, objsha, size_or_none, path = _parse_tree_record(record)
-            # A gitlink is a directory, not a file: skipped, like the
-            # working-tree scan, which never sees inside submodules either.
-            if objtype == "commit":
-                submodules.append(path)
-                continue
+            # Symlinks and submodules are not allowed in this repo: a link
+            # can smuggle an out-of-tree path past per-entry scanning (see
+            # the docstring), so any entry of either kind fails the check.
+            if mode == "120000" or objtype == "commit":
+                raise FailClosed(
+                    f"symlinks and submodules are not allowed in this repo "
+                    f"({_display(path)}); refusing to scan"
+                )
             assert size_or_none is not None  # blobs always carry a size
             size_int = size_or_none
             if size_int > MAX_FILE_BYTES:
@@ -914,10 +914,7 @@ def list_tree_blobs(
                 raise FailClosed(
                     f"tree holds more than {MAX_TOTAL_BYTES} bytes; refusing to scan"
                 )
-            if mode == "120000":
-                links.append((objsha, size_int, path))
-            else:
-                files.append((objsha, size_int, path))
+            files.append((objsha, size_int, path))
         try:
             proc.wait(timeout=300)
         except subprocess.TimeoutExpired as exc:
@@ -935,139 +932,7 @@ def list_tree_blobs(
         if proc.poll() is None:
             proc.kill()
             proc.wait()
-    return files, links, submodules
-
-
-def _resolve_symlink(
-    link_path: str,
-    target: str,
-    kinds: dict,
-    link_targets: dict,
-    dir_paths: set,
-    submodule_paths: list,
-) -> tuple | None:
-    """Follow one symlink to a tree file, like the working-tree scan does.
-
-    Components resolve in filesystem order, the way the kernel resolves a
-    path: each intermediate symlink expands before the next component is
-    looked up, and ``..`` pops the already-resolved path. (Removing ``..``
-    first, lexically, reads the wrong file when a symlink points through a
-    directory: ``alias -> dir/sub`` with ``../../alias/../secret`` resolves
-    to ``dir/secret``, not the root ``secret``.)
-
-    Returns ``(blob_sha, size)`` for the target file, ``None`` when the
-    target is a directory (or under a submodule: contents the working-tree
-    scan never sees either), and raises :class:`FailClosed` for absolute,
-    empty, escaping, dangling, cyclic, or over-long chains, and for paths
-    through a non-directory (a trailing slash on a file, ``file/extra``).
-    The target text is never quoted in messages: a link blob is
-    PR-controlled data and could carry a secret.
-    """
-    if target.startswith("/"):
-        raise FailClosed(
-            f"symlink {_display(link_path)} has an absolute target outside "
-            "the tree; refusing to scan"
-        )
-    if target == "":
-        raise FailClosed(
-            f"symlink {_display(link_path)} points outside the tree "
-            "(dangling); refusing to scan"
-        )
-    seen = {link_path}
-    hops = 0
-    # All directories while components remain; a file is only ever the
-    # final component (anything past it fails, like ENOTDIR).
-    resolved = link_path.split("/")[:-1]
-    queue = target.split("/")
-    pos = 0
-    while pos < len(queue):
-        part = queue[pos]
-        pos += 1
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if not resolved:
-                raise FailClosed(
-                    f"symlink {_display(link_path)} escapes the tree root; "
-                    "refusing to scan"
-                )
-            resolved.pop()
-            continue
-        candidate = "/".join([*resolved, part]) if resolved else part
-        if any(
-            candidate == sub or candidate.startswith(sub + "/")
-            for sub in submodule_paths
-        ):
-            return None
-        entry = kinds.get(candidate)
-        if entry is None:
-            if candidate in dir_paths:
-                resolved.append(part)
-                continue
-            raise FailClosed(
-                f"symlink {_display(link_path)} points outside the tree "
-                "(dangling); refusing to scan"
-            )
-        kind, sha, size = entry
-        if kind == "submodule":
-            return None
-        if kind == "file":
-            if pos < len(queue):
-                raise FailClosed(
-                    f"symlink {_display(link_path)} passes through "
-                    "a file, not a directory; refusing to scan"
-                )
-            resolved.append(part)
-            continue
-        # A link: expand it in place, like the filesystem does, and resolve
-        # its target before the components that follow.
-        if candidate in seen:
-            raise FailClosed(
-                f"symlink {_display(link_path)} loops back on itself "
-                "(cycle); refusing to scan"
-            )
-        hops += 1
-        if hops > MAX_SYMLINK_HOPS:
-            raise FailClosed(
-                f"symlink {_display(link_path)} exceeds {MAX_SYMLINK_HOPS} "
-                "hops; refusing to scan"
-            )
-        seen.add(candidate)
-        link_target = link_targets[candidate]
-        if link_target.startswith("/"):
-            raise FailClosed(
-                f"symlink {_display(link_path)} has an absolute target outside "
-                "the tree; refusing to scan"
-            )
-        if link_target == "":
-            raise FailClosed(
-                f"symlink {_display(link_path)} points outside the tree "
-                "(dangling); refusing to scan"
-            )
-        queue = link_target.split("/") + queue[pos:]
-        pos = 0
-    final = "/".join(resolved)
-    if final == "":
-        return None  # the tree root is a directory
-    entry = kinds.get(final)
-    if entry is None:
-        if final in dir_paths:
-            return None
-        raise FailClosed(
-            f"symlink {_display(link_path)} points outside the tree "
-            "(dangling); refusing to scan"
-        )
-    kind, sha, size = entry
-    if kind == "submodule":
-        return None
-    if kind == "file":
-        return (sha, size)
-    # A link as the final component always expands above, so reaching one
-    # here is impossible; fail closed rather than guess.
-    raise FailClosed(
-        f"symlink {_display(link_path)} points outside the tree "
-        "(dangling); refusing to scan"
-    )
+    return files
 
 
 def read_blobs(blobs: list[tuple[str, int, str]], *, cwd: str) -> list[bytes]:
@@ -1108,44 +973,23 @@ def read_blobs(blobs: list[tuple[str, int, str]], *, cwd: str) -> list[bytes]:
 
 def scan_git_tree(
     sha: str, *, cwd: str
-) -> tuple[list[str], list[str], int, int, int]:
+) -> tuple[list[str], list[str], int, int]:
     """Scan every file in the tree at ``sha``. Returns ``(problems,
-    suppressions, files_scanned, bytes_scanned, submodules_skipped)``;
-    problems are display lines of the form ``path: problem`` and
-    suppressions of the form ``path:lineno`` (never the line content: it
-    may hold the suppressed secret).
+    suppressions, files_scanned, bytes_scanned)``; problems are display
+    lines of the form ``path: problem`` and suppressions of the form
+    ``path:lineno`` (never the line content: it may hold the suppressed
+    secret).
 
-    Symlinks are resolved within the tree and the target blob's content is
-    scanned under the link's own name, exactly as the working-tree scan
-    follows file symlinks; links to directories are skipped, and links
-    that cannot resolve inside the tree fail closed.
+    Any symlink (mode 120000) or gitlink (mode 160000) in the tree fails
+    the check outright (see :func:`list_tree_blobs`): links are never
+    resolved, so there is no link target to scan and no submodule to skip.
     """
     start = time.monotonic()
     _check_deadline(start, "starting")
-    files, links, submodules = list_tree_blobs(sha, cwd=cwd)
+    files = list_tree_blobs(sha, cwd=cwd)
     _check_deadline(start, "listing the tree")
     contents = read_blobs(files, cwd=cwd)
-    link_contents = read_blobs(links, cwd=cwd)
     _check_deadline(start, "reading the blobs")
-    kinds: dict = {}
-    for objsha, size, path in files:
-        kinds[path] = ("file", objsha, size)
-    for objsha, size, path in links:
-        kinds[path] = ("link", objsha, size)
-    submodule_paths = submodules
-    for path in submodule_paths:
-        kinds[path] = ("submodule", "", 0)
-    dir_paths = set()
-    for _, _, path in files + links:
-        parts = path.split("/")[:-1]
-        for depth in range(1, len(parts) + 1):
-            dir_paths.add("/".join(parts[:depth]))
-    bytes_by_sha = {}
-    for (objsha, _, _), data in zip(files, contents):
-        bytes_by_sha.setdefault(objsha, data)
-    link_targets = {}
-    for (_, _, path), data in zip(links, link_contents):
-        link_targets[path] = os.fsdecode(data)
     problems = []
     suppressions = []
     scanned_bytes = 0
@@ -1165,19 +1009,11 @@ def scan_git_tree(
 
     for (_, size, path), data in zip(files, contents):
         check(path, data, size)
-    for (_, _, link_path), _ in zip(links, link_contents):
-        target = _resolve_symlink(
-            link_path, link_targets[link_path], kinds, link_targets, dir_paths, submodule_paths
-        )
-        if target is None:
-            continue
-        sha_found, size_found = target
-        check(link_path, bytes_by_sha[sha_found], size_found)
     # A blob may have run past the deadline while it scanned: never report
     # success on an expired deadline. (A step-level timeout-minutes in
     # ci-guard.yml is the hard bound; this is the in-process one.)
     _check_deadline(start, "finishing the scan")
-    return problems, suppressions, len(files) + len(links), scanned_bytes, len(submodule_paths)
+    return problems, suppressions, len(files), scanned_bytes
 
 
 def escape_data(text: str) -> str:
@@ -1201,7 +1037,7 @@ def main(argv: list[str] | None = None) -> int:
         sha = fetch_pr_head(cwd=cwd) if args.fetch_and_scan_pr_head else args.git_tree
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise FailClosed("--git-tree needs a 40-char hex SHA")
-        problems, suppressions, files_scanned, bytes_scanned, submodules = scan_git_tree(
+        problems, suppressions, files_scanned, bytes_scanned = scan_git_tree(
             sha, cwd=cwd
         )
     except FailClosed as exc:
@@ -1210,11 +1046,6 @@ def main(argv: list[str] | None = None) -> int:
     lines = [
         f"hygiene-scan: scanned {files_scanned} file(s), {bytes_scanned} byte(s)"
     ]
-    if submodules:
-        lines.append(
-            "hygiene-scan: skipped "
-            f"{submodules} submodule(s) (directories, not scanned)"
-        )
     shown = problems[:MAX_LISTED_PROBLEMS]
     for problem in shown:
         lines.append(f"::error::{escape_data(f'hygiene-scan: {problem}')}")

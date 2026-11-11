@@ -498,88 +498,41 @@ def test_trusted_scan_flags_non_utf8_fixture_paths(tmp_path):
     assert "MAC" in proc.stdout
 
 
-# Review round 1 (PR #56): symlinks. The scanner read the link target
-# string as the file's content; the working-tree scan instead follows file
-# symlinks and applies the rules under the link's own name. The tree scan
-# must resolve relative in-tree links and scan the target blob's content
-# under the link's name.
-@NEEDS_GIT
-def test_trusted_scan_follows_symlink_under_link_name(tmp_path):
-    """Finding 2: notes.txt -> payload.py is flagged via notes.txt."""
-    payload = PW + "=" + "hunter2" + "hunter2" + "\n"
-    repo, sha = _git_repo(
-        tmp_path, {"payload.py": payload}, links={"notes.txt": "payload.py"}
-    )
-    # Parity with the working-tree scan, which follows the link: the same
-    # bytes under the link's name are a problem.
-    assert hygiene_scan.scan_bytes("notes.txt", payload.encode())
-    # ... while the target's own Python name stays exempt.
-    assert not hygiene_scan.scan_bytes("payload.py", payload.encode())
-    proc = _scan_tree(repo, sha)
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "notes.txt" in proc.stdout
-
-
-@NEEDS_GIT
-def test_trusted_scan_follows_fixture_symlink(tmp_path):
-    """Finding 2: a fixture-named link gets the fixture-only checks."""
-    repo, sha = _git_repo(
-        tmp_path,
-        {"tests/fixtures/demo/blob": _bypass_fixture_json()},
-        links={"tests/fixtures/demo/leak.json": "blob"},
-    )
-    proc = _scan_tree(repo, sha)
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    # The target blob's content under the link's fixture name: bare MAC and
-    # SSID checks apply (not just "not valid JSON" for the target string).
-    assert "MAC" in proc.stdout
-    assert "SSID" in proc.stdout
-
-
-@NEEDS_GIT
-def test_trusted_scan_follows_symlink_chains(tmp_path):
-    """Finding 2: link -> link -> file resolves under the outer link's name."""
-    payload = PW + "=" + "hunter2" + "hunter2" + "\n"
-    repo, sha = _git_repo(
-        tmp_path,
-        {"sub/payload.py": payload},
-        links={"sub/mid": "payload.py", "outer.txt": "sub/mid"},
-    )
-    proc = _scan_tree(repo, sha)
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "outer.txt" in proc.stdout
-
-
-@NEEDS_GIT
-def test_trusted_scan_skips_symlink_to_directory(tmp_path):
-    """Finding 2: a link to a directory is skipped, like the working tree.
-
-    The directory name itself would be flagged as content, so scanning the
-    target string instead of skipping fails this test.
-    """
-    dirname = ".".join(REAL10)
-    repo, sha = _git_repo(
-        tmp_path,
-        {f"{dirname}/inner.txt": "docs range 192.0.2.1\n"},
-        links={"dirlink": dirname},
-    )
-    proc = _scan_tree(repo, sha)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "clean" in proc.stdout
-
-
+# Review round 3 (PR #56): symlinks and submodules are not allowed in this
+# repo. Resolving links produced a blocker in every review round (a
+# submodule escape slipped past the scan; a repeated alias was rejected as
+# a cycle), so any symlink entry (mode 120000) or gitlink entry (mode
+# 160000) anywhere in the head tree fails the check outright, with a fixed
+# message naming only the entry's path. Each case below must exit 2: a
+# plain link to a file, a link to a directory, a dangling link, an absolute
+# or escaping target, a link cycle, a link named like a fixture, and a
+# nested-directory link.
 @pytest.mark.parametrize(
-    "target",
-    ["/abs/path", "../escape", "dangling-target", "loop-b"],
+    "files,links",
+    [
+        ({"payload.py": "hello\n"}, {"notes.txt": "payload.py"}),
+        ({"subdir/inner.txt": "hello\n"}, {"dirlink": "subdir"}),
+        ({"ok.txt": "hello\n"}, {"bad": "dangling-target"}),
+        ({"ok.txt": "hello\n"}, {"bad": "/abs/path"}),
+        ({"ok.txt": "hello\n"}, {"sub/bad": "../escape"}),
+        ({"ok.txt": "hello\n"}, {"loop-a": "loop-b", "loop-b": "loop-a"}),
+        (
+            {"blob": "hello\n"},
+            {"tests/fixtures/demo/leak.json": "blob"},
+        ),
+        (
+            {"dir/sub/payload.py": "hello\n"},
+            {"dir/mid": "payload.py", "outer.txt": "dir/mid"},
+        ),
+    ],
 )
 @NEEDS_GIT
-def test_trusted_scan_fails_closed_on_unresolvable_symlink(tmp_path, target):
-    """Finding 2: absolute, escaping, dangling, and cyclic links fail closed."""
-    links = {"loop-a": "loop-b", "loop-b": "loop-a"} if target == "loop-b" else {"bad": target}
-    repo, sha = _git_repo(tmp_path, {"ok.txt": "hello\n"}, links=links)
+def test_trusted_scan_rejects_any_symlink(tmp_path, files, links):
+    """Round 3: every symlink shape fails closed, never resolved."""
+    repo, sha = _git_repo(tmp_path, files, links=links)
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 2, proc.stdout + proc.stderr
-    assert "symlink" in proc.stdout.lower()
+    assert "symlinks and submodules are not allowed" in proc.stdout
 
 
 # Review round 1 (PR #56): the inherited credential regexes backtrack
@@ -737,12 +690,13 @@ def test_scan_deadline_fails_closed(monkeypatch):
         raise AssertionError("expected FailClosed on an exhausted deadline")
 
 
-# Review round 1 (PR #56): for a mode-160000 entry the size field is "-",
-# and int(size) ran before the type check, so any submodule exited 2. The
-# type must be checked first and gitlinks skipped like the working tree.
+# Review round 3 (PR #56): gitlinks are not allowed in this repo either.
+# A mode-160000 entry used to be skipped silently (round 1) and later let a
+# submodule escape slip past the link resolver (round 3, finding 1); now any
+# gitlink anywhere in the head tree fails the check outright.
 @NEEDS_GIT
-def test_trusted_scan_skips_gitlinks(tmp_path):
-    """Finding 5: a submodule entry is skipped and stated, not a crash."""
+def test_trusted_scan_rejects_any_gitlink(tmp_path):
+    """Round 3: a submodule entry fails closed, never skipped."""
     repo, sha = _git_repo(tmp_path, {"README.md": "hello\n"})
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
@@ -767,8 +721,8 @@ def test_trusted_scan_skips_gitlinks(tmp_path):
     ).stdout.strip()
     assert sha2 != sha
     proc = _scan_tree(repo, sha2)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "submodule" in proc.stdout.lower()
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "symlinks and submodules are not allowed" in proc.stdout
 
 
 # Review round 1 (PR #56): the suppression listing printed the full
@@ -902,7 +856,7 @@ def test_trusted_scan_split_records_still_flag_the_leak(tmp_path, monkeypatch):
     monkeypatch.setattr(hygiene_scan, "_LS_TREE_CHUNK", 7)
     leak = PW + '="' + "hunter2" + "hunter2" + '"\n'
     repo, sha = _git_repo(tmp_path, {"notes.txt": leak, "other.txt": "hello\n"})
-    problems, _, _, _, _ = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
+    problems, _, _, _ = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
     assert any("credential assignment" in p for p in problems), problems
 
 
@@ -939,202 +893,6 @@ def test_trusted_scan_forged_metadata_at_read_boundary(tmp_path):
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "credential assignment" in proc.stdout
-
-
-# Review round 2 (PR #56), finding 2 (BLOCKER): the resolver removed
-# ``..`` before resolving intermediate symlinks, while the filesystem
-# follows symlinks first. ``alias -> dir/sub`` with
-# ``tests/fixtures/leak.json -> ../../alias/../secret`` read the root
-# ``secret`` instead of ``dir/secret``; valid ``alias/file`` targets were
-# rejected and a link to the repo root was called dangling. Components now
-# resolve in filesystem order, checked against a real checkout below.
-def _git_repo_at(base, files, links=None):
-    """Like _git_repo but rooted at ``base`` so a test can build several."""
-    import shutil as _shutil
-
-    repo = base / "repo"
-    if repo.exists():
-        _shutil.rmtree(repo)
-    repo.mkdir(parents=True)
-
-    def run(*args, **kwargs):
-        return subprocess.run(
-            ["git", *args], cwd=repo, check=True, capture_output=True, **kwargs
-        )
-
-    run("init", "-q")
-    for rel, text in files.items():
-        target = repo / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text)
-    for rel, target_str in (links or {}).items():
-        link = repo / rel
-        link.parent.mkdir(parents=True, exist_ok=True)
-        if link.is_symlink() or link.exists():
-            link.unlink()
-        link.symlink_to(target_str)
-    run("add", "-A")
-    run(
-        "-c", "user.name=test",
-        "-c", "user.email=test@example.invalid",
-        "commit", "-qm", "test",
-    )
-    return repo, run("rev-parse", "HEAD").stdout.decode().strip()
-
-
-def _tree_maps(repo, sha):
-    """The (kinds, link_targets, dir_paths, submodules) scan_git_tree uses."""
-    files, links, submodules = hygiene_scan.list_tree_blobs(sha, cwd=str(repo))
-    link_contents = hygiene_scan.read_blobs(links, cwd=str(repo))
-    kinds = {}
-    for objsha, size, path in files:
-        kinds[path] = ("file", objsha, size)
-    for objsha, size, path in links:
-        kinds[path] = ("link", objsha, size)
-    for path in submodules:
-        kinds[path] = ("submodule", "", 0)
-    dir_paths = set()
-    for _, _, path in files + links:
-        parts = path.split("/")[:-1]
-        for depth in range(1, len(parts) + 1):
-            dir_paths.add("/".join(parts[:depth]))
-    link_targets = {}
-    for (_, _, path), data in zip(links, link_contents):
-        link_targets[path] = os.fsdecode(data)
-    return kinds, link_targets, dir_paths, submodules
-
-
-_FIXTURE_LEAK = '{"ss' + 'id": "leak' + '-bad"}'
-
-
-@NEEDS_GIT
-def test_trusted_scan_symlink_resolution_matches_realpath(tmp_path):
-    """Finding 2 (round 2): the tree resolution equals the checkout's own."""
-    import os
-
-    ok = "ok\n"
-    cases = [
-        # The reviewer's repro: alias -> dir/sub, link -> ../../alias/../secret.
-        (
-            {"secret": "{}\n", "dir/secret": _FIXTURE_LEAK, "dir/sub/ok": ok},
-            {"alias": "dir/sub", "tests/fixtures/leak.json": "../../alias/../secret"},
-            "tests/fixtures/leak.json",
-        ),
-        # Chains through directory links, with ./, // and sub/../.
-        (
-            {"dir/file": _FIXTURE_LEAK, "dir/sub/ok": ok},
-            {"alias": "dir", "alias2": "alias",
-             "tests/fixtures/x.json": "../../alias2/./sub/../file"},
-            "tests/fixtures/x.json",
-        ),
-        # Doubled slashes collapse like the filesystem's.
-        (
-            {"dir/file": _FIXTURE_LEAK},
-            {"tests/fixtures/x.json": "../../dir//file"},
-            "tests/fixtures/x.json",
-        ),
-        # A link to a directory (via ..) is skipped, not dangling.
-        (
-            {"dir/file": _FIXTURE_LEAK},
-            {"alias": "dir", "tests/fixtures/x.json": "../../alias/.."},
-            "tests/fixtures/x.json",
-        ),
-        # A link to the repo root is a directory, not dangling.
-        (
-            {"dir/file": _FIXTURE_LEAK},
-            {"tests/fixtures/rootlink": "../.."},
-            "tests/fixtures/rootlink",
-        ),
-        # "." is the link's own directory: skipped.
-        (
-            {"dir/file": _FIXTURE_LEAK},
-            {"tests/fixtures/dotlink": "."},
-            "tests/fixtures/dotlink",
-        ),
-    ]
-    for i, (files, links, checked) in enumerate(cases):
-        base = tmp_path / f"linkcase{i}"
-        repo, sha = _git_repo_at(base, files, links)
-        co = base / "co"
-        co.mkdir()
-        for rel, text in files.items():
-            target = co / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text)
-        for rel, target_str in links.items():
-            link = co / rel
-            link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(target_str)
-        kinds, link_targets, dir_paths, submodules = _tree_maps(repo, sha)
-        resolved = os.path.realpath(co / checked)
-        if os.path.isfile(co / checked):
-            expected = os.path.relpath(resolved, co).replace(os.sep, "/")
-            got = hygiene_scan._resolve_symlink(
-                checked, link_targets[checked], kinds, link_targets,
-                dir_paths, submodules,
-            )
-            assert got is not None, f"case {i}: filesystem has a file"
-            got_sha, got_size = got
-            # Same tree path, and the blob holds the checkout's bytes.
-            assert _tree_path_for(repo, sha, got_sha) == expected, f"case {i}"
-            data = hygiene_scan.read_blobs(
-                [(got_sha, got_size, expected)], cwd=str(repo)
-            )[0]
-            assert data == (co / expected).read_bytes(), f"case {i}"
-        elif os.path.isdir(co / checked):
-            assert hygiene_scan._resolve_symlink(
-                checked, link_targets[checked], kinds, link_targets,
-                dir_paths, submodules,
-            ) is None, f"case {i}: expected a directory skip"
-            problems, _, _, _, _ = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
-            assert not [p for p in problems if p.startswith(checked + ":")], problems
-        else:
-            with pytest.raises(hygiene_scan.FailClosed):
-                hygiene_scan._resolve_symlink(
-                    checked, link_targets[checked], kinds, link_targets,
-                    dir_paths, submodules,
-                )
-
-
-def _tree_path_for(repo, sha, blob_sha):
-    """First tree path holding ``blob_sha`` (test helper for the parity check)."""
-    files, _, _ = hygiene_scan.list_tree_blobs(sha, cwd=str(repo))
-    for sha_, _, path in files:
-        if sha_ == blob_sha:
-            return path
-    raise AssertionError("blob missing from its own tree")
-
-
-@NEEDS_GIT
-def test_trusted_scan_symlink_repro_reads_dir_secret(tmp_path):
-    """Finding 2 (round 2): the repro's leak is flagged under the link name."""
-    ok = "ok\n"
-    repo, sha = _git_repo(
-        tmp_path,
-        {"secret": "{}\n", "dir/secret": _FIXTURE_LEAK, "dir/sub/ok": ok},
-        links={"alias": "dir/sub", "tests/fixtures/leak.json": "../../alias/../secret"},
-    )
-    proc = _scan_tree(repo, sha)
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "tests/fixtures/leak.json" in proc.stdout
-    assert "SSID" in proc.stdout
-
-
-@NEEDS_GIT
-def test_trusted_scan_symlink_into_git_fails_closed(tmp_path):
-    """Finding 2 (round 2): .git is not part of the tree, so it fails closed.
-
-    The checkout really does resolve ``.git/config`` to a file, but the
-    tree listing never contains ``.git``: scanning it would read data
-    outside the commit, so the scanner refuses instead.
-    """
-    repo, sha = _git_repo(
-        tmp_path,
-        {"dir/file": "{}\n"},
-        links={"tests/fixtures/x.json": "../../.git/config"},
-    )
-    with pytest.raises(hygiene_scan.FailClosed):
-        hygiene_scan.scan_git_tree(sha, cwd=str(repo))
 
 
 # Review round 2 (PR #56), finding 3 (SHOULD-FIX): the JSON-web-token and
