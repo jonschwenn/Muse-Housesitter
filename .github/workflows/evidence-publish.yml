@@ -50,10 +50,10 @@ permissions: {}
 # owner-plus-branch key is ambiguous too (alice/bob-fix and alice-bob/fix
 # collide, and group names are case-insensitive), so unrelated PRs could
 # displace each other. Instead, every write below re-checks freshness
-# first: a stale run never writes, two runs for the same head write the
-# same content, and a run for a newer head necessarily starts after that
-# push, so it writes last. The pr-evidence push keeps its fetch-and-retry
-# for concurrent pushes to the branch; no other concurrency control exists.
+# first, so a stale run never writes; the comment job alone is serialised
+# per PR (see its `concurrency` below) and applies the marker rules there.
+# The pr-evidence push keeps its fetch-and-retry for concurrent pushes to
+# the branch.
 
 jobs:
   resolve:
