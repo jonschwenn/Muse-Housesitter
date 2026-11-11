@@ -156,6 +156,22 @@ def _wordchar_run_start(text: str, pos: int, stop: int) -> int:
     return pos
 
 
+def _key_match_possible(run_str: str) -> bool:
+    """Whether a keyword could end at this run's end (exact pre-filter).
+
+    Every keyword tail is ASCII (``password`` ends ``d``, ``token`` ends
+    ``n``, ``x_\\w+`` needs a literal ``x_``), and regex IGNORECASE on an
+    ASCII run matches exactly the ASCII case pairs — so an ASCII run whose
+    lowered end is no tail and holds no ``x_`` can match nothing below.
+    Non-ASCII runs take the slow path. Callers still run the full decider,
+    so this only skips what it proves impossible.
+    """
+    if not run_str.isascii():
+        return True
+    lowered = run_str.lower()
+    return lowered.endswith(_CRED_LITS) or "x_" in lowered
+
+
 def _key_match_start(text: str, run_start: int, end: int, run_str: str):
     """``(start, key_at)`` of the naive key match ending at ``end``, or None.
 
@@ -208,7 +224,10 @@ def _credential_assignment_spans(text: str) -> list[tuple[str, str | None, int]]
             follower = text[end]
             if follower not in "\"':=" and not follower.isspace():
                 continue
-        best = _key_match_start(text, run_start, end, run.group(0))
+        run_str = run.group(0)
+        if not _key_match_possible(run_str):
+            continue
+        best = _key_match_start(text, run_start, end, run_str)
         if best is None:
             continue
         rest = _CRED_REST_RE.match(text, end)
@@ -259,7 +278,10 @@ def _unquoted_assignment_spans(text: str) -> list[tuple[str, str | None, int]]:
             run_start, end = run.span()
             # The naive key starts exactly here: ``\\w*`` cannot reach back
             # over the spaces, and the keyword cannot end mid-run.
-            best = _key_match_start(line, run_start, end, run.group(0))
+            run_str = run.group(0)
+            if not _key_match_possible(run_str):
+                continue
+            best = _key_match_start(line, run_start, end, run_str)
             if best is None or best[0] != pos:
                 continue
             rest = _UNQUOTED_REST_RE.match(line, end)

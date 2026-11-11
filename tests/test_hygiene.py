@@ -1168,10 +1168,12 @@ def test_ip_fast_paths_agree_with_ipaddress_reference():
 @pytest.mark.parametrize(
     "line",
     [
-        # Built at run time: a bare documentation-range-exempt literal and
-        # a bare credential-looking literal must never appear in the repo.
+        # Built at run time: bare documentation-range-exempt literals and
+        # bare credential-looking literals must never appear in the repo.
+        # The IP line hits the address check; the token line hits the
+        # token-format check.
         ".".join(["10", "1", "1", "1"]) + "\n",
-        "tok" + "en=abcdefgh\n",
+        "ey" + "J" + "A" * 8 + ".ey" + "J" + "B" * 8 + "\n",
     ],
 )
 def test_scan_bytes_is_fast_on_a_2mb_file_of_repeated_hits(line):
