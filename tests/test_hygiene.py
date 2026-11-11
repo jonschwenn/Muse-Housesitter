@@ -1123,13 +1123,23 @@ def test_ip_fast_paths_agree_with_ipaddress_reference():
         assert got == expected, quad
     hex4 = ["0", "00", "1", "2001", "db8", "DB8", "ff00", "FF02", "fe80",
             "ffff", "0000", "0001", "abcd", "1234"]
+    # Adversarial colon shapes: trailing/leading single colons, doubled
+    # compression, bare and trailing compression.
+    hard_shapes = [
+        "fe80::02:00:00:", "1:2:3:4:5:6:7:", ":1:2:3:4:5:6:7", "1::2::",
+        "::", "1::", "::1", "1:2::", "::ffff:192.0.2.1", "2001:db8::1",
+        "2001:db8:::1",
+    ]
+    v6_texts = []
     for _ in range(500):
         groups = [rng.choice(hex4) for _ in range(rng.randint(1, 8))]
         text = ":".join(groups)
         if rng.random() < 0.5:
             at = rng.randint(0, len(groups))
             text = ":".join(groups[:at]) + "::" + ":".join(groups[at:])
-        text += "\n"
+        v6_texts.append(text + "\n")
+    v6_texts.extend(shape + "\n" for shape in hard_shapes)
+    for text in v6_texts:
         got = hygiene_scan.ip_problems(text)
         expected = []
         for found in hygiene_scan.IPV6_RE.finditer(text):

@@ -565,18 +565,24 @@ def _ipv6_allowed_head(candidate: str) -> bool | None:
 
     Returns False when the candidate is provably a valid but disallowed
     address, None when a full parse is needed. Validity comes first: the
-    slow path skips unparseable candidates (``1:2:3:4:5``, ``fe80::1::2``),
-    so the fast path must too — only an exactly-once ``::`` filling at
-    least one group, or eight full groups, parses. Then ``2001`` may open
-    2001:db8::/32, ``ff00``-``ffff`` may open ff00::/8, and a leading or
-    all-zero group may still be ::1, so those also take the slow path.
-    Anything else is valid (regex-shaped groups of at most four hex
-    digits) and outside every allowed net.
+    slow path skips unparseable candidates (``1:2:3:4:5``, ``fe80::1::2``,
+    a trailing single colon like ``fe80::02:00:00:``), so the fast path
+    must too — only an exactly-once ``::`` filling at least one group and
+    not ending in a single colon, or eight full groups, parses. Then
+    ``2001`` may open 2001:db8::/32, ``ff00``-``ffff`` may open ff00::/8,
+    and a leading or all-zero group may still be ::1, so those also take
+    the slow path. Anything else is valid (regex-shaped groups of at most
+    four hex digits) and outside every allowed net.
     """
     if "::" in candidate:
         if candidate.count("::") != 1:
             return None
         if sum(1 for group in candidate.split(":") if group) > 7:
+            return None
+        if candidate.endswith(":") and not candidate.endswith("::"):
+            # A trailing single colon (``fe80::02:00:00:``) is not an
+            # address; only a trailing ``::`` compresses. The slow path
+            # rejects it, so the fast path must not decide it.
             return None
     else:
         groups = candidate.split(":")
