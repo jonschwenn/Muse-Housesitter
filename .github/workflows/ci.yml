@@ -172,6 +172,19 @@ jobs:
           --results-out results.json --head-sha "$HEAD_SHA"
       - name: Show it in the job summary
         run: cat evidence.md >> "$GITHUB_STEP_SUMMARY"
+      # Fail the job when the privileged publisher would refuse this
+      # artifact, turning ci-ok red before anything uploads. This runs the
+      # PR's own copy of the checks, so it catches honest mistakes only;
+      # the publisher's fixed notice (evidence-publish.yml, running main's
+      # code) covers hostile ones.
+      - name: Validate the evidence artifact
+        env:
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >
+          python head/scripts/evidence_checks.py check
+          --artifact-dir . --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evidence

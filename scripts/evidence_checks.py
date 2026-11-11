@@ -13,6 +13,7 @@ screenshots plus ``ui_manifest.json`` from ``ui_evidence``).
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import struct
@@ -376,9 +377,50 @@ def validate_png(data: bytes) -> list[str]:
     return []
 
 
+def cmd_check(args) -> int:
+    """Run the publisher's refusal decision over an artifact directory.
+
+    Used by the ``ci.yml`` evidence job on its own just-built artifact, so
+    an honest mistake fails the job (red ``ci-ok``) before upload. This
+    runs the PR's own copy of every script, so it catches honest mistakes
+    only; the publisher's notice (main's code) covers hostile artifacts.
+    Exit codes mirror the publisher: 0 the publisher would publish, 1 it
+    would refuse (the reason prints to stdout), 2 bad caller arguments.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import publish_evidence  # noqa: E402  (same copy: the PR's, or main's)
+
+    try:
+        publish_evidence.render_comment(
+            Path(args.artifact_dir), args.repo, args.pr, args.head_sha
+        )
+    except publish_evidence.PublishError as exc:
+        print(f"evidence_checks: publisher would refuse: {exc.reason}")
+        return 1
+    except ValueError as exc:
+        print(f"evidence_checks: bad argument: {exc}", file=sys.stderr)
+        return 2
+    print("evidence_checks: publisher would publish")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    print("evidence_checks: no subcommand yet", file=sys.stderr)
-    return 2
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    check = sub.add_parser(
+        "check", help="run the publisher's refusal decision over an artifact"
+    )
+    check.add_argument("--artifact-dir", required=True)
+    check.add_argument("--repo", required=True)
+    check.add_argument("--pr", required=True, type=int)
+    check.add_argument("--head-sha", required=True)
+    check.set_defaults(func=cmd_check)
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except ValueError as exc:
+        print(f"evidence_checks: bad argument: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

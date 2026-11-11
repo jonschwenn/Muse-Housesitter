@@ -9,6 +9,7 @@ scenario ids that exist in MAIN's scenarios list unless marked new-in-PR.
 from __future__ import annotations
 
 import importlib.util
+import json
 import struct
 import zlib
 from pathlib import Path
@@ -405,3 +406,115 @@ def test_png_height_cap_matches_capture_page_cap():
     ui_evidence = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ui_evidence)
     assert evidence_checks.PNG_MAX_HEIGHT == ui_evidence.MAX_PAGE_HEIGHT_PX
+
+
+# Part 5 (Decision 4, option A): the CI evidence gate. ----------------------
+#
+# `evidence_checks.py check` runs the same refusal decision the privileged
+# publisher makes, so an honest mistake turns ci-ok red before upload. (A
+# hostile PR controls this copy, so the publisher's own notice, running
+# main's code, still covers hostile artifacts.)
+
+
+def _gate_artifact(tmp_path, results=None, png=True):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    doc = {
+        "version": 1,
+        "metadata": {"generator": "scripts/pr_evidence.py", "head_sha": "a" * 40},
+        "scenarios": [
+            {
+                "id": "version",
+                "title": "t",
+                "command": ["housesitter", "--version"],
+                "exit_before": 0,
+                "exit_after": 0,
+                "expected_exit": 0,
+                "size_before": 1,
+                "size_after": 1,
+                "changed": False,
+                "new_in_pr": False,
+                "before": "$ exit 0\n",
+                "after": "$ exit 0\n",
+            }
+        ],
+        "removed": [],
+    }
+    if results is not None:
+        doc.update(results)
+    (artifact / "results.json").write_text(json.dumps(doc))
+    if png:
+        spec = importlib.util.spec_from_file_location(
+            "ui_evidence_gate_pin", ROOT / "scripts" / "ui_evidence.py"
+        )
+        ui_evidence = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ui_evidence)
+        ui_out = artifact / "ui_out"
+        ui_out.mkdir()
+        shot = ui_evidence.encode_png(2, 2, 6, bytes([1, 2, 3, 4]) * 4)
+        (ui_out / "typical__index-phone__head.png").write_bytes(shot)
+        (ui_out / "ui_manifest.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "captures": [
+                        {
+                            "fixture": "typical",
+                            "view": "index-phone",
+                            "status": "added",
+                            "base": None,
+                            "head": "typical__index-phone__head.png",
+                            "diff": None,
+                            "head_problems": [],
+                        }
+                    ],
+                }
+            )
+        )
+    return artifact
+
+
+def _check(artifact, head_sha="a" * 40):
+    return evidence_checks.main(
+        [
+            "check",
+            "--artifact-dir", str(artifact),
+            "--repo", "example-owner/example-repo",
+            "--pr", "7",
+            "--head-sha", head_sha,
+        ]
+    )
+
+
+def test_check_passes_a_valid_artifact(tmp_path, capsys):
+    assert _check(_gate_artifact(tmp_path)) == 0
+
+
+def test_check_refuses_a_bad_schema(tmp_path, capsys):
+    artifact = _gate_artifact(tmp_path)
+    doc = json.loads((artifact / "results.json").read_text())
+    doc["scenarios"][0]["id"] = "forged"
+    (artifact / "results.json").write_text(json.dumps(doc))
+    assert _check(artifact) == 1
+    assert "bad_schema" in capsys.readouterr().out
+
+
+def test_check_refuses_a_stale_head(tmp_path, capsys):
+    assert _check(_gate_artifact(tmp_path), head_sha="b" * 40) == 1
+    assert "stale_head" in capsys.readouterr().out
+
+
+def test_check_refuses_a_missing_artifact(tmp_path, capsys):
+    assert _check(tmp_path / "no-such-dir") == 1
+    assert "missing" in capsys.readouterr().out
+
+
+def test_check_rejects_bad_caller_arguments(tmp_path):
+    artifact = _gate_artifact(tmp_path)
+    assert (
+        evidence_checks.main(
+            ["check", "--artifact-dir", str(artifact), "--repo", "nope",
+             "--pr", "7", "--head-sha", "a" * 40]
+        )
+        == 2
+    )

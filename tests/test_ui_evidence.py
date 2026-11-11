@@ -803,6 +803,17 @@ def test_evidence_job_is_text_only():
     assert "--ui-artifacts" not in workflow
 
 
+def test_evidence_job_validates_before_upload():
+    # The evidence job runs the shared checks on its own artifact before
+    # upload and fails when the publisher would refuse (honest mistakes
+    # only: the PR controls this copy, so the publisher's notice still
+    # covers hostile artifacts).
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    job = workflow[workflow.index("\n  evidence:\n"):]
+    assert "evidence_checks.py check" in job
+    assert job.index("evidence_checks.py check") < job.index("upload-artifact")
+
+
 def test_workflows_pin_actions_by_sha():
     import re
 
