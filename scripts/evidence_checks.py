@@ -395,7 +395,9 @@ def cmd_check(args) -> int:
             Path(args.artifact_dir), args.repo, args.pr, args.head_sha
         )
     except publish_evidence.PublishError as exc:
-        print(f"evidence_checks: publisher would refuse: {exc.reason}")
+        # The message goes to the job log (PR-visible anyway) so an honest
+        # mistake is debuggable; only the fixed reason reaches the comment.
+        print(f"evidence_checks: publisher would refuse: {exc.reason}: {exc}")
         return 1
     except ValueError as exc:
         print(f"evidence_checks: bad argument: {exc}", file=sys.stderr)

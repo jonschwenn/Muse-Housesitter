@@ -176,15 +176,30 @@ jobs:
       # artifact, turning ci-ok red before anything uploads. This runs the
       # PR's own copy of the checks, so it catches honest mistakes only;
       # the publisher's fixed notice (evidence-publish.yml, running main's
-      # code) covers hostile ones.
+      # code) covers hostile ones. The gate stages exactly the file set the
+      # upload below would carry: ui_evidence also leaves .md debugging
+      # copies beside the PNGs, which the publisher never sees, so checking
+      # the raw directory would false-refuse every honest run.
       - name: Validate the evidence artifact
         env:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: >
-          python head/scripts/evidence_checks.py check
-          --artifact-dir . --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA"
+        run: |
+          set -euo pipefail
+          rm -rf staged && mkdir -p staged
+          cp evidence.md results.json staged/
+          if [ -d ui_out ]; then
+            mkdir -p staged/ui_out
+            if [ -f ui_out/ui_manifest.json ]; then
+              cp ui_out/ui_manifest.json staged/ui_out/
+            fi
+            shopt -s nullglob
+            pngs=(ui_out/*.png)
+            if (( ${#pngs[@]} > 0 )); then cp "${pngs[@]}" staged/ui_out/; fi
+          fi
+          python head/scripts/evidence_checks.py check \
+            --artifact-dir staged --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evidence
