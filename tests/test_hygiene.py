@@ -856,7 +856,7 @@ def test_trusted_scan_split_records_still_flag_the_leak(tmp_path, monkeypatch):
     monkeypatch.setattr(hygiene_scan, "_LS_TREE_CHUNK", 7)
     leak = PW + '="' + "hunter2" + "hunter2" + '"\n'
     repo, sha = _git_repo(tmp_path, {"notes.txt": leak, "other.txt": "hello\n"})
-    problems, _, _, _ = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
+    problems, _, _, _, _, _ = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
     assert any("credential assignment" in p for p in problems), problems
 
 
@@ -1262,15 +1262,70 @@ def test_max_cap_tree_completes_well_under_deadline(tmp_path):
     tree_input = b"".join(entry + f"f{n:05d}".encode() + b"\n" for n in range(10_000))
     sha = run("mktree", input=tree_input).stdout.decode().strip()
     start = time.monotonic()
-    problems, suppressions, files_scanned, bytes_scanned = hygiene_scan.scan_git_tree(
-        sha, cwd=str(repo)
-    )
+    (
+        problems,
+        problem_total,
+        suppressions,
+        suppression_total,
+        files_scanned,
+        bytes_scanned,
+    ) = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
     elapsed = time.monotonic() - start
     print(f"\nceiling: 10,000 entries / 32,000,000 bytes in {elapsed:.1f}s")
     assert (files_scanned, bytes_scanned) == (10_000, 32_000_000)
     assert problems == [], problems[:3]
     assert suppressions == []
+    assert problem_total == 0
+    assert suppression_total == 0
     assert elapsed < 120, f"ceiling scan took {elapsed:.1f}s"
+
+
+def test_counted_totals_match_underlying_findings():
+    """Finding 3 (round 4): totals count findings, not capped messages."""
+    import json
+
+    # Built at run time: bare documentation-range-exempt literals must never
+    # appear in the repo.
+    loop4 = ".".join(["10", "1", "1", "1"]) + "\n"
+    loop_mac = ":".join(REAL_MAC) + "\n"
+    messages, total = hygiene_scan._ip_problems_counted(loop4 * 2000)
+    assert total == 2000
+    assert messages[-1] == "... and 1000 more IP address problem(s) in this file"
+    assert len(messages) == 1001
+    messages, total = hygiene_scan._mac_problems_counted(loop_mac * 2000, bare=True)
+    assert total == 2000
+    assert messages[-1] == "... and 1000 more MAC address problem(s) in this file"
+    assert len(messages) == 1001
+    messages, total = hygiene_scan._secret_problems_counted(("ghp_" + "A" * 30 + "\n") * 2000)
+    assert total == 2000
+    assert messages[-1] == "... and 1000 more likely-secret problem(s) in this file"
+    assert len(messages) == 1001
+    messages, total = hygiene_scan._scan_text_counted("notes.txt", loop4 * 2000)
+    assert total == 2000
+    assert len(messages) == 1001
+    fixture = json.dumps([{"ssid": "bad"}] * 2000)
+    messages, total = hygiene_scan._scan_text_counted("tests/fixtures/t.json", fixture)
+    assert total == 2000
+    assert messages[-1] == "... and 1000 more SSID problem(s) in this file"
+    assert len(messages) == 1001
+    planted = json.dumps([{"ssid": "bad"}])
+    messages, total = hygiene_scan._scan_text_counted("tests/fixtures/t.json", planted)
+    assert (messages, total) == (["SSID value (3 chars) at line 1 does not end in -example"], 1)
+    messages, total = hygiene_scan._scan_text_counted(
+        "tests/fixtures/t.json", "not json"
+    )
+    assert (messages, total) == (["fixture is not valid JSON"], 1)
+
+
+@NEEDS_GIT
+def test_cli_totals_count_underlying_findings(tmp_path):
+    """Finding 3 (round 4): the CLI reports 2,000 findings, not 1,001."""
+    loop4 = ".".join(["10", "1", "1", "1"]) + "\n"
+    repo, sha = _git_repo(tmp_path, {"notes.txt": loop4 * 2000})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "::error::hygiene-scan: ... and 1800 more problem(s)" in proc.stdout
+    assert "::error::hygiene-scan: 2000 problem(s) found" in proc.stdout
 
 
 # Review round 2 (PR #56), finding 5 (SHOULD-FIX): problem messages
