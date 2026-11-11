@@ -555,10 +555,12 @@ The tests check:
   reads (AP, radio table, radio stats, WiFi client, no-AP device, sysinfo)
   is made missing, null, `""`, a list, an object, `true`, `2**60`, or a
   20-digit numeric string on one record of the `unifi_os` house. The
-  snapshot still succeeds with the declared types, every other record is
-  unchanged, and the affected output is null, `"unknown"`, the string kept
-  as sent where §4 allows it, or the record dropped or moved as §4 says.
-  Each case's saved snapshot reads back unchanged through `get`.
+  snapshot still succeeds with the declared types, and every other record
+  is unchanged. The affected output, and everything derived from it (other
+  records' AP join, the summary, list order, and warnings), is pinned value
+  by value. Where §4 does not say what an odd value gives, the test pins
+  the current behaviour. Each case's saved snapshot reads back unchanged
+  through a whole-snapshot `get`.
 - No-AP ordering, de-duplication, cap warning, full summary count, identifier
   policy, and unchanged compact form.
 - `get` accepts a snapshot saved without `no_ap_clients`, preserves older

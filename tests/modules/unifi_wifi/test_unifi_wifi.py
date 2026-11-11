@@ -83,7 +83,8 @@ def run_case(
     """Run one command against a fixture server; return (outcome, run_info).
 
     ``tmp_path`` is the test's pytest ``tmp_path``: each call gets its own
-    fresh HOME inside it, so pytest removes it (no /tmp leak). With
+    fresh HOME inside it, which pytest prunes (it keeps only the last few
+    runs) instead of one new /tmp directory per call forever. With
     ``shared`` (a SharedServer), that server answers with ``routes`` and
     stays open; ``requests`` lists only this run's requests.
     """
@@ -3136,7 +3137,8 @@ _MODEL_PATTERN = r"[A-Za-z0-9._+-]{1,64}"
 _JOIN_LOST = _radio_set(channel=100, **_NO_RADIO_STATS)
 
 #: (case id, endpoint, upstream path, effect). The path starts at the
-#: endpoint's ``data`` list; every field normalise.py reads is listed.
+#: endpoint's ``data`` list; every upstream field the module reads during
+#: collection is listed (sysinfo ``version`` is read in __init__.py).
 SWEEP_FIELDS = (
     # stat/device: AP1 ("Living Room")
     ("ap.type", "device", (0, "type"), _ap_dropped_silently),
@@ -3351,8 +3353,9 @@ def test_odd_upstream_value_never_breaks_snapshot(
     assert outcome.envelope["data"] == expected.data()
     assert outcome.envelope["warnings"] == expected.warnings
     assert outcome.envelope["source"] == expected.source
-    # What was saved reads back unchanged: collection never writes a value
-    # that get's re-validation (§4.4) would call damaged or rewrite.
+    # What was saved reads back unchanged: this case's collection wrote
+    # nothing that get's re-validation (§4.4) calls damaged or rewrites.
+    assert info["saved_obj"] is not None, "the snapshot was not saved"
     assert info["saved_obj"]["data"] == outcome.envelope["data"]
     readback = runner.run_command(
         "housesitter.unifi_wifi.get", {"id": outcome.envelope["saved"]},
