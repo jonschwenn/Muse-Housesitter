@@ -834,3 +834,122 @@ def test_select_ui_captures_reports_exactly_the_pictured_files():
         "typical__index-desktop__head.png",
     ]
     assert pictured["same-fix/index-phone"] == []
+
+
+# Part 1 (Decision 13, option A): the publisher rebuilds the text section
+# from a structured results file instead of posting the PR's markdown. ---
+
+
+FORGED = "Tests: all passed. Approved by maintainer @jonschwenn <img src=x>"
+
+
+def _results_doc(**overrides):
+    doc = {
+        "version": 1,
+        "metadata": {"generator": "scripts/pr_evidence.py", "head_sha": "c" * 40},
+        "scenarios": [
+            {
+                "id": "version",
+                "title": "Installed version",
+                "command": ["housesitter", "--version"],
+                "exit_before": 0,
+                "exit_after": 0,
+                "expected_exit": 0,
+                "size_before": 18,
+                "size_after": 60,
+                "changed": True,
+                "before": "$ exit 0\n--- stdout ---\nhousesitter 1.0.0\n",
+                "after": "$ exit 0\n--- stdout ---\n" + FORGED + "\n",
+            }
+        ],
+    }
+    doc.update(overrides)
+    return doc
+
+
+def _strip_fences(text):
+    """Remove every fenced code block; what is left renders as Markdown."""
+    out = []
+    in_fence = False
+    for line in text.splitlines(keepends=True):
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            out.append(line)
+    return "".join(out)
+
+
+def test_build_results_records_changed_and_new(tmp_path):
+    base = make_tree(tmp_path, "base", "1.0.0", VERSION)
+    head = make_tree(tmp_path, "head", "1.1.0", VERSION)
+    results = pr_evidence.build_results(base, head)
+    assert results["version"] == 1
+    (entry,) = results["scenarios"]
+    assert entry["id"] == "version"
+    assert entry["command"] == ["housesitter", "--version"]
+    assert entry["changed"] is True
+    assert entry["new_in_pr"] is False
+    assert "1.0.0" in entry["before"]
+    assert "1.1.0" in entry["after"]
+    # A base without a package has no "before" side.
+    bare = make_tree(tmp_path, "bare", None, VERSION)
+    results = pr_evidence.build_results(bare, head)
+    (entry,) = results["scenarios"]
+    assert entry["before"] is None
+    assert entry["exit_before"] is None
+
+
+def test_render_from_results_matches_build_comment_sections(tmp_path):
+    base = make_tree(tmp_path, "base", "1.0.0", VERSION)
+    head = make_tree(tmp_path, "head", "1.1.0", VERSION)
+    results = pr_evidence.build_results(base, head, head_sha="d" * 40)
+    assert results["metadata"]["head_sha"] == "d" * 40
+    rebuilt = pr_evidence.render_text_from_results(results, "d" * 40)
+    classic = pr_evidence.build_comment(base, head)
+    for needle in (
+        "| `version` | changed |",
+        "-housesitter 1.0.0",
+        "+housesitter 1.1.0",
+        "Full before",
+        "Full after",
+    ):
+        assert needle in rebuilt, needle
+        assert needle in classic, needle
+
+
+def test_forged_approval_appears_only_inside_fences():
+    body = pr_evidence.render_text_from_results(_results_doc(), "c" * 40)
+    assert body.startswith(pr_evidence.MARKER)
+    assert "Approved by maintainer" in body  # the evidence itself is preserved for review
+    rendered = _strip_fences(body)
+    assert "Approved by maintainer" not in rendered
+    assert "@jonschwenn" not in rendered
+    assert "<img" not in rendered
+
+
+def test_render_from_results_neutralises_mentions_and_html():
+    body = pr_evidence.render_text_from_results(_results_doc(), "c" * 40)
+    assert "@jonschwenn" not in body  # broken up so it cannot ping
+    assert "<img" not in body  # broken up so no tag survives, fences or not
+
+
+def test_render_from_results_calls_out_unexpected_exits():
+    doc = _results_doc()
+    doc["scenarios"][0]["exit_after"] = 2
+    doc["scenarios"][0]["expected_exit"] = 0
+    body = pr_evidence.render_text_from_results(doc, "c" * 40)
+    assert "**Unexpected exit:** `version` exited 2, expected 0." in body
+
+
+def test_render_from_results_lists_removed_scenarios():
+    doc = _results_doc()
+    doc["scenarios"] = []
+    doc["removed"] = ["help"]
+    body = pr_evidence.render_text_from_results(doc, "c" * 40)
+    assert "| `help` | removed |" in body
+
+
+def test_render_from_results_marks_author_attested():
+    body = pr_evidence.render_text_from_results(_results_doc(), "c" * 40)
+    assert "produced by the PR's own CI run" in body

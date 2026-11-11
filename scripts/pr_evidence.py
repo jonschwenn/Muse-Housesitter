@@ -506,6 +506,213 @@ def append_ui_section(
     )
 
 
+def collect_runs(base_tree: Path, head_tree: Path) -> tuple:
+    """Run every head scenario against both trees. Returns
+    (scenarios, volatile, base_scenarios, base_ok, runs) where runs is a list
+    of (scenario, before, after); before is None when the base has no
+    package. Both comment builders below share this, so the text comment
+    and the structured results describe the same runs."""
+    scenarios, volatile_keys = load_scenarios(head_tree)
+    volatile = set(volatile_keys)
+    base_scenarios = load_scenarios(base_tree)[0]
+    base_ok = has_package(base_tree)
+    runs = []
+    for scenario in scenarios:
+        before = run_scenario(base_tree, scenario) if base_ok else None
+        after = run_scenario(head_tree, scenario)
+        runs.append((scenario, before, after))
+    return scenarios, volatile, base_scenarios, base_ok, runs
+
+
+def build_results(
+    base_tree: Path, head_tree: Path, head_sha: str | None = None
+) -> dict:
+    """Run every scenario and return the structured results (Decision 13,
+    option A). The privileged publisher validates this against a strict
+    schema and renders the comment itself; the PR's markdown is never
+    posted. ``before``/``after`` hold the normalised texts ``render``
+    produces (the same strings the comment diffs); ``before`` is None when
+    the base has no package to run against."""
+    scenarios, volatile, base_scenarios, base_ok, runs = collect_runs(base_tree, head_tree)
+    return _results_from_runs(scenarios, volatile, base_scenarios, base_ok, runs, head_sha)
+
+
+def _results_from_runs(
+    scenarios: list,
+    volatile: set,
+    base_scenarios: list,
+    base_ok: bool,
+    runs: list,
+    head_sha: str | None,
+) -> dict:
+    base_ids = {s["id"] for s in base_scenarios}
+    head_ids = {s["id"] for s in scenarios}
+    entries = []
+    for scenario, before, after in runs:
+        before_text = render(before, volatile) if before is not None else None
+        after_text = render(after, volatile)
+        new = before is None or scenario["id"] not in base_ids
+        entries.append(
+            {
+                "id": scenario["id"],
+                "title": scenario.get("title", ""),
+                "command": ["housesitter", *scenario["argv"]],
+                "exit_before": before["exit"] if before is not None else None,
+                "exit_after": after["exit"],
+                "expected_exit": scenario.get("expect_exit", 0),
+                "size_before": before["sdk_size"] if before is not None else None,
+                "size_after": after["sdk_size"],
+                "changed": new or before_text != after_text,
+                "new_in_pr": scenario["id"] not in base_ids,
+                "before": before_text,
+                "after": after_text,
+            }
+        )
+    metadata: dict = {"generator": "scripts/pr_evidence.py", "base_has_package": base_ok}
+    if head_sha is not None:
+        metadata["head_sha"] = head_sha
+    return {
+        "version": 1,
+        "metadata": metadata,
+        "scenarios": entries,
+        "removed": sorted(base_ids - head_ids),
+    }
+
+
+def neutralise(text: object) -> str:
+    """Break up @mentions and <tags> in PR-supplied text.
+
+    Fenced code blocks already stop GitHub rendering mentions, links, and
+    HTML, but this breaks them up anyway (an invisible separator after each
+    ``@`` and ``<``), so the raw bytes cannot ping or tag even if a fence
+    is ever dropped. Idempotent and invisible in the rendered comment.
+    """
+    return str(text).replace("@", "@\u200b").replace("<", "<\u200b")
+
+
+def _inline(text: object) -> str:
+    """Single-line form of PR-supplied text for headings and table cells."""
+    return neutralise(" ".join(str(text).split()))
+
+
+def render_text_from_results(results: dict, head_sha: str) -> str:
+    """Rebuild the text section from validated structured results (main's
+    code: the privileged publisher calls this, never PR code).
+
+    The caller must have validated ``results`` (unknown keys rejected,
+    types and caps checked, ids known or marked new). Every PR-supplied
+    string appears only inside fenced code blocks (whose fence outgrows any
+    backtick run in the content) or single-line code spans, neutralised, so
+    a forged "Approved by maintainer" can never render as a heading,
+    prose, link, or image. The fixed header says the outputs came from the
+    PR's own CI run: they are author-attested, not trusted fact.
+    """
+    scenarios = results["scenarios"]
+    removed = results.get("removed", [])
+    base_ok = results.get("metadata", {}).get("base_has_package", True)
+
+    def size(value: object) -> str:
+        return "—" if value is None else f"{value:,} B"
+
+    def exit_(value: object) -> str:
+        return "—" if value is None else str(value)
+
+    rows, sections, unexpected = [], [], []
+    for entry in scenarios:
+        before_text = entry["before"] if entry["before"] is not None else "(not present)\n"
+        after_text = entry["after"]
+        before_text, after_text = neutralise(before_text), neutralise(after_text)
+        if entry.get("new_in_pr"):
+            status = "new"
+        elif not entry["changed"]:
+            status = "unchanged"
+        else:
+            status = "changed"
+        if entry["exit_after"] != entry["expected_exit"]:
+            unexpected.append(
+                f"{code_span(_inline(entry['id']))} exited "
+                f"{entry['exit_after']}, expected {entry['expected_exit']}"
+            )
+        rows.append(
+            f"| {code_span(_inline(entry['id']))} | {status} "
+            f"| {exit_(entry['exit_before'])} → {exit_(entry['exit_after'])} "
+            f"| {size(entry['size_before'])} → {size(entry['size_after'])} |"
+        )
+        if status == "unchanged":
+            continue
+        diff = "".join(
+            difflib.unified_diff(
+                before_text.splitlines(keepends=True),
+                after_text.splitlines(keepends=True),
+                fromfile="before",
+                tofile="after",
+            )
+        )
+        heading = f"### {code_span(_inline(entry['id']))}"
+        if entry.get("title", ""):
+            heading += f": {code_span(_inline(entry['title']))}"
+        command = " ".join(_inline(arg) for arg in entry["command"])
+        sections.append(
+            heading + "\n\n"
+            + code_span(command)
+            + "\n\n"
+            + fence(diff, "diff")
+            + "\n<details><summary>Full before</summary>\n\n"
+            + fence(before_text)
+            + "\n</details>\n<details><summary>Full after</summary>\n\n"
+            + fence(after_text)
+            + "\n</details>\n"
+        )
+    for ident in removed:
+        rows.append(f"| {code_span(_inline(ident))} | removed | — | — |")
+
+    head = [
+        MARKER,
+        "## Before / after evidence",
+        "",
+        "Fixture house only. Rebuilt by main's publisher from the PR's structured "
+        "results (`results.json`); see docs/REVIEW.md, \"Evidence\". The outputs below "
+        f"were produced by the PR's own CI run at `{head_sha}` from the PR's own code: "
+        "they are author-attested, like the screenshots, not trusted fact. "
+        "Size is the Muse SDK's measure of stdout (limit 96 KiB; budget 88 KiB).",
+        "",
+    ]
+    if not base_ok:
+        head += ["The base has no `housesitter` package yet, so every scenario is new.", ""]
+    if not scenarios:
+        head += ["**The head has no scenarios.** Every PR must keep at least one.", ""]
+    for line in unexpected:
+        head += [f"**Unexpected exit:** {line}.", ""]
+    head += [
+        "| Scenario | Status | Exit before → after | Size before → after |",
+        "|----------|--------|---------------------|---------------------|",
+        *rows,
+        "",
+    ]
+    if not sections and not any("| removed |" in r for r in rows):
+        head += ["**No output change.**", ""]
+    top = "\n".join(head) + "\n"
+
+    # Keep whole sections only, so a cut never leaves a code fence open.
+    kept, omitted = [], []
+    budget = MAX_COMMENT_BYTES - len(top.encode()) - 400
+    for section in sections:
+        cost = len(section.encode()) + 1
+        if cost <= budget:
+            kept.append(section)
+            budget -= cost
+        else:
+            omitted.append(section.split("\n", 1)[0].removeprefix("### "))
+    body = top + "\n".join(kept)
+    if omitted:
+        body += (
+            "\n**Omitted to fit a GitHub comment:** "
+            + ", ".join(omitted)
+            + ". Run `scripts/pr_evidence.py` locally to see them.\n"
+        )
+    return body
+
+
 def build_comment(
     base_tree: Path,
     head_tree: Path,
@@ -515,12 +722,27 @@ def build_comment(
     pr: int | None = None,
     head_sha: str | None = None,
 ) -> str:
-    scenarios, volatile_keys = load_scenarios(head_tree)
-    volatile = set(volatile_keys)
-    base_scenarios = load_scenarios(base_tree)[0]
+    scenarios, volatile, base_scenarios, base_ok, runs = collect_runs(base_tree, head_tree)
+    return _comment_from_runs(
+        scenarios, volatile, base_scenarios, base_ok, runs, ui_dir,
+        repo=repo, pr=pr, head_sha=head_sha,
+    )
+
+
+def _comment_from_runs(
+    scenarios: list,
+    volatile: set,
+    base_scenarios: list,
+    base_ok: bool,
+    runs: list,
+    ui_dir: Path | None,
+    *,
+    repo: str | None = None,
+    pr: int | None = None,
+    head_sha: str | None = None,
+) -> str:
     base_ids = {s["id"] for s in base_scenarios}
     head_ids = {s["id"] for s in scenarios}
-    base_ok = has_package(base_tree)
     ui_manifest = load_ui_manifest(ui_dir)
     ui_failures = 0
     if ui_manifest is not None and repo is not None:
@@ -533,9 +755,7 @@ def build_comment(
         return "—" if r is None else str(r["exit"])
 
     rows, sections, unexpected = [], [], []
-    for scenario in scenarios:
-        before = run_scenario(base_tree, scenario) if base_ok else None
-        after = run_scenario(head_tree, scenario)
+    for scenario, before, after in runs:
         before_text, after_text = render(before, volatile), render(after, volatile)
         if before is None or scenario["id"] not in base_ids:
             status = "new"
@@ -655,6 +875,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--head-sha", default=None, help="head commit SHA, 40 hex (with --ui-artifacts)"
     )
+    parser.add_argument(
+        "--results-out",
+        type=Path,
+        default=None,
+        help="write the structured scenario results here as JSON "
+        "(Decision 13, option A: the publisher renders from this, never from --out)",
+    )
     args = parser.parse_args(argv)
     if args.ui_artifacts is not None and not (args.repo and args.pr and args.head_sha):
         parser.error("--repo, --pr, and --head-sha are required with --ui-artifacts")
@@ -663,6 +890,38 @@ def main(argv: list[str] | None = None) -> int:
     except Refused as exc:
         print(f"pr_evidence: refused: {exc}", file=sys.stderr)
         return 2
+    if args.results_out is not None:
+        # One shared collection run feeds both outputs, so the text comment
+        # (for the old publisher, while this rolls out) and the structured
+        # results (for the new one) describe the same runs.
+        scenarios, volatile, base_scenarios, base_ok, runs = collect_runs(
+            args.base_tree, args.head_tree
+        )
+        args.out.write_text(
+            _comment_from_runs(
+                scenarios,
+                volatile,
+                base_scenarios,
+                base_ok,
+                runs,
+                args.ui_artifacts,
+                repo=args.repo,
+                pr=args.pr,
+                head_sha=args.head_sha,
+            ),
+            encoding="utf-8",
+        )
+        args.results_out.write_text(
+            json.dumps(
+                _results_from_runs(
+                    scenarios, volatile, base_scenarios, base_ok, runs, args.head_sha
+                ),
+                indent=1,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return 0
     args.out.write_text(
         build_comment(
             args.base_tree,

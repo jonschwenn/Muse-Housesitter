@@ -156,13 +156,20 @@ jobs:
             --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
             --browser-channel chrome || ui_exit=$?
           echo "UI_EXIT=$ui_exit" >> "$GITHUB_ENV"
-      # Text only: the privileged publisher (evidence-publish.yml, running
-      # from main) rebuilds the Web UI section from the validated manifest
-      # with main's renderer, so PR-built markup never reaches the comment.
+      # Text plus structured results: the privileged publisher
+      # (evidence-publish.yml, running from main) rebuilds both the text
+      # section (from results.json) and the Web UI section (from the
+      # validated manifest) with main's renderers, so PR-built markup never
+      # reaches the comment. evidence.md is still produced alongside, so
+      # the old publisher (which reads it) keeps publishing this PR's
+      # evidence until the new publisher merges.
       - name: Build the evidence comment
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: >
           python head/scripts/pr_evidence.py
           --base-tree base --head-tree head --out evidence.md
+          --results-out results.json --head-sha "$HEAD_SHA"
       - name: Show it in the job summary
         run: cat evidence.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -170,6 +177,7 @@ jobs:
           name: evidence
           path: |
             evidence.md
+            results.json
             ui_out/*.png
             ui_out/ui_manifest.json
           retention-days: 30

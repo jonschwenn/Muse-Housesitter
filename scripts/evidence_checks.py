@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Shared evidence validation (stdlib only).
+
+Imported by ``scripts/publish_evidence.py`` (main's copy: the privileged
+publisher treats the artifact as hostile) and, from part 5, by the ``ci.yml``
+evidence job through the ``check`` subcommand (the PR's own copy: it catches
+honest mistakes only, because a hostile PR controls that copy).
+
+Layout contract: the artifact root holds ``results.json`` (the structured
+scenario results ``pr_evidence.build_results`` writes) and ``ui_out/`` (the
+screenshots plus ``ui_manifest.json`` from ``ui_evidence``).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+RESULTS_FILENAME = "results.json"
+
+# The artifact is PR-produced data, so every field has a cap. The comment
+# budget (60 KiB) trims far below these; they only bound what the privileged
+# publisher is willing to read and parse.
+RESULTS_MAX_BYTES = 5_000_000
+RESULTS_MAX_SCENARIOS = 256
+RESULTS_MAX_TEXT = 1_000_000
+RESULTS_MAX_ID_LEN = 64
+RESULTS_MAX_TITLE_LEN = 200
+RESULTS_MAX_COMMAND_ARGS = 16
+RESULTS_MAX_COMMAND_ARG_LEN = 512
+RESULTS_MAX_COMMAND_TOTAL = 2048
+
+RESULTS_VERSION = 1
+RESULTS_KNOWN_KEYS = frozenset({"version", "metadata", "scenarios", "removed"})
+RESULTS_METADATA_KEYS = frozenset({"generator", "head_sha", "base_has_package"})
+SCENARIO_KNOWN_KEYS = frozenset(
+    {
+        "id",
+        "title",
+        "command",
+        "exit_before",
+        "exit_after",
+        "expected_exit",
+        "size_before",
+        "size_after",
+        "changed",
+        "new_in_pr",
+        "before",
+        "after",
+    }
+)
+
+ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def _is_exit(value: object) -> bool:
+    """A real int exit code, or the string "timeout" a hung scenario yields."""
+    return type(value) is int and -255 <= value <= 255 or value == "timeout"
+
+
+def _has_controls(text: str) -> bool:
+    return any(ord(char) < 0x20 for char in text)
+
+
+def validate_results(doc: object, known_ids: set[str]) -> list[str]:
+    """Check the structured results against the strict schema.
+
+    ``known_ids`` are the scenario ids in MAIN's
+    ``tests/evidence/scenarios.json``. An unknown id is accepted only when
+    the entry is marked ``new_in_pr`` (a scenario this PR adds). A known id
+    is accepted with or without the flag: the builder marks "new" against
+    the base tree, which can be older than main. Returns a list of errors;
+    empty means valid.
+    """
+    errors: list[str] = []
+    if not isinstance(doc, dict):
+        return ["results must be an object"]
+    unknown = set(doc) - RESULTS_KNOWN_KEYS
+    if unknown:
+        errors.append(f"unknown top-level keys: {sorted(unknown)}")
+    if doc.get("version") != RESULTS_VERSION:
+        errors.append(f"version must be {RESULTS_VERSION}")
+    metadata = doc.get("metadata", {})
+    if not isinstance(metadata, dict):
+        errors.append("metadata must be an object")
+    else:
+        unknown_meta = set(metadata) - RESULTS_METADATA_KEYS
+        if unknown_meta:
+            errors.append(f"unknown metadata keys: {sorted(unknown_meta)}")
+        generator = metadata.get("generator", "")
+        if not isinstance(generator, str) or len(generator) > 128:
+            errors.append("metadata.generator must be a short string")
+        head_sha = metadata.get("head_sha")
+        if head_sha is not None and (
+            not isinstance(head_sha, str) or not SHA_RE.fullmatch(head_sha)
+        ):
+            errors.append("metadata.head_sha must be a 40-hex SHA or absent")
+        base_has_package = metadata.get("base_has_package", True)
+        if type(base_has_package) is not bool:
+            errors.append("metadata.base_has_package must be a bool")
+    removed = doc.get("removed", [])
+    if not isinstance(removed, list) or any(
+        not isinstance(item, str) or item not in known_ids for item in removed
+    ):
+        shown = sorted(str(item)[:80] for item in removed)[:10] if isinstance(
+            removed, list
+        ) else removed
+        errors.append(f"removed must be a list of known scenario ids, got: {shown}")
+    scenarios = doc.get("scenarios")
+    if not isinstance(scenarios, list):
+        errors.append("scenarios must be a list")
+        return errors
+    if len(scenarios) > RESULTS_MAX_SCENARIOS:
+        errors.append(
+            f"scenarios lists {len(scenarios)} entries, "
+            f"over the {RESULTS_MAX_SCENARIOS} cap"
+        )
+    seen: set[str] = set()
+    for index, entry in enumerate(scenarios):
+        where = f"scenarios[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{where} must be an object")
+            continue
+        unknown_keys = set(entry) - SCENARIO_KNOWN_KEYS
+        if unknown_keys:
+            errors.append(f"{where} has unknown keys: {sorted(unknown_keys)}")
+        ident = entry.get("id")
+        if (
+            not isinstance(ident, str)
+            or not 1 <= len(ident) <= RESULTS_MAX_ID_LEN
+            or not ID_RE.fullmatch(ident)
+        ):
+            errors.append(f"{where}.id must match {ID_RE.pattern}, got: {str(ident)[:80]}")
+            continue
+        if ident in seen:
+            errors.append(f"duplicate scenario id: {ident}")
+        seen.add(ident)
+        if ident not in known_ids and entry.get("new_in_pr") is not True:
+            errors.append(f"unknown scenario id without new_in_pr: {ident}")
+        title = entry.get("title", "")
+        if (
+            not isinstance(title, str)
+            or len(title) > RESULTS_MAX_TITLE_LEN
+            or _has_controls(title)
+        ):
+            errors.append(f"{where}.title must be a short single-line string")
+        command = entry.get("command")
+        if (
+            not isinstance(command, list)
+            or not 1 <= len(command) <= RESULTS_MAX_COMMAND_ARGS
+            or any(
+                not isinstance(arg, str)
+                or not 1 <= len(arg) <= RESULTS_MAX_COMMAND_ARG_LEN
+                or "\x00" in arg
+                for arg in command
+            )
+            or sum(len(arg) for arg in command) > RESULTS_MAX_COMMAND_TOTAL
+        ):
+            errors.append(f"{where}.command must be a short list of short strings")
+        if not _is_exit(entry.get("exit_before")) and entry.get("exit_before") is not None:
+            errors.append(f"{where}.exit_before must be an exit code, timeout, or null")
+        if not _is_exit(entry.get("exit_after")):
+            errors.append(f"{where}.exit_after must be an exit code or timeout")
+        expected = entry.get("expected_exit")
+        if type(expected) is not int or not 0 <= expected <= 255:
+            errors.append(f"{where}.expected_exit must be an exit code")
+        for side in ("size_before", "size_after"):
+            value = entry.get(side)
+            if value is not None and (
+                type(value) is not int or not 0 <= value <= 10_000_000
+            ):
+                errors.append(f"{where}.{side} must be a byte size or null")
+        if type(entry.get("changed")) is not bool:
+            errors.append(f"{where}.changed must be a bool")
+        if "new_in_pr" in entry and type(entry["new_in_pr"]) is not bool:
+            errors.append(f"{where}.new_in_pr must be a bool")
+        before = entry.get("before")
+        if before is not None and (
+            not isinstance(before, str) or len(before) > RESULTS_MAX_TEXT
+        ):
+            errors.append(f"{where}.before must be a capped string or null")
+        after = entry.get("after")
+        if not isinstance(after, str) or len(after) > RESULTS_MAX_TEXT:
+            errors.append(f"{where}.after must be a capped string")
+    return errors
+
+
+def load_known_scenario_ids(scenarios_path: Path) -> set[str]:
+    """Read the scenario ids from a ``tests/evidence/scenarios.json`` file."""
+    data = json.loads(scenarios_path.read_text(encoding="utf-8"))
+    return {entry["id"] for entry in data["scenarios"]}
+
+
+def main(argv: list[str] | None = None) -> int:
+    print("evidence_checks: no subcommand yet", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -40,6 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import evidence_checks  # noqa: E402  (main's code: this script runs from main only)
 import pr_evidence  # noqa: E402  (main's code: this script runs from main only)
 import test_results  # noqa: E402  (main's code: validates PR-produced XML)
 import ui_evidence  # noqa: E402
@@ -93,9 +94,39 @@ def read_text_capped(path: Path, cap: int, what: str) -> str:
 def check_evidence_text(text: str) -> None:
     """Refuse a comment body that lacks the marker or exceeds the budget."""
     if not text.startswith(pr_evidence.MARKER):
-        raise PublishError("evidence.md does not start with the marker")
+        raise PublishError("comment does not start with the marker")
     if len(text.encode()) > pr_evidence.MAX_COMMENT_BYTES:
-        raise PublishError("evidence.md is too large for a comment")
+        raise PublishError("comment is too large for a comment")
+
+
+def main_scenario_ids() -> set[str]:
+    """Scenario ids in MAIN's list: the spec the results are checked against.
+
+    The publisher runs from the main checkout, so this file is main's copy
+    and these ids are trusted; the PR only supplies results claiming to
+    match them (or marked new-in-this-PR).
+    """
+    path = Path(__file__).resolve().parent.parent / "tests" / "evidence" / "scenarios.json"
+    try:
+        return evidence_checks.load_known_scenario_ids(path)
+    except (OSError, ValueError, KeyError) as exc:
+        raise PublishError(f"cannot read main's scenarios list: {exc}") from exc
+
+
+def read_results(artifact: Path) -> dict:
+    """Read and parse the structured results (Decision 13, option A).
+
+    The PR's markdown (evidence.md) is ignored entirely: the comment is
+    rebuilt from this file, which is validated strictly before anything
+    renders.
+    """
+    path = artifact / evidence_checks.RESULTS_FILENAME
+    text = read_text_capped(path, evidence_checks.RESULTS_MAX_BYTES, "results.json")
+    try:
+        doc = json.loads(text)
+    except ValueError as exc:
+        raise PublishError(f"results.json is not valid JSON: {exc}") from exc
+    return doc
 
 
 def failure_notice(count: int) -> str:
@@ -308,12 +339,28 @@ def render_comment(
     pushes and posts nothing), ValueError when the caller's own
     repo/pr/head-sha arguments are malformed.
     """
-    text = read_text_capped(artifact / "evidence.md", EVIDENCE_MAX_BYTES, "evidence.md")
-    check_evidence_text(text)
+    if not pr_evidence.UI_REPO_RE.fullmatch(repo or ""):
+        raise ValueError(f"bad repo: {repo!r}")
+    if not isinstance(pr, int) or pr <= 0:
+        raise ValueError(f"bad PR number: {pr!r}")
+    if not pr_evidence.UI_SHA_RE.fullmatch(head_sha or ""):
+        raise ValueError(f"bad head SHA: {head_sha!r}")
+    results = read_results(artifact)
+    errors = evidence_checks.validate_results(results, main_scenario_ids())
+    if errors:
+        raise PublishError("results.json failed validation: " + "; ".join(errors[:10]))
+    claimed = results.get("metadata", {}).get("head_sha")
+    if claimed is not None and claimed != head_sha:
+        raise PublishError(
+            f"results.json is for head {claimed}, not the published run {head_sha}"
+        )
+    # The text section is rebuilt here from the validated results; the
+    # PR-supplied markdown (evidence.md) is never read, let alone posted.
+    text = pr_evidence.render_text_from_results(results, head_sha)
     # Test data must never break the publish (decision D21 option A): after
     # inserting the Tests line, shrink it (drop names, then a fixed short
-    # line) when the comment would go over budget. Only evidence that is
-    # already over budget on its own refuses above.
+    # line) when the comment would go over budget. Only text that is
+    # already over budget on its own refuses below.
     evidence_only = text
     if test_results_dir is not None or jobs_json is not None:
         jobs, results = _test_inputs(test_results_dir, jobs_json)
@@ -333,6 +380,9 @@ def render_comment(
         # No manifest (the capture died before writing one): the text
         # comment still publishes. No web/ on either side is not this case:
         # that manifest has an empty captures list and gets a Web UI section.
+        # The text is freshly rebuilt (not pre-checked like the old
+        # evidence.md), so the budget check applies here too.
+        check_evidence_text(text)
         return text
     errors = ui_evidence.validate_artifact(ui_dir)
     if errors:

@@ -34,6 +34,35 @@ HEAD_SHA = "a" * 40
 TEXT = pr_evidence.MARKER + "\n## Before / after evidence\n\n**No output change.**\n"
 
 
+def _results(scenarios=None, **overrides):
+    """A minimal valid structured-results doc (Decision 13, option A)."""
+    if scenarios is None:
+        scenarios = [
+            {
+                "id": "version",
+                "title": "Installed version",
+                "command": ["housesitter", "--version"],
+                "exit_before": 0,
+                "exit_after": 0,
+                "expected_exit": 0,
+                "size_before": 10,
+                "size_after": 10,
+                "changed": False,
+                "new_in_pr": False,
+                "before": "$ exit 0\n",
+                "after": "$ exit 0\n",
+            }
+        ]
+    doc = {
+        "version": 1,
+        "metadata": {"generator": "scripts/pr_evidence.py", "head_sha": HEAD_SHA},
+        "scenarios": scenarios,
+        "removed": [],
+    }
+    doc.update(overrides)
+    return doc
+
+
 def _png(color=(10, 20, 30)):
     r, g, b = color
     return ui_evidence.encode_png(4, 4, 2, bytes([r, g, b]) * 16)
@@ -56,10 +85,19 @@ def _manifest(*names):
     return {"version": 1, "captures": captures}
 
 
-def _artifact(tmp_path, text=TEXT, pngs=("typical__index-phone__head.png",), manifest=None):
+def _artifact(
+    tmp_path,
+    text=TEXT,
+    pngs=("typical__index-phone__head.png",),
+    manifest=None,
+    results=None,
+):
     artifact = tmp_path / "artifact"
     (artifact / "evidence.md").parent.mkdir(parents=True)
     (artifact / "evidence.md").write_text(text)
+    (artifact / "results.json").write_text(
+        json.dumps(_results() if results is None else results)
+    )
     ui_out = artifact / "ui_out"
     ui_out.mkdir()
     for i, name in enumerate(pngs):
@@ -89,13 +127,33 @@ def _render(tmp_path, artifact, **kwargs):
 # Text-only path ---------------------------------------------------------------
 
 
-def test_render_without_ui_dir_publishes_text_only(tmp_path):
+# Rebuilt text (Decision 13, option A) --------------------------------------
+#
+# The comment is rebuilt from results.json; the PR's markdown (evidence.md)
+# is never read, let alone posted.
+
+
+def test_render_ignores_pr_markdown(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, text="PWNED: Approved\n")
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert body.startswith(pr_evidence.MARKER)
+    assert "PWNED" not in body
+    assert "produced by the PR's own CI run" in body
+
+
+def test_render_without_ui_dir_publishes_rebuilt_text_only(tmp_path):
     artifact = tmp_path / "artifact"
     artifact.mkdir()
     (artifact / "evidence.md").write_text(TEXT)
+    (artifact / "results.json").write_text(json.dumps(_results()))
     rc, out = _render(tmp_path, artifact)
     assert rc == 0
-    assert (out / "comment.md").read_text() == TEXT
+    body = (out / "comment.md").read_text()
+    assert body.startswith(pr_evidence.MARKER)
+    assert "**No output change.**" in body
+    assert "## Web UI" not in body
     assert list((out / "files").iterdir()) == []
 
 
@@ -114,6 +172,49 @@ def test_render_empty_manifest_notes_nothing_to_capture(tmp_path):
     assert "nothing to show" in body
     # The manifest alone is pushed; with no PNGs the workflow skips the push.
     assert sorted(p.name for p in (out / "files").iterdir()) == ["ui_manifest.json"]
+
+
+def test_render_requires_results_json(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").unlink()
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
+
+
+def test_render_refuses_malformed_results_json(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").write_text("{nope")
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
+
+
+def test_render_refuses_unknown_scenario_id(tmp_path):
+    bad = _results()
+    bad["scenarios"][0]["id"] = "forged-scenario"
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=bad)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
+
+
+def test_render_accepts_new_in_pr_scenario_id(tmp_path):
+    doc = _results()
+    doc["scenarios"][0]["id"] = "forged-scenario"
+    doc["scenarios"][0]["new_in_pr"] = True
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
+    rc, _ = _render(tmp_path, artifact)
+    assert rc == 0
+
+
+def test_render_refuses_stale_head_sha(tmp_path):
+    doc = _results()
+    doc["metadata"]["head_sha"] = "b" * 40
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert not (out / "comment.md").exists()
 
 
 # Valid artifact -----------------------------------------------------------------
@@ -154,16 +255,14 @@ def test_render_ignores_pre_rendered_markdown(tmp_path):
 # Refusals ---------------------------------------------------------------------
 
 
-def test_render_refuses_text_without_marker(tmp_path):
-    artifact = _artifact(tmp_path)
-    (artifact / "evidence.md").write_text("no marker here\n")
-    rc, _ = _render(tmp_path, artifact)
-    assert rc == 1
-
-
-def test_render_refuses_oversized_text(tmp_path, monkeypatch):
+def test_render_refuses_oversized_results_text(tmp_path, monkeypatch):
+    # The rebuilt text section, not the PR's markdown, is what must fit.
+    doc = _results()
+    doc["scenarios"][0]["changed"] = True
+    doc["scenarios"][0]["new_in_pr"] = True
+    doc["scenarios"][0]["after"] = "x" * 10_000
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
     monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", 10)
-    artifact = _artifact(tmp_path)
     rc, _ = _render(tmp_path, artifact)
     assert rc == 1
 
@@ -736,7 +835,8 @@ def test_render_without_result_args_is_unchanged(tmp_path):
     rc, out = _render(tmp_path, artifact)
     assert rc == 0
     text = (out / "comment.md").read_text()
-    assert text == TEXT
+    assert text.startswith(pr_evidence.MARKER)
+    assert "**No output change.**" in text
     assert "**Tests:**" not in text
 
 
@@ -968,15 +1068,66 @@ def test_ci_produces_test_results():
 # already over budget on its own still refuses (exit 1).
 
 
-def _padded_evidence(size):
-    assert size > len(TEXT.encode())
-    return TEXT + "x" * (size - len(TEXT.encode()))
+def _padded_results_text(size):
+    """A results doc whose rebuilt comment lands just under `size` bytes.
+
+    The comment is rebuilt from results.json now, so near-cap tests pad the
+    structured results instead of the ignored evidence.md. Padding uses new
+    scenarios with tiny outputs; the renderer keeps whole sections while
+    they fit, so the comment grows monotonically here. The last scenario
+    is popped back off when the target is overshot, so the comment never
+    exceeds `size` (one scenario is a few hundred bytes).
+    """
+    doc = {
+        "version": 1,
+        "metadata": {"generator": "scripts/pr_evidence.py", "head_sha": HEAD_SHA},
+        "scenarios": [],
+        "removed": [],
+    }
+    index = 0
+    while index < 250:
+        doc["scenarios"].append(
+            {
+                "id": f"pad-{index:04d}",
+                "title": "",
+                "command": ["housesitter", "--version"],
+                "exit_before": 0,
+                "exit_after": 0,
+                "expected_exit": 0,
+                "size_before": 10,
+                "size_after": 10,
+                "changed": True,
+                "new_in_pr": True,
+                "before": "$ exit 0\n",
+                "after": "$ exit 0\n",
+            }
+        )
+        body = pr_evidence.render_text_from_results(doc, HEAD_SHA)
+        if len(body.encode()) >= size:
+            doc["scenarios"].pop()
+            break
+        index += 1
+    return doc
 
 
-def _text_only_artifact(tmp_path, text):
+def _exact_evidence_text(size):
+    """A fixed text body of exactly `size` bytes for fit_test_line unit tests.
+
+    Byte-exact padding is not possible through the self-trimming renderer,
+    so the shrink ladder (full line, brief line, fallback, dropped) is
+    pinned here instead of through rendered artifacts.
+    """
+    assert size >= len(pr_evidence.MARKER) + 30
+    return pr_evidence.MARKER + "\n## Before / after evidence\n\n" + "x" * (
+        size - len(pr_evidence.MARKER) - len("\n## Before / after evidence\n\n")
+    )
+
+
+def _text_only_artifact(tmp_path, size):
     artifact = tmp_path / "artifact"
     artifact.mkdir()
-    (artifact / "evidence.md").write_text(text)
+    (artifact / "evidence.md").write_text(TEXT)  # ignored by the new publisher
+    (artifact / "results.json").write_text(json.dumps(_padded_results_text(size)))
     return artifact
 
 
@@ -996,9 +1147,14 @@ def _max_names_xml(version="3.14.1", count=20):
     ).encode()
 
 
-def test_render_text_only_near_cap_tests_line_stays_in_budget(tmp_path):
-    cap = pr_evidence.MAX_COMMENT_BYTES
-    artifact = _text_only_artifact(tmp_path, _padded_evidence(cap - 100))
+def test_render_text_only_near_cap_tests_line_stays_in_budget(tmp_path, monkeypatch):
+    # A near-cap rebuilt text plus a Tests line must still publish within
+    # the comment budget, keeping the failure counts. Whether the failing
+    # names survive depends on the exact room, so the shrink ladder itself
+    # is pinned by the fit_test_line unit tests below.
+    cap = 3000
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", cap)
+    artifact = _text_only_artifact(tmp_path, cap - 500)
     results = _results_tree(
         tmp_path,
         {"3.14": _junit("3.14.1", tests=3, failures=2,
@@ -1009,21 +1165,54 @@ def test_render_text_only_near_cap_tests_line_stays_in_budget(tmp_path):
     assert rc == 0
     body = (out / "comment.md").read_text()
     assert len(body.encode()) <= cap
-    assert "(2 failing)" in body
-    assert "test_case_00" not in body
+    assert "2 failing" in body
 
 
-def test_render_text_only_near_cap_many_long_names_stays_in_budget(tmp_path):
-    cap = pr_evidence.MAX_COMMENT_BYTES
-    artifact = _text_only_artifact(tmp_path, _padded_evidence(cap - 100))
+def test_render_text_only_near_cap_many_long_names_stays_in_budget(tmp_path, monkeypatch):
+    cap = 3000
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", cap)
+    artifact = _text_only_artifact(tmp_path, cap - 500)
     results = _results_tree(tmp_path, {"3.14": _max_names_xml()})
     jobs = _jobs_doc(_job("test (3.14)", "failure"))
     rc, out = _render_with_results(tmp_path, artifact, results, jobs)
     assert rc == 0
     body = (out / "comment.md").read_text()
     assert len(body.encode()) <= cap
-    assert "(20 failing)" in body
-    assert "n" * 165 not in body
+    assert "20 failing" in body
+
+
+def test_fit_test_line_shrink_ladder(monkeypatch):
+    # Byte-exact evidence sizes pin the D21 shrink order: the full Tests
+    # line first, then the brief line without names, then the fixed short
+    # line, then nothing. Counts and verdicts survive every step that
+    # keeps a line. Pure text: the renderers' real output is covered by
+    # the integration tests above.
+    cap = 3000
+    monkeypatch.setattr(pr_evidence, "MAX_COMMENT_BYTES", cap)
+    full = "**Tests:** **failed** on 3.9, 3.10, 3.11 (12 failing: `n1`, `n2`, `n3`)."
+    brief = "**Tests:** **failed** on 3.9, 3.10, 3.11 (12 failing)."
+    fallback = publish_evidence.TEST_LINE_FALLBACK
+    assert len(full) > len(brief) > len(fallback)
+
+    def room_for(line, spare):
+        # Evidence size leaving `spare` bytes of room after inserting `line`.
+        return cap - len(line.encode()) - 1 - spare
+
+    # Room for the full line: it is kept.
+    body = publish_evidence.fit_test_line(_exact_evidence_text(room_for(full, 5)), full, brief)
+    assert full in body
+    # Room for the brief line only: names are dropped, counts stay.
+    body = publish_evidence.fit_test_line(_exact_evidence_text(room_for(brief, 5)), full, brief)
+    assert brief in body and "n1" not in body
+    # Room only for the fixed short line.
+    body = publish_evidence.fit_test_line(
+        _exact_evidence_text(room_for(fallback, 2)), full, brief
+    )
+    assert fallback in body and "12 failing" not in body
+    # No room for any line: it is left out, and the publish stays in budget.
+    body = publish_evidence.fit_test_line(_exact_evidence_text(cap - 10), full, brief)
+    assert "**Tests:**" not in body
+    assert len(body.encode()) <= cap
 
 
 def test_render_ui_path_near_cap_tests_line_stays_in_budget(tmp_path, monkeypatch):
@@ -1074,19 +1263,6 @@ def test_test_results_module_is_stdlib_only():
 # Re-review fixes (#11) -----------------------------------------------------------
 
 
-def test_render_text_only_drops_tests_line_when_even_fallback_overflows(tmp_path):
-    # Evidence 10 bytes under the cap: no Tests line fits, not even the short
-    # fallback. Option A: leave the line out, publish within budget.
-    cap = pr_evidence.MAX_COMMENT_BYTES
-    artifact = _text_only_artifact(tmp_path, _padded_evidence(cap - 10))
-    jobs = _jobs_doc(_job("test (3.14)", "failure"))
-    rc, out = _render_with_results(tmp_path, artifact, None, jobs)
-    assert rc == 0
-    body = (out / "comment.md").read_text()
-    assert len(body.encode()) <= cap
-    assert "**Tests:**" not in body
-
-
 def test_render_ui_path_tests_line_never_tips_the_publish_into_refusal(tmp_path, monkeypatch):
     # Find the largest evidence that publishes with its Web UI section and no
     # test data; adding test data must never turn that into a refusal.
@@ -1095,7 +1271,7 @@ def test_render_ui_path_tests_line_never_tips_the_publish_into_refusal(tmp_path,
     for size in range(2990, 1000, -5):
         base = tmp_path / f"base{size}"
         base.mkdir()
-        artifact = _artifact(base, text=_padded_evidence(size))
+        artifact = _artifact(base, results=_padded_results_text(size))
         rc, _ = _render(base, artifact)
         if rc == 0:
             break
@@ -1107,7 +1283,7 @@ def test_render_ui_path_tests_line_never_tips_the_publish_into_refusal(tmp_path,
 
 
 def test_render_deeply_nested_jobs_json_degrades_only_the_line(tmp_path):
-    artifact = _text_only_artifact(tmp_path, TEXT)
+    artifact = _text_only_artifact(tmp_path, 1000)
     out = tmp_path / "out"
     jobs_path = tmp_path / "deep.json"
     jobs_path.write_text("[" * 20_000)
