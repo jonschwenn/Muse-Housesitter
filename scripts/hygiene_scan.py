@@ -878,21 +878,29 @@ def _display(path: str) -> str:
 # main(): a hostile tree cannot flood the workflow log, while the problem
 # and suppression counts stay exact.
 _MAX_DISPLAY_PATH = 200
-_MAX_LOG_CHARS = 100_000
+# The stdout budget counts encoded UTF-8 bytes, not characters: multibyte
+# names would otherwise multiply the byte count past the cap.
+_MAX_LOG_BYTES = 100_000
+_TRUNCATION_MARKER = (
+    "hygiene-scan: ... output truncated "
+    f"(over {_MAX_LOG_BYTES} bytes; counts above stay exact)"
+)
+_MARKER_BYTES = len(_TRUNCATION_MARKER.encode("utf-8")) + 1
 
 
 def _print_capped(lines: list[str]) -> None:
-    """Print ``lines`` up to a total budget, then stop with a marker."""
+    """Print ``lines`` up to a total byte budget, then stop with a marker.
+
+    A line prints only if it and the marker still fit: the marker is
+    reserved space, so the total with the marker never exceeds the budget.
+    """
     shown = 0
     for line in lines:
-        if shown + len(line) + 1 > _MAX_LOG_CHARS:
-            print(
-                "hygiene-scan: ... output truncated "
-                f"(over {_MAX_LOG_CHARS} chars; counts above stay exact)"
-            )
+        if shown + len(line.encode("utf-8")) + 1 + _MARKER_BYTES > _MAX_LOG_BYTES:
+            print(_TRUNCATION_MARKER)
             return
         print(line)
-        shown += len(line) + 1
+        shown += len(line.encode("utf-8")) + 1
 
 
 def fetch_pr_head(*, cwd: str) -> str:

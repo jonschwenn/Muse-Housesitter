@@ -1272,9 +1272,23 @@ def test_print_capped_respects_budget(capsys):
     """Finding 5 (round 2): total stdout stops at the budget with a marker."""
     hygiene_scan._print_capped(["x" * 60_000, "y" * 60_000])
     out = capsys.readouterr().out
-    assert len(out) < 100_000
+    assert len(out.encode("utf-8")) < 100_000
     assert "truncated" in out
     assert out.count("\n") == 2
+
+
+def test_print_capped_budgets_bytes_not_characters(capsys):
+    """Finding 6 (round 3): multibyte lines stop at the byte budget."""
+    line = "caf\u00e9 " * 100  # 600 chars, 700 bytes per line
+    lines = [f"hygiene-scan: suppression dir/{line}:{n}" for n in range(1000)]
+    chars = sum(len(entry) + 1 for entry in lines)
+    assert chars > 100_000  # under the old character count this fit
+    hygiene_scan._print_capped(lines)
+    out = capsys.readouterr().out
+    raw = out.encode("utf-8")
+    assert len(raw) <= 100_000
+    assert "truncated" in out
+    assert "bytes" in out
 
 
 def test_display_redacts_secret_shaped_names():
