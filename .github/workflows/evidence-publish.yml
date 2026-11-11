@@ -206,6 +206,14 @@ jobs:
         with:
           name: validated-evidence
           path: rendered
+      # Main's check-head script for the freshness re-checks below. This
+      # checks out trusted main code only (never PR code); the push itself
+      # still happens in a fresh git directory holding just the files.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          path: main
       - name: Push validated PNGs to pr-evidence
         id: push
         env:
@@ -213,21 +221,24 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ needs.resolve.outputs.pr }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          CHECK_PY: ${{ github.workspace }}/main/scripts/publish_evidence.py
         run: |
           set -euo pipefail
           case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
           if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "bad head SHA: $HEAD_SHA"; exit 1
           fi
-          # Freshness re-check, immediately before pushing: the PR may have
-          # moved since resolve. A stale push would pin images (and the
-          # comment below) to a superseded commit, so stop without writing;
-          # the newer run publishes instead.
-          current="$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)"
-          if [ "$current" != "$HEAD_SHA" ]; then
-            echo "head moved ($HEAD_SHA -> $current); stopping without writing"
-            exit 0
-          fi
+          # Freshness, re-checked immediately before every push below: the
+          # PR may have moved during the fetch, so a check made earlier is
+          # stale by push time. check-head exit 1 means "moved": stop
+          # without writing and let the newer run publish instead.
+          require_fresh_head() {
+            rc=0
+            python3 "$CHECK_PY" check-head \
+              --repo "$REPO" --pr "$PR" --expected "$HEAD_SHA" || rc=$?
+            if [ "$rc" = 1 ]; then exit 0; fi
+            if [ "$rc" != 0 ]; then exit "$rc"; fi
+          }
           # No checkout of any code happens here: a fresh git directory that
           # only ever contains the validated files main's renderer selected.
           rm -rf push && mkdir push && cd push
@@ -285,6 +296,7 @@ jobs:
             else
               git commit -q -m "$msg"
             fi
+            require_fresh_head
             if ! git push origin pr-evidence; then
               # Someone else pushed first. Re-base by moving onto the new tip
               # and re-adding only our directory (a rebase can't work across
@@ -293,6 +305,7 @@ jobs:
               git reset -q FETCH_HEAD
               git add "$dest"
               git diff --cached --quiet || git commit -q -m "$msg"
+              require_fresh_head
               git push origin pr-evidence
             fi
             EVIDENCE_SHA="$(git rev-parse HEAD)"
@@ -349,14 +362,6 @@ jobs:
         run: |
           set -euo pipefail
           case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
-          # Freshness re-check, immediately before posting: the PR may have
-          # moved since resolve or the push. Stopping without writing beats
-          # posting for a superseded commit; the newer run publishes.
-          current="$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)"
-          if [ "$current" != "$HEAD_SHA" ]; then
-            echo "head moved ($HEAD_SHA -> $current); stopping without writing"
-            exit 0
-          fi
           flags=""
           if [ -f rendered/refusal.json ]; then flags="$flags --has-refusal"; fi
           if [ -f rendered/comment.md ]; then flags="$flags --has-comment"; fi
@@ -403,6 +408,15 @@ jobs:
           id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" \
             | head -n 1)
+          # Freshness re-check, immediately before posting and after all
+          # preparation and the comment lookup above: the PR may have moved
+          # while this step prepared. Stopping without writing beats
+          # posting for a superseded commit; the newer run publishes.
+          fresh_rc=0
+          python3 scripts/publish_evidence.py check-head \
+            --repo "$REPO" --pr "$PR" --expected "$HEAD_SHA" || fresh_rc=$?
+          if [ "$fresh_rc" = 1 ]; then exit 0; fi
+          if [ "$fresh_rc" != 0 ]; then exit "$fresh_rc"; fi
           if [ -n "$id" ]; then
             gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@rendered/comment.md > /dev/null
             echo "Updated comment $id"

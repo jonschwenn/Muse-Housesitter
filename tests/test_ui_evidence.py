@@ -769,12 +769,25 @@ def test_publisher_serialises_runs_per_pr_branch():
 
 
 def test_publisher_rechecks_freshness_before_writing():
-    # The head SHA is verified in resolve, then re-checked immediately
-    # before pushing images and again immediately before posting: a moved
-    # head stops the run without writing, and the newer run publishes.
+    # The head SHA is verified in resolve, then re-checked through main's
+    # check-head immediately before every push (both attempts) and
+    # immediately before posting, after the comment lookup: a moved head
+    # stops the run without writing, and the newer run publishes. The
+    # lookup itself lives in main's Python, so the shell holds no inline
+    # copy that could drift.
     workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
-    assert workflow.count("stopping without writing") == 2
-    assert 'gh api "repos/$REPO/pulls/$PR" --jq .head.sha' in workflow
+    push = workflow[workflow.index("\n  push:\n"):workflow.index("\n  comment:\n")]
+    # Defined once (as require_fresh_head() {) and called immediately
+    # before each of the two pushes.
+    assert push.count("require_fresh_head\n") == 2
+    assert push.index("require_fresh_head\n") < push.index("git push origin pr-evidence")
+    assert push.rindex("require_fresh_head") < push.rindex("git push origin pr-evidence")
+    assert 'gh api "repos/$REPO/pulls/$PR" --jq .head.sha' not in workflow
+    comment = workflow[workflow.index("\n  comment:\n"):]
+    lookup = comment.index('issues/$PR/comments')
+    check = comment.index("check-head")
+    post = comment.index("issues/comments/$id")
+    assert lookup < check < post
 
 
 def test_publisher_skips_push_when_no_pngs():

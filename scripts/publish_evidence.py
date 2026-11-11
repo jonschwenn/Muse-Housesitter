@@ -36,6 +36,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -698,6 +699,70 @@ def cmd_decide_comment(args: argparse.Namespace) -> int:
     return 0
 
 
+# Freshness re-check (review round 1, finding 6) -------------------------------
+#
+# The head used to be checked once per job, then the step fetched, prepared
+# and looked up comments: a head that moved mid-step still pushed and
+# posted. The workflow calls check-head immediately before every `git push`
+# (both attempts) and immediately before posting, after the comment lookup.
+# Exit codes: 0 the head is still fresh; 1 it moved (the caller stops
+# without writing); 2 the check itself failed.
+
+
+class HeadCheckError(Exception):
+    """The PR's head SHA could not be verified through the API."""
+
+
+def fetch_head_sha(repo: str, pr: int) -> str:
+    """The PR's current head SHA from the GitHub API.
+
+    ``repo``/``pr`` are trusted resolve outputs, never artifact data.
+    Raises ValueError for bad arguments, HeadCheckError when gh fails or
+    answers nonsense.
+    """
+    if not pr_evidence.UI_REPO_RE.fullmatch(repo or ""):
+        raise ValueError(f"bad repo: {repo!r}")
+    if not isinstance(pr, int) or pr <= 0:
+        raise ValueError(f"bad PR number: {pr!r}")
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{repo}/pulls/{pr}", "--jq", ".head.sha"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HeadCheckError(f"cannot ask the API for the head: {exc}") from exc
+    if proc.returncode != 0:
+        raise HeadCheckError(f"gh api failed with exit {proc.returncode}")
+    sha = proc.stdout.strip()
+    if not pr_evidence.UI_SHA_RE.fullmatch(sha):
+        raise HeadCheckError(f"API returned a bad head SHA: {sha!r}")
+    return sha
+
+
+def cmd_check_head(args: argparse.Namespace) -> int:
+    if not pr_evidence.UI_SHA_RE.fullmatch(args.expected or ""):
+        print(
+            f"publish_evidence: bad expected head SHA: {args.expected!r}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        current = fetch_head_sha(args.repo, args.pr)
+    except (ValueError, HeadCheckError) as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
+    if current != args.expected:
+        print(
+            f"publish_evidence: head moved ({args.expected} -> {current}); "
+            "stopping without writing",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -735,6 +800,13 @@ def main(argv: list[str] | None = None) -> int:
     decide.add_argument("--has-refusal", action="store_true")
     decide.add_argument("--has-comment", action="store_true")
     decide.set_defaults(func=cmd_decide_comment)
+    check_head = sub.add_parser(
+        "check-head", help="exit 0 when the PR head is still fresh"
+    )
+    check_head.add_argument("--repo", required=True)
+    check_head.add_argument("--pr", required=True, type=int)
+    check_head.add_argument("--expected", required=True)
+    check_head.set_defaults(func=cmd_check_head)
     args = parser.parse_args(argv)
     try:
         return args.func(args)

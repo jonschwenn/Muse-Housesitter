@@ -1583,3 +1583,73 @@ def test_decide_comment_subcommand_prints_only_the_action(capsys):
     )
     assert rc == 0
     assert capsys.readouterr().out == "comment\n"
+
+
+# Review round 1, finding 6: re-check the head at the last moment. -----------
+#
+# The head used to be checked once, then the script fetched, prepared and
+# looked up comments: a head that moved mid-step still pushed and posted.
+# check-head asks the API for the current head through main's Python (faked
+# below), and the workflow calls it immediately before every push and
+# immediately before posting, after the comment lookup.
+
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = ""
+
+
+def _fake_gh(monkeypatch, stdout=HEAD_SHA, returncode=0, calls=None):
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append(argv)
+        return _FakeCompleted(returncode, stdout)
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(publish_evidence, "subprocess", SimpleNamespace(run=fake_run))
+
+
+def test_check_head_passes_when_fresh(tmp_path, monkeypatch, capsys):
+    calls = []
+    _fake_gh(monkeypatch, calls=calls)
+    rc = publish_evidence.main(
+        ["check-head", "--repo", REPO, "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 0
+    assert calls == [["gh", "api", f"repos/{REPO}/pulls/{PR}", "--jq", ".head.sha"]]
+    assert capsys.readouterr().out == ""
+
+
+def test_check_head_stops_when_the_head_moved(monkeypatch, capsys):
+    _fake_gh(monkeypatch, stdout="b" * 40)
+    rc = publish_evidence.main(
+        ["check-head", "--repo", REPO, "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 1
+    assert "stopping without writing" in capsys.readouterr().err
+
+
+def test_check_head_errors_when_the_api_fails(monkeypatch):
+    _fake_gh(monkeypatch, returncode=1)
+    rc = publish_evidence.main(
+        ["check-head", "--repo", REPO, "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 2
+
+
+def test_check_head_errors_on_a_bad_api_answer(monkeypatch):
+    _fake_gh(monkeypatch, stdout="not-a-sha")
+    rc = publish_evidence.main(
+        ["check-head", "--repo", REPO, "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 2
+
+
+def test_check_head_rejects_bad_arguments():
+    rc = publish_evidence.main(
+        ["check-head", "--repo", "not a repo", "--pr", str(PR), "--expected", HEAD_SHA]
+    )
+    assert rc == 2
