@@ -137,7 +137,10 @@ def _resolve_import(path, level, dotted, root):
             base = base.parent
         roots = [base]
     else:
-        roots = [root / "tests", path.parent]
+        # The repository root is a search root too: ``from tests.core import
+        # evil`` loads root/tests/core/evil.py (round 3). Absolute imports
+        # that resolve nowhere still contribute nothing.
+        roots = [root / "tests", path.parent, root]
     found = []
     for search in roots:
         for candidate in (
@@ -167,7 +170,11 @@ def _dynamic_import_targets(tree, path, root):
 
     ``importlib.import_module("core.x")`` and ``__import__("core.x")`` load
     exactly what the equivalent import statement loads; a non-literal first
-    argument cannot be resolved statically, so it contributes nothing.
+    argument cannot be resolved statically, so it contributes nothing. Two
+    literal-string forms resolve like their statement equivalents (round 3):
+    ``import_module(".evil", "core")`` loads ``core.evil`` through the
+    package argument, and ``__import__("core", fromlist=["evil"])`` loads
+    ``core.evil`` through the fromlist.
     """
     targets = []
     for node in ast.walk(tree):
@@ -177,9 +184,11 @@ def _dynamic_import_targets(tree, path, root):
         if isinstance(func, ast.Attribute):
             if func.attr != "import_module":
                 continue
+            is_import_module = True
         elif isinstance(func, ast.Name):
             if func.id not in ("import_module", "__import__"):
                 continue
+            is_import_module = func.id == "import_module"
         else:
             continue
         first = node.args[0] if node.args else None
@@ -187,12 +196,67 @@ def _dynamic_import_targets(tree, path, root):
             for keyword in node.keywords:
                 if keyword.arg == "name":
                     first = keyword.value
-        if (
+        if not (
             isinstance(first, ast.Constant)
             and isinstance(first.value, str)
             and first.value
         ):
-            targets.extend(_resolve_import(path, 0, first.value, root))
+            continue
+        name = first.value
+        if name.startswith(".") and is_import_module:
+            # A leading-dot name resolves against the package argument, like
+            # a relative import: one dot keeps the package, each further dot
+            # climbs one parent. Without a literal package it stays opaque.
+            package = None
+            if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                package = node.args[1].value
+            if package is None:
+                for keyword in node.keywords:
+                    if keyword.arg == "package":
+                        package = (
+                            keyword.value.value
+                            if isinstance(keyword.value, ast.Constant)
+                            else None
+                        )
+            if isinstance(package, str) and package:
+                level = len(name) - len(name.lstrip("."))
+                remainder = name.lstrip(".")
+                base = package.split(".")
+                if level - 1 <= len(base):
+                    absolute = ".".join(
+                        base[: len(base) - level + 1]
+                        + ([remainder] if remainder else [])
+                    )
+                    if absolute:
+                        targets.extend(_resolve_import(path, 0, absolute, root))
+                continue
+        targets.extend(_resolve_import(path, 0, name, root))
+        if not is_import_module:
+            # ``__import__("core", fromlist=["evil"])`` loads the submodule
+            # too, like ``from core import evil``. Only literal list/tuple
+            # items resolve; anything computed contributes nothing.
+            fromlist = None
+            if len(node.args) >= 4 and isinstance(
+                node.args[3], (ast.List, ast.Tuple)
+            ):
+                fromlist = node.args[3]
+            else:
+                for keyword in node.keywords:
+                    if keyword.arg == "fromlist" and isinstance(
+                        keyword.value, (ast.List, ast.Tuple)
+                    ):
+                        fromlist = keyword.value
+            if fromlist is not None:
+                for item in fromlist.elts:
+                    if (
+                        isinstance(item, ast.Constant)
+                        and isinstance(item.value, str)
+                        and item.value
+                        and item.value != "*"
+                    ):
+                        targets.extend(
+                            _resolve_import(path, 0, f"{name}.{item.value}", root)
+                        )
     return targets
 
 
@@ -323,6 +387,17 @@ def _closure_reachable(start, root):
 
 
 def test_every_repo_local_import_of_protected_suites_is_protected():
+    """The closure pin: every file a protected suite can load is protected.
+
+    The pin covers static imports and literal-string dynamic imports only
+    (``import_module``/``__import__`` with string-literal names, packages,
+    and fromlists, plus literal ``spec_from_file_location`` paths). It is a
+    drift check for honest mistakes, not a sandbox: computed import names
+    (``import_module(name)`` with a variable) are out of scope — they
+    contribute nothing, and sneaking a weakening through a computed import
+    would be a deliberate attack, which the trusted base-copy hygiene scan
+    (the tamper-proof part) still catches.
+    """
     unprotected = []
     for path in _suite_files():
         rel = path.relative_to(ROOT).as_posix()
@@ -412,6 +487,74 @@ def test_closure_follows_dunder_import_string(tmp_path):
     )
     reached = _closure_reachable(root / "tests" / "core" / "start.py", root)
     assert "tests/core/x.py" in reached
+
+
+def test_closure_follows_import_module_package_argument(tmp_path):
+    """Finding 3 (round 3): import_module(".evil", "core") loads core/evil.py."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": (
+                "import importlib\nimportlib.import_module(\".evil\", \"core\")\n"
+            ),
+            "tests/core/__init__.py": "",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/evil.py" in reached
+    assert "tests/core/__init__.py" in reached
+
+
+def test_closure_follows_import_module_package_keyword(tmp_path):
+    """Finding 3 (round 3): the package= keyword form resolves too."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": (
+                "import importlib\n"
+                'importlib.import_module(".evil", package="core")\n'
+            ),
+            "tests/core/__init__.py": "",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/evil.py" in reached
+
+
+def test_closure_follows_dunder_import_fromlist(tmp_path):
+    """Finding 3 (round 3): __import__("core", fromlist=["evil"]) loads it."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": '__import__("core", fromlist=["evil"])\n',
+            "tests/core/__init__.py": "",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/evil.py" in reached
+    assert "tests/core/__init__.py" in reached
+
+
+def test_closure_resolves_repository_root_tests_import(tmp_path):
+    """Finding 3 (round 3): from tests.core import evil loads it."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": "from tests.core import evil\n",
+            "tests/core/__init__.py": "",
+            "tests/core/evil.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/evil.py" in reached
+    assert "tests/core/__init__.py" in reached
 
 
 def test_closure_ignores_non_literal_dynamic_import(tmp_path):
