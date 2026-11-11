@@ -9,8 +9,8 @@ to confirm that the author is right.
 | # | Gate | Who | Required for |
 |---|------|-----|--------------|
 | 1 | Automated checks | CI | every change |
-| 2 | Independent agent review | a fresh agent, not the author | every change to code |
-| 3 | Threat and privacy review | a fresh agent or Jon | new module; any change to http allow-lists, secrets, identifiers, envelope, storage, drop-ins, or install |
+| 2 | Independent agent review | a fresh agent from a model family other than the author's | every change to code |
+| 3 | Threat and privacy review | a fresh agent from a model family other than the author's, or Jon | new module; any change to http allow-lists, secrets, identifiers, envelope, storage, drop-ins, or install |
 | 4 | Spec-vs-code review | a fresh agent | every change that touches code or docs |
 | — | Deep red-team review | a fresh agent from another model family | optional; considered for the changes listed in its section |
 | 5 | Human sign-off | Jon | every merge to `main` |
@@ -282,6 +282,9 @@ The reviewer gets the **diff, the relevant spec, and AGENTS.md**. It does
 not get the author's reasoning or summary. An author who explains the
 change pre-loads the conclusion.
 
+Choose a fresh reviewer from a model family other than the author's
+(AGENTS.md, "Who does the work", D30).
+
 Reviewer brief (use as is, filling in the brackets):
 
 > You are reviewing a change to Muse Housesitter, a read-only data-gathering
@@ -299,6 +302,9 @@ Reviewer brief (use as is, filling in the brackets):
 - The `/code-review` skill can serve as this gate.
 
 ## Gate 3: threat and privacy review
+
+Choose a fresh reviewer from a model family other than the author's, or
+Jon (AGENTS.md, "Who does the work", D30).
 
 Use this checklist. Every item gets *yes*, *no (finding)*, or *n/a (why)*.
 
@@ -392,10 +398,11 @@ test, and assets that weren't there.
 
 Consider this step for a new module or any change to http allow-lists,
 secrets, identifiers, envelope, storage, drop-ins, install, CI, or
-`ci-guard`. When one of these changes was also reviewed in gates 2–3 by
-the model family that wrote it, that is a strong reason to run this review
-rather than skip it. Same-family review alone does not put a low-risk
-change in scope.
+`ci-guard`. If one of these changes received same-family review in gates
+2–3 under the AGENTS.md exception (assigned agent unavailable, or a small
+fix found in review), that is a strong reason to run this review rather
+than skip it. Same-family review alone does not put a low-risk change in
+scope.
 
 Use a fresh agent from a model family other than the author's: Codex
 running an astra-level GPT model at `xhigh` effort, or `ultra` for core,

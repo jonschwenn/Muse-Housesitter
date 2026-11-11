@@ -70,23 +70,41 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
    module's output, starts with its spec in `docs/modules/<id>.md`. That
    includes the output schema, with field names, units, and meanings. Jon
    reviews the spec before code is written.
-3. **Fixture, then code, then test.** Write an invented upstream fixture
+3. **Who does the work.** Split work by model family to spread token use
+   across providers and get review from another family (D30):
+   - Muse Spark (`muse-spark-1.3`, provider "Muse Code"): code and tests,
+     including adversarial testing that tries to break code.
+   - Codex (`gpt-6.1-sol`): front end (`web/`) and documentation prose
+     (`docs/`, `AGENTS.md`, `docs/DECISIONS.md` entries, module `SKILL.md`
+     files, and `README.md`, leaving Jon's own introduction as he wrote
+     it, D20).
+   - Claude: orchestration, backend design, briefs, final verification,
+     and PRs.
+
+   For every doc, including `docs/ARCHITECTURE.md`, Claude supplies the
+   facts and checks accuracy; Codex writes the prose.
+   Every brief that starts work names its model; gate 2 and gate 3 reviews
+   use a model family other than the one that wrote the change, applying
+   D22's reasoning; the deep review in REVIEW.md stays optional.
+   If the assigned agent is unavailable, or for a small fix found in
+   review, another agent may do the work; the PR says so.
+4. **Fixture, then code, then test.** Write an invented upstream fixture
    first, then the code that reads it, then the test that pins the
    normalised output field by field.
-4. **Review gates and evidence.** Every change goes through the gates in
+5. **Review gates and evidence.** Every change goes through the gates in
    [`docs/REVIEW.md`](docs/REVIEW.md) before it is called done. Every PR
    carries before/after evidence on the fixture house (REVIEW.md,
    "Evidence"): text diffs for command output, rendered screenshots for any
    web UI. Explain each change they show.
    For high-risk changes, also see REVIEW.md, "Optional: deep red-team
    review".
-5. **Jon signs off.** Agents never merge to `main`, and never commit or push
+6. **Jon signs off.** Agents never merge to `main`, and never commit or push
    without Jon saying so for that specific change. Approval does not carry
    over to the next change.
-6. **Commit identity.** Commits are authored and committed as
+7. **Commit identity.** Commits are authored and committed as
    `Jon Schwenn <jonschwenn@gmail.com>`. Check `git config user.email`
    before committing. Never commit as a machine default user.
-7. **Credit the agents that did the work.** Where practical, split a
+8. **Credit the agents that did the work.** Where practical, split a
    change into one commit per contributor. Each commit ends with a
    co-author trailer for only the agents that wrote that commit:
    - Claude: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
@@ -139,10 +157,11 @@ gh api graphql -f query='query{repository(owner:"jonschwenn",name:"Muse-Housesit
   step of "How work happens".
 - **Type labels.** `bug`, `enhancement`, `documentation`, `ci` (CI,
   workflows, evidence publishing), `decision` (needs a decision from Jon).
-- **Owner labels.** `agent:claude` (Claude: orchestration, backend, review),
-  `agent:codex` (Codex: front end, documentation), `agent:spark` (Muse
-  Spark: code, adversarial review), `owner:jon` (needs Jon: hardware,
-  accounts, decisions).
+- **Owner labels.** `agent:claude` (Claude: orchestration, backend design,
+  briefs, verification, PRs), `agent:codex` (Codex: front end, documentation),
+  `agent:spark` (Muse Spark: code, tests, adversarial review), `owner:jon`
+  (needs Jon: hardware, accounts, decisions). The agent labels follow the
+  split in "Who does the work" above.
 - **Resolving issues.** A PR that resolves an issue says "Fixes #N" in its
   description.
 
