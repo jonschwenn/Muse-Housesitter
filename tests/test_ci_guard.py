@@ -215,3 +215,188 @@ def test_missing_token_fails_closed(monkeypatch, capsys):
 def test_bad_pr_number_fails_closed(monkeypatch):
     monkeypatch.setenv("GH_TOKEN", "x")
     assert ci_guard.main(["--repo", "o/r", "--pr", "0"]) == 2
+
+
+# CLI wiring: main() ties listing, lookup, and decision to exit codes ----------
+
+# Planted so the hygiene scan allows it and a leak is easy to spot.
+PLANTED_TOKEN = "PLANTED-SECRET-ci-guard-token"
+# The annotation prefix main() prints on a pass. Kept as one constant so the
+# text after it never sits next to it in source (the hygiene scan would read
+# "...d::c..." as an IPv6 address).
+NOTICE = "::notice title=ci-guard::"
+
+
+class FakeApi:
+    """Stands in for ``api_get``: serves canned file pages, author, permission."""
+
+    def __init__(self, pages, *, author="octo", permission="write", files_error=None,
+                 permission_error=None):
+        self.pages = pages
+        self.author = author
+        self.permission = permission
+        self.files_error = files_error
+        self.permission_error = permission_error
+        self.calls = []
+
+    def __call__(self, repo, pr, token, subpath):
+        assert (repo, pr, token) == ("o/r", 7, PLANTED_TOKEN)
+        self.calls.append(subpath)
+        if subpath.startswith("files?"):
+            if self.files_error is not None:
+                raise self.files_error
+            page = int(subpath.rsplit("page=", 1)[1])
+            return self.pages[page - 1] if page <= len(self.pages) else []
+        if subpath == "":
+            return {"user": {"login": self.author}}
+        if subpath == f"collaborators/{self.author}/permission":
+            if self.permission_error is not None:
+                raise self.permission_error
+            return {"permission": self.permission}
+        raise AssertionError(f"unexpected API path: {subpath!r}")
+
+
+def _run_main(monkeypatch, capsys, fake):
+    monkeypatch.setenv("GH_TOKEN", PLANTED_TOKEN)
+    monkeypatch.setattr(ci_guard, "api_get", fake)
+    code = ci_guard.main(["--repo", "o/r", "--pr", "7"])
+    out, err = capsys.readouterr()
+    assert PLANTED_TOKEN not in out
+    assert PLANTED_TOKEN not in err
+    assert "PLANTED-SECRET" not in out + err
+    return code, out, err
+
+
+def _files(*names):
+    return [[{"filename": name} for name in names]]
+
+
+def test_main_no_protected_paths_passes_without_lookups(monkeypatch, capsys):
+    fake = FakeApi(_files("docs/GITHUB.md", "web/index.html"))
+    code, out, err = _run_main(monkeypatch, capsys, fake)
+    assert code == 0
+    assert out == "ci_guard: ok: no protected paths among 2 changed file(s)\n"
+    assert err == ""
+    # Only the file listing was fetched: no author or permission lookup.
+    assert fake.calls == ["files?per_page=100&page=1"]
+
+
+# GitHub's legacy `permission` field reports maintain as write and triage as
+# read; the extra values still exercise the decision table.
+@pytest.mark.parametrize("permission", ["write", "maintain", "admin"])
+def test_main_trusted_author_passes_with_notice(monkeypatch, capsys, permission):
+    fake = FakeApi(
+        _files(".github/workflows/ci.yml", "pyproject.toml", "docs/GITHUB.md"),
+        permission=permission,
+    )
+    code, out, err = _run_main(monkeypatch, capsys, fake)
+    assert code == 0
+    assert err == ""
+    lines = out.splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith(NOTICE + "ci_guard: ok: trusted author")
+    assert ".github/workflows/ci.yml, pyproject.toml" in lines[0]
+    assert "docs/GITHUB.md" not in lines[0]
+    assert f"(author @octo has '{permission}')" in lines[0]
+    assert fake.calls[1:] == ["", "collaborators/octo/permission"]
+
+
+@pytest.mark.parametrize(
+    "permission, permission_error",
+    [
+        ("read", None),
+        ("triage", None),
+        (None, ci_guard.ApiError("GET .../permission failed with HTTP 404")),
+    ],
+)
+def test_main_untrusted_author_is_blocked(monkeypatch, capsys, permission, permission_error):
+    fake = FakeApi(
+        _files(".github/workflows/ci.yml", "tests/conftest.py", "README.md"),
+        author="stranger",
+        permission=permission,
+        permission_error=permission_error,
+    )
+    code, out, err = _run_main(monkeypatch, capsys, fake)
+    expected = permission or "none"
+    assert code == 1
+    lines = out.splitlines()
+    assert len(lines) == 1
+    line = lines[0]
+    assert line.startswith("::error::ci_guard: blocked: PR touches protected path(s): ")
+    for path in (".github/workflows/ci.yml", "tests/conftest.py"):
+        assert f"{path} ({ci_guard.is_protected(path)})" in line
+    assert "README.md" not in line
+    assert f"(author @stranger has '{expected}'; needs admin, maintain, or write)" in line
+    assert "D16" in err
+
+
+def test_main_listing_error_fails_closed(monkeypatch, capsys):
+    fake = FakeApi(
+        [], files_error=ci_guard.ApiError("GET https://example.invalid/x failed with HTTP 500")
+    )
+    code, out, _ = _run_main(monkeypatch, capsys, fake)
+    assert code == 2
+    assert out.startswith("::error::ci_guard: fail closed: ")
+    assert "HTTP 500" in out
+    assert len(out.splitlines()) == 1
+    assert fake.calls == ["files?per_page=100&page=1"]
+
+
+def test_main_listing_unexpected_exception_fails_closed(monkeypatch, capsys):
+    fake = FakeApi([], files_error=RuntimeError("boom"))
+    code, out, _ = _run_main(monkeypatch, capsys, fake)
+    assert code == 2
+    assert out.startswith("::error::ci_guard: fail closed: listing page 1 failed: boom")
+
+
+@pytest.mark.parametrize("status", ["500", "403"])
+def test_main_permission_error_fails_closed(monkeypatch, capsys, status):
+    fake = FakeApi(
+        _files("pyproject.toml"),
+        permission_error=ci_guard.ApiError(f"GET .../permission failed with HTTP {status}"),
+    )
+    code, out, _ = _run_main(monkeypatch, capsys, fake)
+    assert code == 2
+    assert out.startswith("::error::ci_guard: fail closed: ")
+    assert f"HTTP {status}" in out
+
+
+def test_main_bad_author_body_fails_closed(monkeypatch, capsys):
+    fake = FakeApi(_files("pyproject.toml"))
+
+    def no_author(repo, pr, token, subpath):
+        if subpath == "":
+            return {"user": None}
+        return fake(repo, pr, token, subpath)
+
+    code, out, _ = _run_main(monkeypatch, capsys, no_author)
+    assert code == 2
+    assert out.startswith("::error::ci_guard: fail closed: PR lookup returned no author login")
+
+
+def test_main_thirty_full_pages_fail_closed(monkeypatch, capsys):
+    full = [{"filename": f"docs/f{i}.md"} for i in range(100)]
+    fake = FakeApi([full] * 30)
+    code, out, _ = _run_main(monkeypatch, capsys, fake)
+    assert code == 2
+    assert out == (
+        "::error::ci_guard: fail closed: PR touches 3000 or more files; "
+        "GitHub caps the listing, so the change cannot be checked\n"
+    )
+    assert len(fake.calls) == 30
+    assert "" not in fake.calls  # never got as far as the author lookup
+
+
+@pytest.mark.parametrize("permission, expected_code", [("write", 0), ("read", 1)])
+def test_main_newline_in_file_name_cannot_inject_annotations(
+    monkeypatch, capsys, permission, expected_code
+):
+    evil = ".github/x\n" + NOTICE + "ci_guard: ok\r%0A.yml"
+    fake = FakeApi(_files(evil), permission=permission)
+    code, out, _ = _run_main(monkeypatch, capsys, fake)
+    assert code == expected_code
+    lines = out.splitlines()
+    assert len(lines) == 1, lines
+    # The injected text stays inside the one real annotation, escaped.
+    assert lines[0].startswith(NOTICE if expected_code == 0 else "::error::")
+    assert ".github/x%0A" + NOTICE + "ci_guard: ok%0D%250A.yml" in lines[0]
