@@ -96,8 +96,12 @@ class ScriptedServer:
         """Stop accepting, then wait for every connection to finish.
 
         When this returns, ``connections``, ``peer_bytes`` and ``requests``
-        are final: no connection thread is still recording. Canned sleeps
-        and drips end early once the stop flag is set.
+        are final: no connection thread is still recording. A connection
+        still sending is waited for (each handshake or recv times out after
+        2 s). Canned sleeps end early once the stop flag is set, and a
+        canned drip sends the rest of its body without the delays. If a
+        thread is still alive after a 5 s join, this raises rather than
+        let a test read partial records.
         """
         self._stop.set()
         try:
@@ -105,9 +109,13 @@ class ScriptedServer:
         except OSError:
             pass
         self._thread.join(timeout=5)
-        for worker in self._workers:
+        stuck = self._thread.is_alive()
+        for worker in list(self._workers):
             worker.join(timeout=5)
+            stuck = stuck or worker.is_alive()
         self._sock.close()
+        if stuck:
+            raise AssertionError("ScriptedServer.close(): a server thread is still running")
 
     def __enter__(self):
         return self
@@ -132,6 +140,7 @@ class ScriptedServer:
             self.connections += 1
         sock = raw
         try:
+            raw.settimeout(2.0)
             if self._tls is not None:
                 try:
                     sock = self._tls.wrap_socket(raw, server_side=True)
