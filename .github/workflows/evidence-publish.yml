@@ -364,6 +364,11 @@ jobs:
         run: |
           set -euo pipefail
           case "$PR" in ''|*[!0-9]*) echo "bad PR number: $PR"; exit 1;; esac
+          # A build that died before uploading leaves no rendered/
+          # directory (the download above then finds nothing): create it
+          # so the publish_failed notice below can still be written and
+          # posted instead of failing this step with no comment.
+          mkdir -p rendered
           flags=""
           if [ -f rendered/refusal.json ]; then flags="$flags --has-refusal"; fi
           if [ -f rendered/comment.md ]; then flags="$flags --has-comment"; fi

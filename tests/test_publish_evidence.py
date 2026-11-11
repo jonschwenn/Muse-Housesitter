@@ -1653,3 +1653,109 @@ def test_check_head_rejects_bad_arguments():
         ["check-head", "--repo", "not a repo", "--pr", str(PR), "--expected", HEAD_SHA]
     )
     assert rc == 2
+
+
+# Review round 2, finding 1: a missing rendered directory still posts. --------
+#
+# When the build fails before uploading validated-evidence, rendered/ does
+# not exist; the comment job must still post the fixed publish_failed
+# notice instead of dying on the missing directory. This runs the real
+# comment-step shell from the workflow with a fake gh on PATH.
+
+
+def _comment_step_shell():
+    """Extract the comment step's `run:` block from evidence-publish.yml."""
+    text = (
+        ROOT / ".github" / "workflows" / "evidence-publish.yml"
+    ).read_text(encoding="utf-8")
+    lines = text.splitlines()
+    start = next(
+        i for i, line in enumerate(lines)
+        if line.strip() == "- name: Post or update the evidence comment"
+    )
+    marker = next(
+        i for i in range(start, len(lines)) if lines[i].strip() == "run: |"
+    )
+    body = []
+    for line in lines[marker + 1 :]:
+        if line.strip() == "" or line.startswith(" " * 10):
+            body.append(line[10:] if line.startswith(" " * 10) else line)
+        else:
+            break
+    assert body, "comment step has no run block"
+    return "\n".join(body) + "\n"
+
+
+_FAKE_GH = """\
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+state = pathlib.Path(os.environ["FAKE_STATE"])
+if "-X" in args:
+    method = args[args.index("-X") + 1]
+    posted = ""
+    for flag in args:
+        if flag.startswith("body=@"):
+            posted = pathlib.Path(flag[len("body=@"):]).read_text()
+    (state / "posted.json").write_text(
+        json.dumps({"method": method, "body": posted})
+    )
+    print("")
+elif any("/pulls/" in a for a in args):
+    print(os.environ["HEAD_SHA"])
+elif any("/comments" in a for a in args):
+    if "--jq" in args:
+        print("")
+    else:
+        print("[]")
+else:
+    raise SystemExit(f"unexpected gh call: {args}")
+"""
+
+
+def _run_comment_step(tmp_path, monkeypatch, build_result, push_result):
+    """Run the real comment-step shell with a fake gh; return (rc, posted)."""
+    import os
+    import subprocess
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "scripts").symlink_to(ROOT / "scripts", target_is_directory=True)
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    gh = fake_bin / "gh"
+    gh.write_text(_FAKE_GH)
+    gh.chmod(0o755)
+    state = tmp_path / "state"
+    state.mkdir()
+    step = tmp_path / "comment-step.sh"
+    step.write_text(_comment_step_shell())
+    env = {
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "GH_TOKEN": "fake",
+        "REPO": REPO,
+        "PR": str(PR),
+        "HEAD_SHA": HEAD_SHA,
+        "EVIDENCE_SHA": "",
+        "BUILD_RESULT": build_result,
+        "PUSH_RESULT": push_result,
+        "FAKE_STATE": str(state),
+    }
+    proc = subprocess.run(
+        ["bash", str(step)], cwd=run, env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+    posted = state / "posted.json"
+    return proc, json.loads(posted.read_text()) if posted.exists() else None
+
+
+def test_comment_step_posts_notice_with_no_rendered_dir(tmp_path, monkeypatch):
+    # Build failed before uploading: no rendered/ directory exists, the
+    # download found nothing, and the push was skipped. The fixed
+    # publish_failed notice must still reach the PR.
+    proc, posted = _run_comment_step(tmp_path, monkeypatch, "failure", "skipped")
+    assert proc.returncode == 0, proc.stderr
+    assert posted is not None, f"nothing posted; stderr: {proc.stderr}"
+    assert posted["method"] == "POST"
+    assert posted["body"].startswith("<!-- housesitter-evidence")
+    assert "`publish_failed`" in posted["body"]
