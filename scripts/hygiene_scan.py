@@ -805,18 +805,60 @@ def _git(args: list[str], *, cwd: str) -> bytes:
     return proc.stdout
 
 
+def _redact_path(path: str) -> str:
+    """Replace secret-shaped spans in a printed path with ``[redacted]``.
+
+    File names are PR-controlled data, and a token-shaped name would
+    otherwise reach the CI log verbatim through the suppression listing or
+    a fail-closed error (round 3, finding 4). Every span the secret
+    detectors match — token formats, credential-shaped segments — becomes
+    the fixed placeholder, before escaping and truncation. The planted
+    marker and reference-like values stay readable, exactly as in
+    :func:`secret_problems`: they name or excuse a secret rather than
+    carry one.
+    """
+    detectors = SECRET_PATTERNS + [("credential assignment", UNQUOTED_ASSIGNMENT)]
+    spans = []
+    for _label, pattern in detectors:
+        entries = pattern(path) if callable(pattern) else _regex_spans(pattern, path)
+        for group0, value, start in entries:
+            if PLANTED in group0:
+                continue
+            if value is not None and REFERENCE_VALUE.match(value.strip()):
+                continue
+            spans.append((start, start + len(group0)))
+    if not spans:
+        return path
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    parts = []
+    pos = 0
+    for start, end in merged:
+        parts.append(path[pos:start])
+        parts.append("[redacted]")
+        pos = end
+    parts.append(path[pos:])
+    return "".join(parts)
+
+
 def _display(path: str) -> str:
     """Make a blob path safe for a bounded log line.
 
-    Surrogates from non-UTF-8 names become ``?`` so printing never raises
+    Secret-shaped spans are redacted first (see :func:`_redact_path`),
+    since a file name can itself be the sensitive value. Surrogates from
+    non-UTF-8 names become ``?`` so printing never raises
     ``UnicodeEncodeError``; valid UTF-8 (including non-ASCII) passes
     through; newlines become ``\\n`` so one path cannot inject extra lines;
     other control characters (including ESC) are escaped so the path cannot
     drive the terminal; and the result is cut to ``_MAX_DISPLAY_PATH``
-    characters, since file names are PR-controlled data. File names are
-    already public in the PR, so printing a bounded, escaped path is fine.
+    characters, since file names are PR-controlled data.
     """
-    safe = path.encode("utf-8", errors="replace").decode("utf-8")
+    safe = _redact_path(path).encode("utf-8", errors="replace").decode("utf-8")
     out = []
     for char in safe:
         if char == "\n":

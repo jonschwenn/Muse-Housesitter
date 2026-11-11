@@ -1277,6 +1277,45 @@ def test_print_capped_respects_budget(capsys):
     assert out.count("\n") == 2
 
 
+def test_display_redacts_secret_shaped_names():
+    """Finding 4 (round 3): a token-shaped name never prints verbatim."""
+    token = "gh" + "p_" + "Q" * 30
+    assert hygiene_scan._display(token) == "[redacted]"
+    assert token not in hygiene_scan._display(f"dir/{token}.txt")
+    assert "[redacted]" in hygiene_scan._display(f"dir/{token}.txt")
+    # Credential-shaped names redact too; planted and reference-like values
+    # stay readable, as in secret_problems.
+    assignment = PW + '="hunter2' + 'hunter2"'
+    assert hygiene_scan._display(assignment) == "[redacted]"
+    assert hygiene_scan._display("PLANTED-SECRET-notes") == "PLANTED-SECRET-notes"
+    assert hygiene_scan._display(PW + "=changeme") == PW + "=changeme"
+    # Ordinary names still print in full.
+    assert hygiene_scan._display("notes.txt") == "notes.txt"
+
+
+@NEEDS_GIT
+def test_trusted_scan_suppression_listing_redacts_secret_name(tmp_path):
+    """Finding 4 (round 3): the suppression path hides a token-shaped name."""
+    token = "gh" + "p_" + "Q" * 30
+    repo, sha = _git_repo(tmp_path, {token: "# hygiene: ok\n"})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert token not in proc.stdout
+    assert "suppression [redacted]:1" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_oversized_blob_error_redacts_secret_name(tmp_path):
+    """Finding 4 (round 3): the fail-closed path hides a token-shaped name."""
+    token = "gh" + "p_" + "Q" * 30
+    repo, sha = _git_repo(tmp_path, {token: "Z" * (hygiene_scan.MAX_FILE_BYTES + 1)})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "fail closed" in proc.stdout
+    assert token not in proc.stdout
+    assert "[redacted]" in proc.stdout
+
+
 @NEEDS_GIT
 def test_trusted_scan_huge_ssid_stays_small(tmp_path):
     """Finding 5 (round 2): a 500 KB SSID becomes one short line."""
