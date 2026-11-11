@@ -11,6 +11,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location(
     "evidence_checks", ROOT / "scripts" / "evidence_checks.py"
@@ -171,3 +173,72 @@ def test_not_a_dict_is_rejected():
 
 def test_scenarios_must_be_a_list():
     assert evidence_checks.validate_results(_doc(scenarios={}), KNOWN_IDS)
+
+
+# Part 2 (Decision 4, option B): fixed refusal notices. ----------------------
+#
+# When the publisher refuses an artifact it posts a notice built only from
+# main's fixed text plus a reason code. No PR-supplied content may reach it.
+
+
+def test_refusal_reasons_are_a_fixed_enum():
+    assert set(evidence_checks.REFUSAL_REASONS) == {
+        "missing",
+        "too_large",
+        "bad_png",
+        "bad_schema",
+        "stale_head",
+    }
+
+
+def test_refusal_notice_is_fixed_text_with_reason_code():
+    for reason in evidence_checks.REFUSAL_REASONS:
+        notice = evidence_checks.refusal_notice(reason)
+        assert notice.startswith("<!-- housesitter-evidence -->\n")
+        assert "## Before / after evidence" in notice
+        assert f"`{reason}`" in notice
+        # Fixed sentences only: no slots for PR content.
+        assert "PWNED" not in evidence_checks.refusal_notice(reason)
+
+
+def test_refusal_notice_rejects_unknown_reason():
+    with pytest.raises(ValueError):
+        evidence_checks.refusal_notice("pwned")
+
+
+def test_refusal_notices_differ_only_by_fixed_sentence():
+    bodies = {evidence_checks.refusal_notice(r) for r in evidence_checks.REFUSAL_REASONS}
+    assert len(bodies) == len(evidence_checks.REFUSAL_REASONS)
+
+
+def test_artifact_reason_too_large():
+    assert (
+        evidence_checks.artifact_refusal_reason(["shot.png is 999 bytes, over the cap"])
+        == "too_large"
+    )
+    assert (
+        evidence_checks.artifact_refusal_reason(["PNGs total 999 bytes, over the cap"])
+        == "too_large"
+    )
+
+
+def test_artifact_reason_bad_png():
+    assert (
+        evidence_checks.artifact_refusal_reason(["shot.png is not a PNG file"])
+        == "bad_png"
+    )
+    assert (
+        evidence_checks.artifact_refusal_reason(["shot.png: PNG CRC mismatch"])
+        == "bad_png"
+    )
+
+
+def test_artifact_reason_bad_schema_for_the_rest():
+    assert (
+        evidence_checks.artifact_refusal_reason(["manifest must be an object"])
+        == "bad_schema"
+    )
+    assert (
+        evidence_checks.artifact_refusal_reason(["manifest names a missing file: x"])
+        == "bad_schema"
+    )

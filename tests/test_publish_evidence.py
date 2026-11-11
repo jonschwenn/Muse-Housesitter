@@ -26,6 +26,8 @@ def _load(name):
 ui_evidence = _load("ui_evidence")
 pr_evidence = _load("pr_evidence")
 publish_evidence = _load("publish_evidence")
+# Shared with the publisher under test so monkeypatched caps apply to it.
+evidence_checks = publish_evidence.evidence_checks
 
 REPO = "example-owner/example-repo"
 PR = 7
@@ -215,6 +217,113 @@ def test_render_refuses_stale_head_sha(tmp_path):
     rc, out = _render(tmp_path, artifact)
     assert rc == 1
     assert not (out / "comment.md").exists()
+
+
+# Fixed refusal notices (Decision 4, option B) --------------------------------
+#
+# Every refusal writes refusal.json with a reason code from the fixed enum,
+# and the `refusal` subcommand turns it into main's fixed notice. One test
+# per reason code; no silent no-comment outcome remains.
+
+
+def _refusal_reason(tmp_path, out):
+    return json.loads((out / publish_evidence.REFUSAL_FILENAME).read_text())["reason"]
+
+
+def test_refusal_missing_when_results_json_absent(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    (artifact / "results.json").unlink()
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "missing"
+    assert not (out / "comment.md").exists()
+    assert not (out / "files").exists()
+
+
+def test_refusal_too_large_when_results_json_oversized(tmp_path, monkeypatch):
+    monkeypatch.setattr(evidence_checks, "RESULTS_MAX_BYTES", 10)
+    artifact = _artifact(tmp_path, pngs=(), manifest=None)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "too_large"
+
+
+def test_refusal_too_large_when_pngs_exceed_total_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(ui_evidence, "MAX_TOTAL_BYTES", 10)
+    artifact = _artifact(tmp_path)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "too_large"
+
+
+def test_refusal_bad_png_for_a_fake_screenshot(tmp_path):
+    artifact = _artifact(tmp_path)
+    (artifact / "ui_out" / "typical__index-phone__head.png").write_bytes(b"not a png")
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_png"
+
+
+def test_refusal_bad_schema_for_unknown_scenario_id(tmp_path):
+    bad = _results()
+    bad["scenarios"][0]["id"] = "forged-scenario"
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=bad)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+
+
+def test_refusal_stale_head_for_mismatched_sha(tmp_path):
+    doc = _results()
+    doc["metadata"]["head_sha"] = "b" * 40
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=doc)
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "stale_head"
+
+
+def test_refusal_subcommand_prints_fixed_notice(tmp_path):
+    (tmp_path / "refusal.json").write_text(json.dumps({"reason": "too_large"}))
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(tmp_path / "refusal.json")]
+    )
+    assert rc == 0
+
+
+def test_refusal_subcommand_rejects_a_bad_reason(tmp_path):
+    (tmp_path / "refusal.json").write_text(json.dumps({"reason": "pwned"}))
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(tmp_path / "refusal.json")]
+    )
+    assert rc == 2
+
+
+def test_refusal_subcommand_rejects_a_missing_file(tmp_path):
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(tmp_path / "no-such-file.json")]
+    )
+    assert rc == 2
+
+
+def test_refusal_notice_carries_no_artifact_content(tmp_path, capsys):
+    # Even a hostile artifact shapes nothing: the notice is fixed text.
+    bad = _results()
+    bad["scenarios"][0]["after"] = "PWNED Approved by maintainer"
+    artifact = _artifact(tmp_path, pngs=(), manifest=None, results=bad)
+    bad["scenarios"][0]["id"] = "forged"
+    (artifact / "results.json").write_text(json.dumps(bad))
+    rc, out = _render(tmp_path, artifact)
+    assert rc == 1
+    assert _refusal_reason(tmp_path, out) == "bad_schema"
+    rc = publish_evidence.main(
+        ["refusal", "--reason-file", str(out / publish_evidence.REFUSAL_FILENAME)]
+    )
+    assert rc == 0
+    notice = capsys.readouterr().out
+    assert notice.startswith(evidence_checks.REFUSAL_MARKER + "\n")
+    assert "`bad_schema`" in notice
+    assert "PWNED" not in notice
+    assert "Approved by maintainer" not in notice
 
 
 # Valid artifact -----------------------------------------------------------------

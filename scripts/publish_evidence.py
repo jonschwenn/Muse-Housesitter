@@ -23,9 +23,10 @@ Subcommands (called by the workflow, in order across its jobs):
         Pin the placeholder to the evidence push SHA. Validates the SHA.
 
 Exit codes: 0 ok; 1 the artifact is invalid, including unreadable or
-malformed artifact files (render: skip the publish, no push, no comment);
-2 bad caller arguments (render), or an unreadable or invalid comment file
-or SHA (substitute).
+malformed artifact files (render: write refusal.json with the fixed reason
+code, skip the push, and let the workflow post the fixed notice instead of
+the comment); 2 bad caller arguments (render), or an unreadable or invalid
+comment file, SHA, or refusal file (substitute, refusal).
 """
 
 from __future__ import annotations
@@ -75,28 +76,36 @@ TEST_HEADING = "## Before / after evidence"
 
 
 class PublishError(Exception):
-    """The artifact failed validation: skip the publish, post nothing."""
+    """The artifact failed validation: skip the publish, post a fixed notice.
+
+    ``reason`` is one of evidence_checks.REFUSAL_REASONS; cmd_render writes
+    it to refusal.json so the workflow can post the fixed notice.
+    """
+
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
 
 
-def read_text_capped(path: Path, cap: int, what: str) -> str:
+def read_text_capped(path: Path, cap: int, what: str, reason: str) -> str:
     try:
         size = path.stat().st_size
     except OSError as exc:
-        raise PublishError(f"cannot read {what}: {exc}") from exc
+        raise PublishError(f"cannot read {what}: {exc}", reason) from exc
     if size > cap:
-        raise PublishError(f"{what} is {size} bytes, over the {cap} cap")
+        raise PublishError(f"{what} is {size} bytes, over the {cap} cap", "too_large")
     try:
         return path.read_text(encoding="utf-8")
     except (OSError, ValueError) as exc:
-        raise PublishError(f"cannot read {what}: {exc}") from exc
+        raise PublishError(f"cannot read {what}: {exc}", reason) from exc
 
 
 def check_evidence_text(text: str) -> None:
     """Refuse a comment body that lacks the marker or exceeds the budget."""
     if not text.startswith(pr_evidence.MARKER):
-        raise PublishError("comment does not start with the marker")
+        raise PublishError("comment does not start with the marker", "bad_schema")
     if len(text.encode()) > pr_evidence.MAX_COMMENT_BYTES:
-        raise PublishError("comment is too large for a comment")
+        raise PublishError("comment is too large for a comment", "too_large")
 
 
 def main_scenario_ids() -> set[str]:
@@ -110,7 +119,7 @@ def main_scenario_ids() -> set[str]:
     try:
         return evidence_checks.load_known_scenario_ids(path)
     except (OSError, ValueError, KeyError) as exc:
-        raise PublishError(f"cannot read main's scenarios list: {exc}") from exc
+        raise PublishError(f"cannot read main's scenarios list: {exc}", "missing") from exc
 
 
 def read_results(artifact: Path) -> dict:
@@ -121,11 +130,11 @@ def read_results(artifact: Path) -> dict:
     renders.
     """
     path = artifact / evidence_checks.RESULTS_FILENAME
-    text = read_text_capped(path, evidence_checks.RESULTS_MAX_BYTES, "results.json")
+    text = read_text_capped(path, evidence_checks.RESULTS_MAX_BYTES, "results.json", "missing")
     try:
         doc = json.loads(text)
     except ValueError as exc:
-        raise PublishError(f"results.json is not valid JSON: {exc}") from exc
+        raise PublishError(f"results.json is not valid JSON: {exc}", "bad_schema") from exc
     return doc
 
 
@@ -348,11 +357,14 @@ def render_comment(
     results = read_results(artifact)
     errors = evidence_checks.validate_results(results, main_scenario_ids())
     if errors:
-        raise PublishError("results.json failed validation: " + "; ".join(errors[:10]))
+        raise PublishError(
+            "results.json failed validation: " + "; ".join(errors[:10]), "bad_schema"
+        )
     claimed = results.get("metadata", {}).get("head_sha")
     if claimed is not None and claimed != head_sha:
         raise PublishError(
-            f"results.json is for head {claimed}, not the published run {head_sha}"
+            f"results.json is for head {claimed}, not the published run {head_sha}",
+            "stale_head",
         )
     # The text section is rebuilt here from the validated results; the
     # PR-supplied markdown (evidence.md) is never read, let alone posted.
@@ -375,7 +387,9 @@ def render_comment(
         # A symlink or directory in the manifest's place is a broken or
         # hostile artifact, not "no UI evidence": refuse, don't drop the
         # Web UI section quietly.
-        raise PublishError(f"{ui_evidence.MANIFEST_NAME} is not a regular file")
+        raise PublishError(
+            f"{ui_evidence.MANIFEST_NAME} is not a regular file", "bad_schema"
+        )
     if not ui_dir.exists() or not has_manifest(ui_dir):
         # No manifest (the capture died before writing one): the text
         # comment still publishes. No web/ on either side is not this case:
@@ -386,7 +400,10 @@ def render_comment(
         return text
     errors = ui_evidence.validate_artifact(ui_dir)
     if errors:
-        raise PublishError("artifact validation failed: " + "; ".join(errors[:10]))
+        raise PublishError(
+            "artifact validation failed: " + "; ".join(errors[:10]),
+            evidence_checks.artifact_refusal_reason(errors),
+        )
     try:
         manifest = pr_evidence.load_ui_manifest(ui_dir)
     except (OSError, ValueError, RecursionError) as exc:
@@ -396,7 +413,7 @@ def render_comment(
         # json.JSONDecodeError subclasses ValueError, so this covers a
         # corrupt manifest too. render_ui_section's ValueError (bad
         # repo/pr/head-sha) is deliberately left to propagate as exit 2.
-        raise PublishError(f"artifact validation failed: {exc}") from exc
+        raise PublishError(f"artifact validation failed: {exc}", "bad_schema") from exc
     if manifest is None:
         return text
     _, _, failures = pr_evidence.render_ui_section(manifest, repo, pr, head_sha)
@@ -441,10 +458,12 @@ def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
             (ui_dir / ui_evidence.MANIFEST_NAME).read_text(encoding="utf-8")
         )
     except (OSError, ValueError, RecursionError) as exc:
-        raise PublishError(f"manifest is unreadable: {exc}") from exc
+        raise PublishError(f"manifest is unreadable: {exc}", "bad_schema") from exc
     captures = data.get("captures") if isinstance(data, dict) else None
     if not isinstance(captures, list) or not all(isinstance(c, dict) for c in captures):
-        raise PublishError("manifest must be an object with a list of capture objects")
+        raise PublishError(
+            "manifest must be an object with a list of capture objects", "bad_schema"
+        )
     kept, _ = pr_evidence.select_ui_captures(data)
     referenced: set[str] = set()
     for _, files in kept:
@@ -476,9 +495,12 @@ def copy_pushable_files(ui_dir: Path, dest: Path) -> list[str]:
                 unlisted.append(name)
     if unlisted:
         raise PublishError(
-            f"unlisted files would be pushed: {', '.join(sorted(unlisted))}"
+            f"unlisted files would be pushed: {', '.join(sorted(unlisted))}", "bad_schema"
         )
     return copied
+
+
+REFUSAL_FILENAME = "refusal.json"
 
 
 def cmd_render(args: argparse.Namespace) -> int:
@@ -495,6 +517,13 @@ def cmd_render(args: argparse.Namespace) -> int:
         )
     except PublishError as exc:
         print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
+        # Decision 4, option B: never go silent. Record the fixed reason
+        # code so the workflow can post the fixed notice; the message above
+        # stays in the job log for debugging and never reaches the comment.
+        out.mkdir(parents=True, exist_ok=True)
+        (out / REFUSAL_FILENAME).write_text(
+            json.dumps({"reason": exc.reason}) + "\n", encoding="utf-8"
+        )
         return 1
     out.mkdir(parents=True, exist_ok=True)
     (out / "comment.md").write_text(body, encoding="utf-8")
@@ -517,7 +546,7 @@ def cmd_render(args: argparse.Namespace) -> int:
 def cmd_substitute(args: argparse.Namespace) -> int:
     path = Path(args.comment)
     try:
-        text = read_text_capped(path, EVIDENCE_MAX_BYTES, "comment.md")
+        text = read_text_capped(path, EVIDENCE_MAX_BYTES, "comment.md", "bad_schema")
     except PublishError as exc:
         print(f"publish_evidence: {exc}", file=sys.stderr)
         return 2
@@ -527,6 +556,30 @@ def cmd_substitute(args: argparse.Namespace) -> int:
         print(f"publish_evidence: {exc}", file=sys.stderr)
         return 2
     path.write_text(text, encoding="utf-8")
+    return 0
+
+
+def cmd_refusal(args: argparse.Namespace) -> int:
+    """Print the fixed refusal notice for a refusal.json file (exit 0).
+
+    The workflow posts this as the evidence comment when render refused.
+    The reason is read from the file and validated here in Python (never
+    interpolated from the shell), and the notice itself is main's fixed
+    text: no PR-supplied content can reach the comment through it.
+    """
+    try:
+        doc = json.loads(Path(args.reason_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"publish_evidence: cannot read refusal file: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(doc, dict):
+        print("publish_evidence: refusal file must be an object", file=sys.stderr)
+        return 2
+    try:
+        print(evidence_checks.refusal_notice(doc.get("reason")), end="")
+    except ValueError as exc:
+        print(f"publish_evidence: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -554,6 +607,11 @@ def main(argv: list[str] | None = None) -> int:
     subst.add_argument("--comment", required=True)
     subst.add_argument("--sha", required=True)
     subst.set_defaults(func=cmd_substitute)
+    refusal = sub.add_parser(
+        "refusal", help="print the fixed refusal notice for a refusal.json file"
+    )
+    refusal.add_argument("--reason-file", required=True)
+    refusal.set_defaults(func=cmd_refusal)
     args = parser.parse_args(argv)
     try:
         return args.func(args)
