@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import http.client
+import importlib.util
 import io
 import json
 import os
@@ -29,6 +30,8 @@ from housesitter.core.cli import main as cli_main
 from housesitter.core.dashboard import clear_cache
 from housesitter.core.registry import Registry
 from housesitter.modules.unifi_wifi import UniFiWifi
+
+from .helpers import fail_on_proc_error, require_test_tool
 
 START = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -476,9 +479,23 @@ class TestStartup:
 def built_wheel(tmp_path_factory):
     """Build the wheel once and install it into a fresh venv once.
 
-    Skips only when the build or venv tooling is unavailable; checks on
-    what the wheel contains or how it runs belong in the tests.
+    Skips only when the build tooling itself is missing (setuptools or
+    wheel not importable, or venv/ensurepip unavailable), and fails
+    instead when HOUSESITTER_REQUIRE_TEST_TOOLS=1 demands it. Any build
+    or install failure once tooling is present fails the test: a broken
+    package must never show up as skipped tests and a green run. Checks
+    on what the wheel contains or how it runs belong in the tests.
     """
+    missing = [
+        mod
+        for mod in ("setuptools", "wheel", "venv", "ensurepip")
+        if importlib.util.find_spec(mod) is None
+    ]
+    if missing:
+        require_test_tool(
+            False,
+            "wheel build tooling unavailable: missing " + ", ".join(missing),
+        )
     base = tmp_path_factory.mktemp("wheel")
     try:
         proc = subprocess.run(
@@ -490,14 +507,9 @@ def built_wheel(tmp_path_factory):
             capture_output=True,
             timeout=300,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        pytest.skip("wheel build tooling unavailable")
-    if proc.returncode != 0:
-        pytest.skip(
-            "wheel build tooling unavailable "
-            f"(rc={proc.returncode}): "
-            f"{proc.stderr.decode()[-300:]}"
-        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        pytest.fail(f"wheel build failed: {exc}")
+    fail_on_proc_error(proc, "wheel build")
     wheels = list(base.glob("*.whl"))
     assert len(wheels) == 1
     venv = base / "fresh"
@@ -511,9 +523,10 @@ def built_wheel(tmp_path_factory):
              str(wheels[0])],
             check=True, capture_output=True, timeout=180,
         )
-    except (OSError, subprocess.TimeoutExpired,
-            subprocess.CalledProcessError) as exc:
-        pytest.skip(f"fresh-venv install unavailable: {exc}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        pytest.fail(f"fresh-venv install failed: {exc}")
+    except subprocess.CalledProcessError as exc:
+        fail_on_proc_error(exc, "fresh-venv install")
     return wheels[0], venv
 
 
