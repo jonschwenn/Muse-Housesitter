@@ -597,6 +597,12 @@ def _ipv6_allowed_head(candidate: str) -> bool | None:
     four hex digits) and outside every allowed net.
     """
     if "::" in candidate:
+        # Three (or more) colons in a row never parse — ``fe80:::1`` holds
+        # one non-overlapping ``::``, so the count below cannot see it. The
+        # slow path rejects it, so the fast path must not decide it
+        # (round 4, finding 2).
+        if ":::" in candidate:
+            return None
         if candidate.count("::") != 1:
             return None
         if sum(1 for group in candidate.split(":") if group) > 7:

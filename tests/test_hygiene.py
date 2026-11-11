@@ -1158,6 +1158,49 @@ def test_ip_fast_paths_agree_with_ipaddress_reference():
         assert got == expected, repr(text)
 
 
+def test_ip_fast_path_matches_ipaddress_without_2001_heads():
+    """Finding 2 (round 4): triple-colon candidates take the slow path.
+
+    ``candidate.count("::")`` counts non-overlapping occurrences, so
+    ``fe80:::1`` and ``2002:::abcd`` hold exactly one ``::`` and the fast
+    path flagged addresses ``ipaddress`` rejects. The round-3 generator
+    above draws heads from a list holding ``2001``, which forces the slow
+    path; this generator never starts a candidate with a slow-path head
+    (``2001``, ``ff00``-``ffff``, empty, or all-zero), so the fast path
+    decides, plus the exact regression shapes.
+    """
+    import ipaddress
+    import random
+
+    rng = random.Random(20261111)
+    heads = ["fe80", "2002", "abcd", "1234", "1", "db8", "DB8", "9"]
+    tails = ["0", "00", "1", "0001", "abcd", "1234", "fe80", "db8", "ffff"]
+    texts = ["fe80:::1\n", "fe80:::\n", "2002:::abcd\n", "1:::2\n", "ab:::cd:1\n"]
+    for _ in range(500):
+        groups = [rng.choice(heads)] + [
+            rng.choice(tails) for _ in range(rng.randint(1, 7))
+        ]
+        text = ":".join(groups)
+        if rng.random() < 0.5:
+            at = rng.randint(0, len(groups))
+            text = ":".join(groups[:at]) + "::" + ":".join(groups[at:])
+        texts.append(text + "\n")
+    for text in texts:
+        got = hygiene_scan.ip_problems(text)
+        expected = []
+        for found in hygiene_scan.IPV6_RE.finditer(text):
+            candidate = found.group(0)
+            if sum(1 for group in candidate.split(":") if group) < 2:
+                continue
+            try:
+                addr = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if not any(addr in net for net in hygiene_scan.ALLOWED_NETS):
+                expected.append("IPv6 address at line 1")
+        assert got == expected, repr(text)
+
+
 # Review round 3 (PR #56), finding 2 (SHOULD-FIX): every problem recounts
 # newlines from the start of the file (``text.count`` per match), so a 2 MB
 # file of repeated hits took ~52 s; and decode sliced the remaining batch
