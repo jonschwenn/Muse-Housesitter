@@ -119,7 +119,9 @@ has write, maintain, or admin permission. Fork PRs touching protected paths
 always fail; a maintainer must recreate the change on a branch here.
 Main's `scripts/hygiene_scan.py` also scans the PR head tree's files as data
 through git plumbing, without checking out, importing, or running PR code.
-Both checks must pass (D31–D32). `evidence-publish.yml` is deliberately **not** required: it only posts the
+Both checks must pass (D31–D32). See [REVIEW.md](REVIEW.md), "Trusted
+hygiene scan," for scanner mechanics and import-check scope.
+`evidence-publish.yml` is deliberately **not** required: it only posts the
 evidence comment and never blocks a merge.
 
 ### Step 3: require ci-guard or re-apply the ruleset

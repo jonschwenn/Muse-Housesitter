@@ -127,19 +127,56 @@ PR #1 predates the tooling and has no evidence.
   when the PR touches a protected path unless its head branch is in this
   repository and its author has admin, maintain, or write permission.
   Fork PRs touching protected paths always fail; a maintainer must recreate
-  the change on a branch here. Main's trusted hygiene scanner also reads
-  the PR head tree's files as data through git plumbing. It never checks
-  out, imports, or runs PR code. Relative file links resolve in filesystem
-  order and are scanned under the link's name; directory links and links
-  into submodules are skipped. Submodules are skipped with a count.
-  Unresolvable links fail the check, including links through files or into
-  `.git`; link errors never print the target. Byte and tree-entry caps and a
-  300-second deadline apply through the last file; the entry cap applies
-  while reading the tree. The scan step also has a six-minute timeout.
-  Problem messages give the rule, path, and file line, never the flagged
-  value (only its length for SSIDs). Suppression listings show only
-  `path:line`. Printed paths are escaped and cut to 200 characters; output
-  has a 100,000-character budget with a truncation marker (D31–D32).
+  the change on a branch here (D32).
+
+  **Trusted hygiene scan (D31).** The same job runs the base commit's
+  `scripts/hygiene_scan.py` with `python -I`, which ignores environment
+  settings for the interpreter. It fetches `refs/pull/<N>/head` as git
+  objects, verifies the SHA against the event's head SHA, and reads the
+  whole head tree through `git ls-tree` and `git cat-file --batch`. It
+  never checks out, imports, or runs PR code. SHAs arrive through
+  environment variables. PR content stays data throughout.
+
+  - Any symlink or submodule entry anywhere in the head tree fails the
+    check. Symlinks and submodules are not allowed in this repo.
+  - Limits are 10,000 tree entries, 2,000,000 bytes per file (2 MB), and
+    32,000,000 bytes in total (32 MB). The entry cap applies while reading
+    the tree. A 300-second deadline applies through the last file, and the
+    scan step has a six-minute timeout. Exceeding a limit or encountering
+    an unreadable or malformed tree fails the check.
+  - Each check records at most 1,000 problems per file, followed by an
+    exact count of further problems; the check still fails. Problem
+    messages give the rule, path, and file line, never the flagged value
+    (only its length for SSIDs). Line numbers refer to the original file,
+    including lines omitted by suppressions. JSON web token and
+    session-cookie matching take linear time with unchanged detection
+    rules.
+  - The workflow lists at most 200 problem records and 1,000 suppression
+    locations, with counts of any remainder. Every `hygiene: ok` line is
+    counted; listed suppressions show only `path:line`, never their content.
+    Printed paths, including those in errors, have secret-shaped parts
+    replaced with `[redacted]` before escaping control characters and
+    cutting to 200 characters. Planted-secret and reference-like text
+    remains readable under the scanner's existing exceptions. Output is
+    capped at 100,000 UTF-8 bytes, including the truncation marker.
+    Counts remain exact within each listing's scope: the workflow counts
+    problem records, including per-file remainder records.
+
+  **Protected-suite import check.** A test in `tests/test_ci_guard.py`
+  checks that local imports from `tests/` and file loads from `scripts/`
+  used by protected suites are also protected (the full path list is in
+  D16). It follows imports transitively, including static imports at any
+  depth, relative imports, `from package import submodule`, parent package
+  `__init__.py` files, and `tests.*` imports from the repository root.
+  It also covers literal-string `import_module` and `__import__` calls,
+  including literal `package` and `fromlist` arguments, and literal
+  `spec_from_file_location` paths. Imports built at run time are out of
+  scope. This is a drift check for honest mistakes. The trusted hygiene
+  scan is the tamper-proof part; the protected-suite re-run in `ci.yml`
+  still executes PR code and pytest config. Conformance, the import lint,
+  and the stdio-guard tests must run PR code; human review, including
+  gate 3, covers changes through ordinary source files that cannot all be
+  protected.
 - Web UI screenshots work the same way, with the browser in the loop. In
   the `evidence` job, `scripts/ui_evidence.py` serves each tree's own
   `scripts/dev_dashboard.py` with that tree's own `web/` and fixtures, and

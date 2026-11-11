@@ -337,14 +337,11 @@ handoff's "license not chosen; don't publish."
   - *A ruleset bypass list.* The ruleset keeps no bypass actors, as
     before: an admin can still disable the ruleset in an emergency, which
     is an explicit, visible act.
-- **Amended (2026-11-11, Jon):** the original claim that the fresh-process
-  re-run prevents protected suites from being switched off through other
-  files was too strong. Conformance, the import lint, and the stdio-guard
-  tests must run PR code by design. Ordinary source files outside any
-  workable protected list can weaken them; human review of every PR,
-  including gate 3, covers this limit. The trusted hygiene scan in D31 is
-  the tamper-proof part. The protected-path list, step name and pass rule
-  above were updated for this in PR #56 (D31–D32).
+- **Amended (2026-11-11, Jon):** the fresh-process re-run is an
+  honest-mistake check; it still runs PR code and pytest config. D31 adds
+  the trusted hygiene scan and widens the protected list; D32 also requires
+  a same-repository head. See [REVIEW.md](REVIEW.md), "Trusted hygiene
+  scan," for the mechanics and remaining review responsibilities.
 
 ### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
 - **Decision:** use C's overall design, A's per-radio and per-client detail,
@@ -655,48 +652,19 @@ handoff's "license not chosen; don't publish."
   including when Codex wrote it.
 
 ### D31. Trusted hygiene scan and a wider protected list (2026-11-11, Jon)
-- **Decision:** the required `ci-guard` check runs main's
-  `scripts/hygiene_scan.py` over the PR head tree as data. It fetches git
-  objects, verifies the head SHA against the event, and reads blobs through
-  `git ls-tree` and `git cat-file --batch`. It never checks out, imports, or
-  runs the PR there. Relative file links resolve in filesystem order to
-  target blobs, scanned under each link's own name. Directory links and
-  links into submodules are skipped; submodules are skipped with a count in
-  the output. Absolute, escaping, dangling, looping, or overlong link
-  chains, links through files, and links into `.git` fail the check. Link
-  errors name only the link, never its target. The scan has a 300-second
-  deadline, checked through the last file, and byte and tree-entry caps; the
-  entry cap is enforced while reading the tree. The workflow scan step has a
-  six-minute timeout. Exceeding a limit fails the check. Suppression
-  listings show only `path:line` for each `hygiene: ok` line, up to the
-  listing cap, with a count of any remainder. They never print the
-  suppressed content, which could contain a secret. Problem messages name
-  the rule, path, and file line, never the flagged value; an SSID message
-  gives only its length. Printed paths are escaped for display and cut to
-  200 characters. Output has a 100,000-character budget and a truncation
-  marker; counts stay exact. JSON web token and session-cookie matching
-  take linear time with unchanged detection rules.
-  This trusted copy makes hygiene tamper-proof against PR code. The re-run
-  in `ci.yml`, "Protected suites, fresh process
-  (honest-mistake check)", still runs PR code and pytest config.
-  The protected list also adds `.pytest.ini`, `pyproject.toml` and
-  `setup.py` in any directory, `tests/core/helpers.py`,
-  `tests/fixtures/*/conformance.json`, and `scripts/hygiene_scan.py`.
-  The full list in D16 includes pytest and ruff config names, interpreter
-  start-up hooks (`sitecustomize.py`, `usercustomize.py`, `*.pth`), and
-  test package initialisers. A test pins that the protected suites' local
-  imports from `tests/` and file loads from `scripts/` are protected. It
-  follows their imports transitively, including submodule imports written
-  as `from package import submodule`, literal dynamic imports, literal
-  path loads, and parent package `__init__.py` files.
-- **Why:** widening the list stops the cheapest edits, but is only a partial
-  defence. Conformance, the import lint, and the stdio-guard tests must run
-  PR code and cannot be made tamper-proof this way. Human review of every
-  PR, including gate 3, covers changes through ordinary source files that
-  cannot all be protected.
-- **Rejected:** only widening the protected list. Any source file can patch
-  a scanner running in the same process, so no such list can be complete.
-- **Status:** in effect from PR #56.
+- **Decision:** the required `ci-guard` check scans the PR head tree as
+  data with the base commit's trusted hygiene scanner. Widen the protected
+  list in D16 and check the protected suites' local imports for drift.
+  Reject every symlink and submodule entry in the repository.
+- **Why:** a scanner running PR code can be weakened by that code. A wider
+  protected list helps but cannot cover every source file. The trusted
+  scan makes hygiene tamper-proof against PR code; other suites still need
+  human review. This repo has no symlinks or submodules, and attempts to
+  resolve links safely kept producing bypasses in review. Rejecting them
+  is simpler and stricter.
+- **Rejected:** only widening the protected list, and resolving links.
+- **Status:** implemented in PR #56. See [REVIEW.md](REVIEW.md), "Trusted
+  hygiene scan," for scanner mechanics and import-check scope.
 
 ### D32. Trust the head repository as well as the author (2026-11-11, Jon)
 - **Decision:** a PR touching protected paths passes the path guard only
@@ -709,4 +677,4 @@ handoff's "license not chosen; don't publish."
   that head branch trusted.
 - **Rejected:** Jon approving the exact head commit. That needs more
   machinery, and approval is easy to give on autopilot.
-- **Status:** in effect from PR #56.
+- **Status:** implemented in PR #56.
