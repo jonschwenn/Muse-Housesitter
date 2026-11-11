@@ -10,6 +10,7 @@ as "a disallowed path never opened a socket".
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import shutil
@@ -64,6 +65,23 @@ def fail_on_proc_error(proc, what):
             tail = str(err or "")[-300:]
         pytest.fail(f"{what} failed (rc={proc.returncode}): {tail}")
     return proc
+
+
+@contextlib.contextmanager
+def expect_failure(match=None):
+    """Like ``pytest.raises(pytest.fail.Exception)``, but a skip fails.
+
+    ``pytest.raises`` lets a skip escape, and an escaped skip makes the
+    test skip, not fail; so a regression from fail back to skip would
+    stay green. Here it fails the test.
+    """
+    import pytest
+
+    try:
+        with pytest.raises(pytest.fail.Exception, match=match) as info:
+            yield info
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"expected a failure, but the code skipped: {exc}")
 
 
 @dataclass

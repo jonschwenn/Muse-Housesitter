@@ -15,7 +15,12 @@ import subprocess
 import pytest
 
 from . import helpers
-from .helpers import fail_on_proc_error, require_test_tool, tools_required
+from .helpers import (
+    expect_failure,
+    fail_on_proc_error,
+    require_test_tool,
+    tools_required,
+)
 
 VAR = "HOUSESITTER_REQUIRE_TEST_TOOLS"
 
@@ -48,7 +53,7 @@ def test_require_missing_tool_skips_by_default(monkeypatch):
 
 def test_require_missing_tool_fails_when_required(monkeypatch):
     monkeypatch.setenv(VAR, "1")
-    with pytest.raises(pytest.fail.Exception, match="openssl"):
+    with expect_failure(match="openssl"):
         require_test_tool(False, "openssl is not on PATH")
 
 
@@ -66,7 +71,7 @@ def test_generate_cert_missing_openssl_fails_when_required(
 ):
     monkeypatch.setenv(VAR, "1")
     monkeypatch.setattr(shutil, "which", lambda _name: None)
-    with pytest.raises(pytest.fail.Exception, match="openssl"):
+    with expect_failure(match="openssl"):
         helpers.generate_cert(tmp_path)
 
 
@@ -83,7 +88,7 @@ def test_fail_on_proc_error_reports_stderr_tail():
         args=["pip", "wheel"], returncode=1,
         stdout=b"", stderr=b"x" * 500 + marker,
     )
-    with pytest.raises(pytest.fail.Exception) as excinfo:
+    with expect_failure() as excinfo:
         fail_on_proc_error(proc, "wheel build")
     message = str(excinfo.value)
     assert "wheel build" in message
@@ -93,5 +98,16 @@ def test_fail_on_proc_error_reports_stderr_tail():
 
 def test_fail_on_proc_error_accepts_called_process_error():
     exc = subprocess.CalledProcessError(1, ["pip", "install"], stderr=b"boom")
-    with pytest.raises(pytest.fail.Exception, match="boom"):
+    with expect_failure(match="boom"):
         fail_on_proc_error(exc, "fresh-venv install")
+
+
+def test_expect_failure_turns_a_skip_into_a_failure():
+    with pytest.raises(pytest.fail.Exception, match="skipped"):
+        with expect_failure():
+            pytest.skip("regressed to a skip")
+
+
+def test_expect_failure_accepts_a_failure():
+    with expect_failure(match="real"):
+        pytest.fail("a real failure")

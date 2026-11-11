@@ -31,7 +31,7 @@ from housesitter.core.dashboard import clear_cache
 from housesitter.core.registry import Registry
 from housesitter.modules.unifi_wifi import UniFiWifi
 
-from .helpers import fail_on_proc_error, require_test_tool
+from .helpers import expect_failure, fail_on_proc_error, require_test_tool
 
 START = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -568,7 +568,7 @@ class TestBuiltWheelPrerequisites:
         monkeypatch.setenv(self.VAR, "1")
         self._missing(monkeypatch, tool)
         monkeypatch.setattr(subprocess, "run", self._run_never)
-        with pytest.raises(pytest.fail.Exception, match=tool):
+        with expect_failure(match=tool):
             build_and_install_wheel(tmp_path)
 
     def test_failed_build_fails_even_by_default(self, monkeypatch, tmp_path):
@@ -578,7 +578,7 @@ class TestBuiltWheelPrerequisites:
             lambda args, **_k: subprocess.CompletedProcess(
                 args, 1, b"", b"error: bad pyproject"),
         )
-        with pytest.raises(pytest.fail.Exception, match="bad pyproject"):
+        with expect_failure(match="bad pyproject"):
             build_and_install_wheel(tmp_path)
 
     def test_build_that_cannot_start_fails(self, monkeypatch, tmp_path):
@@ -588,7 +588,7 @@ class TestBuiltWheelPrerequisites:
             raise OSError("exec failed")
 
         monkeypatch.setattr(subprocess, "run", boom)
-        with pytest.raises(pytest.fail.Exception, match="exec failed"):
+        with expect_failure(match="exec failed"):
             build_and_install_wheel(tmp_path)
 
     def test_failed_install_fails_even_by_default(self, monkeypatch, tmp_path):
@@ -604,7 +604,7 @@ class TestBuiltWheelPrerequisites:
             return subprocess.CompletedProcess(args, 0, b"", b"")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        with pytest.raises(pytest.fail.Exception, match="no matching"):
+        with expect_failure(match="no matching"):
             build_and_install_wheel(tmp_path)
 
 
