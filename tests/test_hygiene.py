@@ -1448,6 +1448,39 @@ def test_display_replaces_secret_shaped_names_with_stable_ids():
 
 
 @NEEDS_GIT
+def test_single_huge_suppression_file_scans_in_ci_time(tmp_path):
+    """Finding 4 (round 4): one 2 MB suppression file under a deep path < 2 s.
+
+    The reviewer's full 32 MB ceiling (16 such files under 20 path
+    components) hit the 300 s deadline because every suppression line
+    re-redacted and re-escaped the whole path. The path is now formatted
+    once per file and only a bounded number of entries is kept, so the
+    single-file repro below runs in CI time; the full 32 MB timing is
+    reported in the PR.
+    """
+    import time
+
+    deep = "/".join(["d" * 190] * 20)
+    rel = f"{deep}/f0.txt"
+    data = ("hygiene: ok\n" * ((2_000_000 // len("hygiene: ok\n")) + 1))[:2_000_000]
+    repo, sha = _git_repo(tmp_path, {rel: data})
+    start = time.monotonic()
+    (
+        problems,
+        problem_total,
+        suppressions,
+        suppression_total,
+        files_scanned,
+        bytes_scanned,
+    ) = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
+    elapsed = time.monotonic() - start
+    assert (problems, problem_total, files_scanned, bytes_scanned) == ([], 0, 1, 2_000_000)
+    assert suppression_total == sum(1 for line in data.splitlines() if "hygiene: ok" in line)
+    assert len(suppressions) == hygiene_scan.MAX_LISTED_SUPPRESSIONS
+    assert elapsed < 2.0, f"single-file repro took {elapsed:.1f}s"
+
+
+@NEEDS_GIT
 def test_trusted_scan_suppression_listing_redacts_secret_name(tmp_path):
     """Findings 1 and 5 (round 4): the suppression path hides every shape."""
     token = "gh" + "p_" + "Q" * 30

@@ -1256,7 +1256,10 @@ def scan_git_tree(
 
     The totals count underlying findings, not compressed messages
     (round 4, finding 3): each line list stops at its display cap while
-    its total keeps every finding.
+    its total keeps every finding. The display form of each path is built
+    once per file and suppression entries stop at their cap with an exact
+    count, so a tree of huge ``hygiene: ok`` files costs no per-line work
+    proportional to path length (round 4, finding 4).
 
     Any symlink (mode 120000) or gitlink (mode 160000) in the tree fails
     the check outright (see :func:`list_tree_blobs`): links are never
@@ -1281,14 +1284,18 @@ def scan_git_tree(
         text = decode_bytes(data)
         if text is None:
             return
+        shown = _display(path)
         messages, file_total = _scan_text_counted(path, text)
         problem_total += file_total
         for problem in messages:
-            problems.append(f"{_display(path)}: {problem}")
-        for lineno, _ in suppression_lines(text):
+            problems.append(f"{shown}: {problem}")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if SUPPRESS not in line:
+                continue
             suppression_total += 1
             # The path is escaped and bounded; the line content never is.
-            suppressions.append(f"{_display(path)}:{lineno}")
+            if len(suppressions) < MAX_LISTED_SUPPRESSIONS:
+                suppressions.append(f"{shown}:{lineno}")
 
     for (_, size, path), data in zip(files, contents):
         check(path, data, size)
