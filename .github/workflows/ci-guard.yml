@@ -3,12 +3,22 @@
 #
 # Runs on `pull_request_target`, which always uses this file from the target
 # branch — never PR code. It checks out the *base* commit only (never the PR
-# ref), runs the base's `scripts/ci_guard.py` (stdlib only) against the PR's
-# file list from the API, and passes only when the PR touches no protected
-# path, or its author has admin, maintain, or write permission on the repo.
-# The token is used for read-only API calls. No PR content ever reaches a
-# shell, a checkout, or an interpreter here: file names travel through the
-# API into Python, which escapes them before printing.
+# ref) and runs the base's scripts (stdlib only) against the PR:
+# - `scripts/ci_guard.py` lists the PR's changed files through the API and
+#   fails when the PR touches a protected path, unless the PR comes from this
+#   repo's own branches AND its author has admin, maintain, or write
+#   permission. The token is used for read-only API calls. File names travel
+#   through the API into Python, which escapes them before printing.
+# - `scripts/hygiene_scan.py` then scans the PR head tree's blobs over git
+#   plumbing. The head commit is fetched as objects only
+#   (`refs/pull/<N>/head`, verified byte-for-byte against the event's head
+#   SHA) and its blobs are read through `git ls-tree`/`git cat-file`, never
+#   checked out and never imported or executed. PR content enters the base
+#   interpreter only as scanned data: both SHAs travel via `env:`, never
+#   interpolated into the script, and `python -I` ignores environment-driven
+#   interpreter configuration. A huge or unreadable tree fails closed.
+# No PR content ever reaches a shell command line, an `eval`, or a file name
+# used as code here.
 #
 # Every third-party step is GitHub's own, pinned to a full commit SHA.
 name: ci-guard
@@ -44,3 +54,8 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: python scripts/ci_guard.py --repo "$REPO" --pr "$PR"
+      - name: Trusted hygiene scan of the PR head tree
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python -I scripts/hygiene_scan.py --fetch-and-scan-pr-head

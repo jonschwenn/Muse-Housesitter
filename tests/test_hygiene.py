@@ -10,108 +10,38 @@ must use invented values:
 - SSIDs in fixtures: end in "-example"
 - Planted secrets in hostile fixtures: contain "PLANTED-SECRET"
 
-Patterns are assembled from parts so that this file does not match itself.
+The rules themselves live in scripts/hygiene_scan.py: the same code the
+ci-guard job runs over the PR head tree's blobs, so a PR cannot weaken what
+is enforced here by changing this file. The names below are aliases to that
+module; the pinning tests read unchanged.
 """
 
 from __future__ import annotations
 
-import ipaddress
-import json
-import re
+import importlib.util
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
-HEX = "[0-9A-Fa-f]"
-MAC_RES = [
-    # 02:00:00:00:00:01 and 02-00-00-00-00-01
-    re.compile(rf"(?<![0-9A-Fa-f:])(?:{HEX}{{2}}[:-]){{5}}{HEX}{{2}}(?![0-9A-Fa-f:])"),
-    # 0200.0000.0001 (Cisco style)
-    re.compile(rf"(?<![0-9A-Fa-f.])(?:{HEX}{{4}}\.){{2}}{HEX}{{4}}(?![0-9A-Fa-f.])"),
-]
-# 020000000001: bare, as some upstream APIs return it. Checked in fixtures only,
-# because elsewhere 12 hex digits are usually a short git SHA or a counter.
-BARE_MAC_RE = re.compile(rf"(?<![0-9A-Fa-f-])(?:{HEX}{{12}})(?![0-9A-Fa-f-])")
-ALLOWED_MAC_PREFIXES = ("020000", "00005e0053")
+SPEC = importlib.util.spec_from_file_location(
+    "hygiene_scan", ROOT / "scripts" / "hygiene_scan.py"
+)
+hygiene_scan = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(hygiene_scan)
 
-IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?!\.?\d)")
-# The lookahead excludes "." so an IPv4-mapped address (::ffff:192.0.2.1) is left
-# to the IPv4 check instead of being cut at the dot.
-IPV6_RE = re.compile(
-    r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:.])"
-)
-ALLOWED_NETS = [
-    ipaddress.ip_network(n)
-    for n in (
-        "192.0.2.0/24",  # RFC 5737 documentation ranges
-        "198.51.100.0/24",
-        "203.0.113.0/24",
-        "127.0.0.0/8",  # loopback
-        "0.0.0.0/32",
-        "255.0.0.0/8",  # netmasks and broadcast, e.g. 255.255.255.0
-        "2001:db8::/32",  # RFC 3849 IPv6 documentation range
-        "::1/128",
-        "ff00::/8",  # multicast, e.g. ff02::1
-    )
-]
-
-# A line containing this marker is skipped, for the rare false positive (e.g. a
-# four-part version number that looks like an IP). Reviewers check every use.
-SUPPRESS = "hygiene: ok"
-
-PLANTED = "PLANTED-SECRET"
-# The key must END in one of these words: client_secret, UNIFI_PASSWORD, and
-# ssh_key match; tokenizer, secret_id, token_file and compass_heading don't.
-# Any UniFi-style x_ field (x_authkey, x_vwirekey, x_passphrase) counts too.
-KEY_WORDS = (
-    r"(?:x_\w+|\w*(?:password|passwd|passphrase|secret|token|api[_-]?key|auth[_-]?key|_key))"
-)
-SECRET_PATTERNS = [
-    ("private key", re.compile("-----BEGIN [A-Z ]*" + "PRIVATE " + "KEY-----")),
-    ("Muse SDK token", re.compile("mg" + r"st_[A-Za-z0-9_-]{16,}")),
-    ("GitHub token", re.compile("gh" + r"[pousr]_[A-Za-z0-9]{30,}")),
-    ("AWS access key", re.compile("AK" + r"IA[0-9A-Z]{16}")),
-    ("Slack token", re.compile("xo" + r"x[baprs]-[A-Za-z0-9-]{10,}")),
-    ("credentials in a URL", re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@")),
-    ("JSON web token", re.compile("ey" + r"J[A-Za-z0-9_-]{8,}\.ey" + r"J[A-Za-z0-9_-]{8,}")),
-    ("bearer token", re.compile(r"(?i)\bbearer\s+(?=[\w.~+/-]*\d)[\w.~+/-]{16,}")),
-    (
-        "session cookie",
-        re.compile(r"(?i)\b(?:unifises|token|csrf_token|session(?:id)?)=(?=[^;\s\"']*\d)[^;\s\"']{8,}"),
-    ),
-    (
-        "CSRF token value",
-        re.compile(
-            r"(?i)x-(?:updated-)?csrf-token[\"']?\s*:\s*[\"']?(?=[\w-]*\d)[\w-]{16,}"
-        ),
-    ),
-    (
-        "credential assignment",
-        # Key, then : or =, then a quoted value of 8+ characters.
-        re.compile(rf"""(?i)["']?{KEY_WORDS}["']?\s*[:=]\s*(?:"([^"\n]{{8,}})"|'([^'\n]{{8,}})')"""),
-    ),
-]
-# YAML, INI, and env files also allow unquoted values. Not applied to Python,
-# where an unquoted value is code (password = ctx.secret("unifi_password")).
-UNQUOTED_ASSIGNMENT = re.compile(
-    rf"""(?im)^[ \t]*(?:export[ \t]+)?["']?{KEY_WORDS}["']?[ \t]*[:=][ \t]*"""
-    r"""([^\s"'#,{}\[\]][^\s#,]{7,})"""
-)
-UNQUOTED_EXEMPT_SUFFIXES = {".py"}
-# Values that name or reference a secret rather than contain one.
-REFERENCE_VALUE = re.compile(
-    r"^(?:\$\{\{.*\}\}"  # ${{ github.token }}
-    r"|\$\{?\w+\}?"  # $VAR or ${VAR}
-    r"|<[^>]+>"  # <placeholder>
-    r"|[a-z][a-z0-9]*(?:_[a-z0-9]+)+"  # snake_case name of a secret file, e.g. unifi_password
-    r"|[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+"  # a header name, e.g. X-CSRF-Token
-    r"|(?:~|\.{1,2})?/\S*"  # a path, e.g. ~/.config/housesitter/secrets/unifi
-    r"|(?i:changeme|change-me|example|redacted|placeholder|x{4,}|\*{4,}))$"  # placeholders
-)
-SSID_KEYS = {"ssid", "essid"}
+# Aliases to the single source of truth in scripts/hygiene_scan.py.
+mac_problems = hygiene_scan.mac_problems
+ip_problems = hygiene_scan.ip_problems
+secret_problems = hygiene_scan.secret_problems
+ssid_problems = hygiene_scan.ssid_problems
+SUPPRESS = hygiene_scan.SUPPRESS
+PLANTED = hygiene_scan.PLANTED
 
 
 def repo_files() -> list[Path]:
@@ -129,102 +59,13 @@ def repo_files() -> list[Path]:
     return files
 
 
-def read_text(path: Path) -> str | None:
-    data = path.read_bytes()
-    if b"\0" in data[:8192]:
-        return None  # binary
-    return data.decode("utf-8", errors="replace")
-
-
-def mac_problems(text: str, bare: bool = False) -> list[str]:
-    found = []
-    for pattern in MAC_RES + ([BARE_MAC_RE] if bare else []):
-        for match in pattern.finditer(text):
-            digits = re.sub("[^0-9a-f]", "", match.group(0).lower())
-            if pattern is BARE_MAC_RE and digits.isdigit():
-                continue  # a 12-digit number, e.g. a byte counter
-            if not digits.startswith(ALLOWED_MAC_PREFIXES):
-                found.append(f"MAC {match.group(0)}")
-    return found
-
-
-def ip_problems(text: str) -> list[str]:
-    found = []
-    for match in IPV4_RE.finditer(text):
-        parts = [int(p) for p in match.group(0).split(".")]
-        if any(p > 255 for p in parts):
-            continue  # e.g. a version like 6.6.77.15402
-        addr = ipaddress.ip_address(".".join(map(str, parts)))  # tolerates leading zeros
-        if not any(addr in net for net in ALLOWED_NETS):
-            found.append(f"IPv4 {match.group(0)}")
-    for match in IPV6_RE.finditer(text):
-        candidate = match.group(0)
-        if sum(1 for group in candidate.split(":") if group) < 2:
-            continue  # e.g. Python slices like [::2]
-        try:
-            addr = ipaddress.ip_address(candidate)
-        except ValueError:
-            continue
-        if not any(addr in net for net in ALLOWED_NETS):
-            found.append(f"IPv6 {candidate}")
-    return found
-
-
-def secret_problems(text: str, unquoted: bool = True) -> list[str]:
-    found = []
-    patterns = SECRET_PATTERNS + (
-        [("credential assignment", UNQUOTED_ASSIGNMENT)] if unquoted else []
-    )
-    for label, pattern in patterns:
-        for match in pattern.finditer(text):
-            if PLANTED in match.group(0):
-                continue
-            value = next((g for g in match.groups() if g), None) if match.groups() else None
-            if value is not None and REFERENCE_VALUE.match(value.strip()):
-                continue
-            found.append(f"likely secret ({label})")
-    return found
-
-
-def ssid_problems(obj: object) -> list[str]:
-    found = []
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            if key.lower() in SSID_KEYS and isinstance(value, str) and value:
-                if not value.endswith("-example"):
-                    found.append(f"SSID {value!r} does not end in -example")
-            found.extend(ssid_problems(value))
-    elif isinstance(obj, list):
-        for item in obj:
-            found.extend(ssid_problems(item))
-    return found
-
-
-def is_fixture(path: Path) -> bool:
+def scan(path: Path) -> list[str]:
+    """Scan one working-tree file; outside the repo (tmp files) its name stands in."""
     try:
         rel = path.relative_to(ROOT).as_posix()
     except ValueError:
-        return False
-    return rel.startswith("tests/fixtures/") and path.suffix == ".json"
-
-
-def scan(path: Path) -> list[str]:
-    text = read_text(path)
-    if text is None:
-        return []
-    lines = [line for line in text.splitlines() if SUPPRESS not in line]
-    checked = "\n".join(lines)
-    problems = (
-        mac_problems(checked, bare=is_fixture(path))
-        + ip_problems(checked)
-        + secret_problems(checked, unquoted=path.suffix not in UNQUOTED_EXEMPT_SUFFIXES)
-    )
-    if is_fixture(path):
-        try:
-            problems += ssid_problems(json.loads(text))
-        except ValueError:
-            problems.append("fixture is not valid JSON")
-    return problems
+        rel = path.name
+    return hygiene_scan.scan_bytes(rel, path.read_bytes())
 
 
 def test_repo_has_no_real_house_data_or_secrets():
@@ -400,3 +241,213 @@ def test_suppression_marker_skips_only_its_line(tmp_path):
 def test_scanner_flags_real_ssids():
     assert ssid_problems({"clients": [{"essid": "MyHomeWifi"}]})
     assert not ssid_problems({"clients": [{"essid": "main-example"}]})
+
+
+# Trusted scan: the ci-guard job runs the base copy of scripts/hygiene_scan.py
+# over the PR head tree's blobs (never checked out, never imported). These
+# tests pin that path: each builds a throwaway git repo whose head commit
+# carries one of the three bypasses that silence the pytest-run scan (a pytest
+# config that deselects this test, a tests/core/helpers.py patch, a
+# src/housesitter/__init__.py patch) plus planted real-looking data, then runs
+# the scanner the way the workflow does — ``python -I`` on the base file over
+# git objects, with no pytest config or repo code involved — and shows the
+# planted data is still flagged. Values are built at run time so they never
+# appear in this repo.
+
+REAL10 = ["10", "1", "2", "3"]
+
+NEEDS_GIT = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+
+
+def _git_repo(tmp_path, files):
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+
+    def run(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    run("init", "-q")
+    for rel, text in files.items():
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    run("add", "-A")
+    run(
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "test",
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    return repo, head
+
+
+def _scan_tree(repo, sha):
+    """Run the scanner the way the workflow does: ``python -I`` over git objects."""
+    return subprocess.run(
+        [sys.executable, "-I", str(ROOT / "scripts" / "hygiene_scan.py"), "--git-tree", sha],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+@NEEDS_GIT
+def test_trusted_scan_flags_data_despite_pytest_config_bypass(tmp_path):
+    """Bypass (a): a .pytest.ini that deselects the hygiene test is inert here."""
+    planted = ".".join(REAL10)
+    repo, sha = _git_repo(
+        tmp_path,
+        {
+            ".pytest.ini": "[pytest]\naddopts = --deselect tests/test_hygiene.py\n",
+            "notes.txt": f"server at {planted}\n",
+        },
+    )
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1
+    assert f"IPv4 {planted}" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_flags_data_despite_helpers_patch_bypass(tmp_path):
+    """Bypass (b): patching tests/core/helpers.py cannot neuter the blob scan."""
+    planted = ".".join(REAL10)
+    repo, sha = _git_repo(
+        tmp_path,
+        {
+            "tests/core/helpers.py": "import test_hygiene\ntest_hygiene.repo_files = lambda: []\n",
+            "notes.txt": f"server at {planted}\n",
+        },
+    )
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1
+    assert f"IPv4 {planted}" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_flags_data_despite_package_init_patch_bypass(tmp_path):
+    """Bypass (c): patching src/housesitter/__init__.py cannot neuter the blob scan."""
+    planted = ".".join(REAL10)
+    repo, sha = _git_repo(
+        tmp_path,
+        {
+            "src/housesitter/__init__.py": (
+                "import test_hygiene\ntest_hygiene.repo_files = lambda: []\n"
+            ),
+            "notes.txt": f"server at {planted}\n",
+        },
+    )
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1
+    assert f"IPv4 {planted}" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_passes_a_clean_tree(tmp_path):
+    repo, sha = _git_repo(tmp_path, {"README.md": "docs range 192.0.2.1\n"})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 0
+    assert "clean" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_lists_suppressions(tmp_path):
+    planted = ".".join(REAL10)
+    repo, sha = _git_repo(
+        tmp_path, {"notes.txt": "at " + planted + "  <!-- " + SUPPRESS + " -->\n"}
+    )
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 0
+    assert "suppression notes.txt:1:" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_fails_closed_on_a_bad_sha(tmp_path):
+    repo, _ = _git_repo(tmp_path, {"README.md": "hello\n"})
+    proc = _scan_tree(repo, "0" * 40)
+    assert proc.returncode == 2
+    assert "fail closed" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_fails_closed_on_an_oversized_blob(tmp_path):
+    repo, sha = _git_repo(tmp_path, {"big.bin": "x" * (hygiene_scan.MAX_FILE_BYTES + 1)})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 2
+    assert "limit" in proc.stdout
+
+
+def _origin_with_pr_head(tmp_path, files, number="7"):
+    """A local stand-in for GitHub: an origin repo plus a clone of it.
+
+    Creates ``refs/pull/<number>/head`` in the origin (that ref is what the
+    workflow fetches) and returns ``(work_clone, head_sha)``.
+    """
+    origin, sha = _git_repo(tmp_path / "origin", files)
+    subprocess.run(
+        ["git", "update-ref", f"refs/pull/{number}/head", sha],
+        cwd=origin,
+        check=True,
+        capture_output=True,
+    )
+    work = tmp_path / "work"
+    subprocess.run(
+        ["git", "clone", "-q", str(origin), str(work)], check=True, capture_output=True
+    )
+    return work, sha
+
+
+@NEEDS_GIT
+def test_fetch_verifies_the_head_sha_before_scanning(tmp_path, monkeypatch):
+    planted = ".".join(REAL10)
+    work, sha = _origin_with_pr_head(
+        tmp_path, {"notes.txt": f"server at {planted}\n", "README.md": "docs\n"}
+    )
+    monkeypatch.setenv("PR_NUMBER", "7")
+    monkeypatch.setenv("HEAD_SHA", sha)
+    assert hygiene_scan.fetch_pr_head(cwd=str(work)) == sha
+    # A moved PR ref must not be scanned: the SHAs no longer match.
+    monkeypatch.setenv("HEAD_SHA", "f" * 40)
+    try:
+        hygiene_scan.fetch_pr_head(cwd=str(work))
+    except hygiene_scan.FailClosed as exc:
+        assert "does not match" in str(exc)
+    else:
+        raise AssertionError("expected FailClosed on a moved head ref")
+    # Garbage environment fails closed without touching the network.
+    monkeypatch.setenv("PR_NUMBER", "not-a-number")
+    try:
+        hygiene_scan.fetch_pr_head(cwd=str(work))
+    except hygiene_scan.FailClosed as exc:
+        assert "PR_NUMBER" in str(exc)
+    else:
+        raise AssertionError("expected FailClosed on a bad PR_NUMBER")
+
+
+@NEEDS_GIT
+def test_fetch_and_scan_end_to_end_like_the_workflow(tmp_path):
+    """The workflow's exact command against a local origin with a planted IP."""
+    planted = ".".join(REAL10)
+    work, sha = _origin_with_pr_head(tmp_path, {"notes.txt": f"server at {planted}\n"})
+    env = dict(os.environ, PR_NUMBER="7", HEAD_SHA=sha)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(ROOT / "scripts" / "hygiene_scan.py"),
+            "--fetch-and-scan-pr-head",
+        ],
+        cwd=work,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 1
+    assert f"IPv4 {planted}" in proc.stdout
