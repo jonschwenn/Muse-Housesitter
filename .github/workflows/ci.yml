@@ -90,14 +90,14 @@ jobs:
           path: junit.xml
           retention-days: 7
           if-no-files-found: ignore
-      - name: Protected suites, in isolation
+      - name: Protected suites, fresh process (honest-mistake check)
         if: always()
         # The full run above imports every test module in one process, so a
         # new (unprotected) test file could patch a protected suite at import
         # time. Re-run the protected suites alone: no other test module is
-        # ever imported here (conftest.py and pytest config are protected
-        # paths), so what they check cannot be switched off from outside
-        # them (D16).
+        # ever imported here, so this still catches honest mistakes. It is
+        # not a security boundary — it runs PR code and PR pytest config —
+        # the trusted hygiene scan runs in ci-guard (D16).
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
           HOUSESITTER_REQUIRE_TEST_TOOLS: "1"

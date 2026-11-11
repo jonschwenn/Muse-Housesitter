@@ -263,11 +263,15 @@ handoff's "license not chosen; don't publish."
     lists the PR's changed files through the API — paginated, failing
     closed on error or when the PR may exceed GitHub's 3000-file listing
     cap — and fails the `ci-guard` check when a protected path is touched
-    unless the PR author has admin, maintain, or write permission
-    (collaborator permission from the API, not `author_association`).
+    unless its head branch is in this repository and its author has admin,
+    maintain, or write permission (collaborator permission from the API,
+    not `author_association`; D32).
   - The `main` ruleset requires `ci-ok` **and** `ci-guard`.
 - **What is protected:** `.github/**` (workflows, ruleset, templates);
-  `tests/test_hygiene.py` (the repo-hygiene scan);
+  `tests/test_hygiene.py` (pins the repo-hygiene scan);
+  `scripts/hygiene_scan.py` (the trusted scanner);
+  `tests/core/helpers.py` (conformance helper);
+  `tests/fixtures/*/conformance.json` (conformance manifests);
   `tests/conformance/**` (the module conformance suite);
   `tests/test_pr_evidence.py`, `tests/test_ui_evidence.py`,
   `tests/test_publish_evidence.py`, `tests/test_test_results.py`,
@@ -280,8 +284,9 @@ handoff's "license not chosen; don't publish."
   `scripts/ci_guard.py` (evidence builders, validators, privileged publisher,
   test-results parser and renderers, guard);
   `pyproject.toml` (pytest/ruff config, dependency pins, entry points); and
-  anywhere in the tree, `conftest.py`, `pytest.ini`, `setup.cfg`,
-  `tox.ini`, `ruff.toml`, `.ruff.toml`, `sitecustomize.py`,
+  anywhere in the tree, `conftest.py`, `pytest.ini`, `.pytest.ini`,
+  `setup.cfg`, `tox.ini`, `pyproject.toml`, `setup.py`, `ruff.toml`,
+  `.ruff.toml`, `sitecustomize.py`,
   `usercustomize.py`, `*.pth` (tooling config and interpreter start-up
   hooks), `.gitattributes` (`linguist-generated` or `-diff` can collapse
   or hide a file's diff in review), plus `tests/**/__init__.py` (flips
@@ -291,9 +296,10 @@ handoff's "license not chosen; don't publish."
     sane PNGs, never that the pixels are truthful. Faked pixels are the
     accepted risk in the threat model above.
   - *Trusted collaborators pass the guard by permission.* A PR from an
-    author with write access may touch protected paths; the guard logs them
-    as a notice. This is not an escalation: such an author can already push
-    to `main`-adjacent branches and edit these files.
+    author with write, maintain, or admin access and a head branch in this
+    repository may touch protected paths; the guard logs them as a notice
+    (D32). This is not an escalation: such an author can already push to
+    `main`-adjacent branches and edit these files.
   - *Fork PRs simply cannot touch protected paths.* A fork that needs such
     a change must ask Jon (or his agents) to make it instead.
   - *New files are not blocked.* A new module needs new tests, so the
@@ -308,8 +314,9 @@ handoff's "license not chosen; don't publish."
     protected suites:
     - CI re-runs the protected suites (hygiene, conformance, evidence,
       publisher, test-results, guard tests) in a separate pytest process
-      that collects only those files ("Protected suites, in isolation" in
-      `ci.yml`), so no unprotected test module is ever imported alongside them.
+      that collects only those files ("Protected suites, fresh process
+      (honest-mistake check)" in `ci.yml`), so no unprotected test module is
+      ever imported alongside them.
     - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` in CI kills the entry-point
       variant, and `pyproject.toml` (protected) pins the installed
       distributions, so no new entry-point plugin can arrive that way.
@@ -330,6 +337,11 @@ handoff's "license not chosen; don't publish."
   - *A ruleset bypass list.* The ruleset keeps no bypass actors, as
     before: an admin can still disable the ruleset in an emergency, which
     is an explicit, visible act.
+- **Amended (2026-11-11, Jon):** the fresh-process re-run is an
+  honest-mistake check; it still runs PR code and pytest config. D31 adds
+  the trusted hygiene scan and widens the protected list; D32 also requires
+  a same-repository head. See [REVIEW.md](REVIEW.md), "Trusted hygiene
+  scan," for the mechanics and remaining review responsibilities.
 
 ### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
 - **Decision:** use C's overall design, A's per-radio and per-client detail,
@@ -638,3 +650,31 @@ handoff's "license not chosen; don't publish."
   family also gets a look from Jon or another model family. The optional
   deep reviewer comes from a family that did not write the change,
   including when Codex wrote it.
+
+### D31. Trusted hygiene scan and a wider protected list (2026-11-11, Jon)
+- **Decision:** the required `ci-guard` check scans the PR head tree as
+  data with the base commit's trusted hygiene scanner. Widen the protected
+  list in D16 and check the protected suites' local imports for drift.
+  Reject every symlink and submodule entry in the repository.
+- **Why:** a scanner running PR code can be weakened by that code. A wider
+  protected list helps but cannot cover every source file. The trusted
+  scan makes hygiene tamper-proof against PR code; other suites still need
+  human review. This repo has no symlinks or submodules, and attempts to
+  resolve links safely kept producing bypasses in review. Rejecting them
+  is simpler and stricter.
+- **Rejected:** only widening the protected list, and resolving links.
+- **Status:** implemented in PR #56. See [REVIEW.md](REVIEW.md), "Trusted
+  hygiene scan," for scanner mechanics and import-check scope.
+
+### D32. Trust the head repository as well as the author (2026-11-11, Jon)
+- **Decision:** a PR touching protected paths passes the path guard only
+  when its head branch is in this repository and its author has write,
+  maintain, or admin permission. Fork PRs touching protected paths always
+  fail; a maintainer must recreate the change on a branch in this repo.
+- **Why:** who can push to the head branch matters as well as who opened
+  the PR. Jon could open a PR from someone else's fork, and that person
+  could push another commit later. Author permission alone does not make
+  that head branch trusted.
+- **Rejected:** Jon approving the exact head commit. That needs more
+  machinery, and approval is easy to give on autopilot.
+- **Status:** implemented in PR #56.
