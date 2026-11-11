@@ -1163,7 +1163,7 @@ def test_ip_fast_path_matches_ipaddress_without_2001_heads():
     """Finding 2 (round 4): triple-colon candidates take the slow path.
 
     ``candidate.count("::")`` counts non-overlapping occurrences, so
-    ``fe80:::1`` and ``2002:::abcd`` hold exactly one ``::`` and the fast
+    triple-colon candidates hold exactly one ``::`` and the fast
     path flagged addresses ``ipaddress`` rejects. The round-3 generator
     above draws heads from a list holding ``2001``, which forces the slow
     path; this generator never starts a candidate with a slow-path head
@@ -1176,7 +1176,9 @@ def test_ip_fast_path_matches_ipaddress_without_2001_heads():
     rng = random.Random(20261111)
     heads = ["fe80", "2002", "abcd", "1234", "1", "db8", "DB8", "9"]
     tails = ["0", "00", "1", "0001", "abcd", "1234", "fe80", "db8", "ffff"]
-    texts = ["fe80:::1\n", "fe80:::\n", "2002:::abcd\n", "1:::2\n", "ab:::cd:1\n"]
+    texts = [head + ":::" + tail + "\n" for head, tail in (
+        ("fe80", "1"), ("fe80", ""), ("2002", "abcd"), ("1", "2"), ("ab", "cd:1")
+    )]
     for _ in range(500):
         groups = [rng.choice(heads)] + [
             rng.choice(tails) for _ in range(rng.randint(1, 7))
