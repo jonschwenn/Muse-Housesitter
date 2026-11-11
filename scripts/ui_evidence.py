@@ -338,22 +338,33 @@ def diff_rgba(before: tuple, after: tuple) -> tuple:
 
 
 def png_size(data: bytes) -> tuple:
-    """Read (width, height) from a PNG's header (IHDR) without decoding it.
+    """Read (width, height) from a PNG's header chunk (IHDR) without decoding.
 
-    The PNG spec puts IHDR first: bytes 8-12 hold its length (13), 12-16 its
-    type, then width and height (4 bytes each), bit depth, colour type, and
-    interlace. Raises ValueError for anything that is not an 8-bit RGB/RGBA
-    non-interlaced PNG header, the same formats decode_png accepts.
+    Walks the chunk headers exactly as decode_png does, without touching the
+    compressed image data, so it picks the same IHDR (the last one before
+    IEND) and rejects the same headers: no IHDR, a truncated chunk, or
+    anything but 8-bit RGB/RGBA non-interlaced. Raises ValueError for all of
+    them, and for an IHDR whose length is not 13.
     """
     if data[:8] != PNG_MAGIC:
         raise ValueError("not a PNG file")
-    if len(data) < 8 + 8 + 13:
-        raise ValueError("truncated PNG header")
-    (length,) = struct.unpack(">I", data[8:12])
-    if data[12:16] != b"IHDR" or length != 13:
-        raise ValueError("PNG does not start with an IHDR chunk")
+    pos, ihdr = 8, None
+    while pos + 8 <= len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        ctype = data[pos + 4:pos + 8]
+        if pos + 8 + length > len(data):
+            raise ValueError("truncated PNG chunk")
+        if ctype == b"IHDR":
+            ihdr = data[pos + 8:pos + 8 + length]
+        elif ctype == b"IEND":
+            break
+        pos += 12 + length
+    if ihdr is None:
+        raise ValueError("PNG has no IHDR")
+    if len(ihdr) != 13:
+        raise ValueError("PNG IHDR has the wrong length")
     width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
-        ">IIBBBBB", data[16:29]
+        ">IIBBBBB", ihdr
     )
     if bit_depth != 8 or color_type not in (2, 6) or interlace != 0:
         raise ValueError(
@@ -366,23 +377,18 @@ def png_size(data: bytes) -> tuple:
 def clip_to_max_height(shot: bytes) -> tuple:
     """Crop a full-page PNG to MAX_SHOT_HEIGHT_PX rows. Returns (shot, cropped).
 
-    The height comes from the header, so a shot at or under the cap is
-    returned as is without decoding it (pure-Python decoding of a full-page
-    shot takes seconds). Only a taller shot is decoded and cropped.
+    The height comes from the header (png_size), so a shot at or under the
+    cap is returned as is without decoding it: pure-Python decoding of a
+    full-page shot takes seconds. Only a taller shot is decoded and cropped.
 
     Raises ValueError for a missing, malformed, or unsupported header, and
-    for undecodable image data in a shot that needs cropping; callers that
-    already report such shots (check_page, F7 in build_manifest) leave the
-    bytes alone instead.
+    for undecodable image data in a shot that needs cropping. The caller
+    (capture_side) then saves the bytes as they are.
     """
     _, height = png_size(shot)
     if height <= MAX_SHOT_HEIGHT_PX:
         return shot, False
     width, height, rgba = decode_png(shot)
-    # decode_png's size is the one the crop uses, as before this fast path.
-    # The two only disagree for a non-conforming PNG with a second IHDR.
-    if height <= MAX_SHOT_HEIGHT_PX:
-        return shot, False
     return (
         encode_png(width, MAX_SHOT_HEIGHT_PX, 6, rgba[:width * MAX_SHOT_HEIGHT_PX * 4]),
         True,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import struct
 from pathlib import Path
 
 import pytest
@@ -506,7 +507,6 @@ def test_changed_pair_with_decodable_pngs_still_writes_a_diff(tmp_path):
     assert (out / "typical__index-phone__diff.png").is_file()
 
 
-
 def test_changed_pair_is_decoded_once_per_side(tmp_path, monkeypatch):
     # Classification already decodes both sides; the diff image reuses that
     # work instead of decoding both PNGs again.
@@ -535,6 +535,7 @@ def test_changed_pair_is_decoded_once_per_side(tmp_path, monkeypatch):
     for view in VIEWS_UNDER_TEST:
         diff_png = (out / f"typical__{view}__diff.png").read_bytes()
         assert diff_png == ui_evidence.encode_png(w, h, 2, rgb)
+
 
 def test_unchanged_pair_drops_its_pngs(tmp_path):
     base, head = _manifest_trees(tmp_path)
@@ -612,7 +613,6 @@ def test_tall_shot_is_cropped(monkeypatch):
     assert ui_evidence.clip_to_max_height(small) == (small, False)
 
 
-
 def _no_decode(_data):
     raise AssertionError("decode_png must not run for a shot under the cap")
 
@@ -678,6 +678,26 @@ def test_clip_still_rejects_unsupported_pngs(monkeypatch, kind):
     monkeypatch.setattr(ui_evidence, "decode_png", _no_decode)
     with pytest.raises(ValueError, match="unsupported PNG"):
         ui_evidence.clip_to_max_height(_unsupported_variant(kind))
+
+
+def _with_chunk_before_ihdr(shot: bytes, chunk: bytes) -> bytes:
+    return shot[:8] + chunk + shot[8:]
+
+
+@pytest.mark.parametrize("first", ["text", "short-ihdr"])
+def test_clip_sizes_non_conforming_pngs_like_decode_png(monkeypatch, first):
+    # decode_png reads every chunk and the last IHDR wins; the header read
+    # must pick the same size, so even a non-conforming PNG crops as before.
+    monkeypatch.setattr(ui_evidence, "MAX_SHOT_HEIGHT_PX", 10)
+    if first == "text":
+        extra = ui_evidence._chunk(b"tEXt", b"Comment\x00example")
+    else:
+        extra = ui_evidence._chunk(b"IHDR", struct.pack(">IIBBBBB", 3, 5, 8, 2, 0, 0, 0))
+    tall_shot = _with_chunk_before_ihdr(rgba_png(3, 12), extra)
+    width, height, rgba = ui_evidence.decode_png(tall_shot)
+    assert (width, height) == (3, 12)
+    want = ui_evidence.encode_png(width, 10, 6, rgba[:width * 10 * 4])
+    assert ui_evidence.clip_to_max_height(tall_shot) == (want, True)
 
 # Publisher wiring: evidence-publish.yml validates with main's code --------------
 
