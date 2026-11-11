@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -149,10 +150,53 @@ def _resolve_import(path, level, dotted, root):
                 continue
             if candidate.is_file():
                 found.append(rel)
+    # Importing a module also executes every parent package's __init__.py,
+    # so those load too.
+    for rel in list(found):
+        directory = (root / rel).parent
+        while directory != root and root in directory.parents:
+            init = directory / "__init__.py"
+            if init.is_file():
+                found.append(init.relative_to(root).as_posix())
+            directory = directory.parent
     return found
 
 
-def _spec_load_targets(tree):
+def _dynamic_import_targets(tree, path, root):
+    """String-literal ``import_module`` / ``__import__`` calls as imports.
+
+    ``importlib.import_module("core.x")`` and ``__import__("core.x")`` load
+    exactly what the equivalent import statement loads; a non-literal first
+    argument cannot be resolved statically, so it contributes nothing.
+    """
+    targets = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            if func.attr != "import_module":
+                continue
+        elif isinstance(func, ast.Name):
+            if func.id not in ("import_module", "__import__"):
+                continue
+        else:
+            continue
+        first = node.args[0] if node.args else None
+        if first is None:
+            for keyword in node.keywords:
+                if keyword.arg == "name":
+                    first = keyword.value
+        if (
+            isinstance(first, ast.Constant)
+            and isinstance(first.value, str)
+            and first.value
+        ):
+            targets.extend(_resolve_import(path, 0, first.value, root))
+    return targets
+
+
+def _spec_load_targets(tree, root):
     """Scripts loaded via ``spec_from_file_location``: repo-relative paths."""
     calls = []  # (enclosing function name or None, string constants in args)
 
@@ -188,15 +232,26 @@ def _spec_load_targets(tree):
             first_args.setdefault(node.func.id, set()).add(node.args[0].value)
     targets = []
     for func, consts in calls:
-        if "scripts" not in consts:
-            continue
-        pys = [c for c in consts if c.endswith(".py") and len(c) > len(".py")]
-        if pys:
-            targets.extend(f"scripts/{Path(p).name}" for p in pys)
-        elif func in first_args:
-            # Dynamic file name (``ROOT / "scripts" / f"{name}.py"``): resolve
-            # through the loader's constant call sites, e.g. _load("ui_evidence").
-            targets.extend(f"scripts/{name}.py" for name in first_args[func])
+        if "scripts" in consts:
+            pys = [c for c in consts if c.endswith(".py") and len(c) > len(".py")]
+            if pys:
+                targets.extend(f"scripts/{Path(p).name}" for p in pys)
+            elif func in first_args:
+                # Dynamic file name (``ROOT / "scripts" / f"{name}.py"``): resolve
+                # through the loader's constant call sites, e.g. _load("ui_evidence").
+                targets.extend(f"scripts/{name}.py" for name in first_args[func])
+        # A literal path load (``spec_from_file_location("m", "tests/x.py")``)
+        # imports that file when it lives under the repo.
+        for const in consts:
+            if len(const) <= len(".py") or not const.endswith(".py"):
+                continue
+            candidate = Path(os.path.normpath(root / const))
+            try:
+                rel = candidate.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if candidate.is_file():
+                targets.append(rel)
     return targets
 
 
@@ -235,7 +290,8 @@ def _repo_local_targets(path, root):
                     path, node.level, node.module or "", [a.name for a in node.names], root
                 )
             )
-    for target in _spec_load_targets(tree):
+    targets.update(_dynamic_import_targets(tree, path, root))
+    for target in _spec_load_targets(tree, root):
         candidate = root / target
         if candidate.is_file():
             targets.add(target)
@@ -328,6 +384,85 @@ def test_closure_resolves_relative_imports(tmp_path):
     reached = _closure_reachable(root / "tests" / "pkg" / "suite_c.py", root)
     assert "tests/pkg/sib.py" in reached
     assert "tests/top.py" in reached
+
+
+def test_closure_follows_import_module_string(tmp_path):
+    """Finding 4 (round 2): importlib.import_module("core.x") loads it."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/core/start.py": 'import importlib\nimportlib.import_module("core.x")\n',
+            "tests/core/x.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "core" / "start.py", root)
+    assert "tests/core/x.py" in reached
+
+
+def test_closure_follows_dunder_import_string(tmp_path):
+    """Finding 4 (round 2): __import__("core.x") loads it."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/core/start.py": '__import__("core.x")\n',
+            "tests/core/x.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "core" / "start.py", root)
+    assert "tests/core/x.py" in reached
+
+
+def test_closure_ignores_non_literal_dynamic_import(tmp_path):
+    """Finding 4 (round 2): import_module(name) cannot resolve, but no crash."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/core/start.py": (
+                "import importlib\nname = 'core.x'\nimportlib.import_module(name)\n"
+            ),
+            "tests/core/x.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "core" / "start.py", root)
+    assert "tests/core/x.py" not in reached
+
+
+def test_closure_follows_spec_from_file_location_path(tmp_path):
+    """Finding 4 (round 2): a literal path load is an import of that file."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/start.py": (
+                "import importlib.util\n"
+                'importlib.util.spec_from_file_location("m", "tests/core/x.py")\n'
+            ),
+            "tests/core/x.py": "X = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "start.py", root)
+    assert "tests/core/x.py" in reached
+
+
+def test_closure_includes_parent_package_inits(tmp_path):
+    """Finding 4 (round 2): from core.pkg.leaf import VALUE loads the inits."""
+    root = tmp_path / "r"
+    _write_tree(
+        root,
+        {
+            "tests/core/start.py": "from core.pkg.leaf import VALUE\n",
+            "tests/core/__init__.py": "",
+            "tests/core/pkg/__init__.py": "X = 1\n",
+            "tests/core/pkg/leaf.py": "VALUE = 1\n",
+        },
+    )
+    reached = _closure_reachable(root / "tests" / "core" / "start.py", root)
+    assert "tests/core/pkg/leaf.py" in reached
+    assert "tests/core/pkg/__init__.py" in reached
+    assert "tests/core/__init__.py" in reached
 
 
 # File listing ----------------------------------------------------------------
