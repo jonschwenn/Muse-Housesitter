@@ -442,10 +442,11 @@ jobs:
           if [ "$(wc -c < rendered/comment.md)" -gt 65000 ]; then
             echo "comment is too large; not posting"; exit 1
           fi
-          # Freshness re-check, immediately before posting and after all
-          # preparation above: the PR may have moved while this step ran.
+          # Freshness re-check, after all preparation above and before the
+          # lookup below: the PR may have moved while this step ran.
           # Stopping without writing beats posting for a superseded commit;
-          # the newer run publishes.
+          # the newer run publishes. A second re-check follows the lookup
+          # (which itself takes time), immediately before writing.
           fresh_rc=0
           python3 scripts/publish_evidence.py check-head \
             --repo "$REPO" --pr "$PR" --expected "$HEAD_SHA" || fresh_rc=$?
@@ -453,7 +454,8 @@ jobs:
           if [ "$fresh_rc" != 0 ]; then exit "$fresh_rc"; fi
           # The job is serialised per PR (concurrency above), so this lookup
           # sees every earlier write. Main's Python applies the monotonic
-          # rules — never write over a same-head comment from a newer run,
+          # rules — never write over any marker comment from a newer run,
+          # whatever head it is for (ordering is cross-head by CI run id),
           # and a notice never replaces same-head evidence — and prints one
           # plan; the shell below only carries out its fixed words and its
           # digit-only ids (each re-validated before use).
@@ -491,6 +493,14 @@ jobs:
               exit 1
               ;;
           esac
+          # Second freshness re-check, immediately before writing: the head
+          # may have moved during the lookup above. The earlier check stays:
+          # it caught moves during the build and push steps.
+          fresh_rc=0
+          python3 scripts/publish_evidence.py check-head \
+            --repo "$REPO" --pr "$PR" --expected "$HEAD_SHA" || fresh_rc=$?
+          if [ "$fresh_rc" = 1 ]; then exit 0; fi
+          if [ "$fresh_rc" != 0 ]; then exit "$fresh_rc"; fi
           case "$first" in
             POST)
               gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@rendered/comment.md > /dev/null

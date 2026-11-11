@@ -1705,7 +1705,17 @@ if "-X" in args:
         f.write(json.dumps(entry) + "\\n")
     print("")
 elif any("/pulls/" in a for a in args):
-    print(os.environ.get("FAKE_HEAD") or os.environ["HEAD_SHA"])
+    seq = state / "heads.json"
+    if seq.exists():
+        heads = json.loads(seq.read_text())
+        if heads:
+            head = heads.pop(0)
+            seq.write_text(json.dumps(heads))
+            print(head)
+        else:
+            print(os.environ.get("FAKE_HEAD") or os.environ["HEAD_SHA"])
+    else:
+        print(os.environ.get("FAKE_HEAD") or os.environ["HEAD_SHA"])
 elif any("/comments" in a for a in args):
     listing = state / "listing.json"
     print(listing.read_text() if listing.exists() else "[]")
@@ -1725,6 +1735,7 @@ def _run_comment_step(
     run_id="100",
     run_attempt="1",
     fake_head=None,
+    heads=None,
 ):
     """Run the real comment-step shell with a fake gh; return (proc, calls).
 
@@ -1747,6 +1758,8 @@ def _run_comment_step(
     state.mkdir()
     if listing is not None:
         (state / "listing.json").write_text(json.dumps(listing))
+    if heads is not None:
+        (state / "heads.json").write_text(json.dumps(heads))
     for name, content in (files or {}).items():
         path = run / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1908,14 +1921,15 @@ def test_stale_notice_never_replaces_same_head_evidence():
 
 def test_stale_body_never_reaches_decide_write_for_a_moved_head():
     # Interleaving (c): A read head H1, the head moved, B published H2, and
-    # A's stale body arrives last. A's freshness re-check (expected H1 vs
-    # current H2) stops it before any write, so the H2 comment survives;
-    # decide_write only runs once freshness has established the new head as
-    # current, and then a different-head marker is stale by definition.
+    # A's stale body arrives last. A's freshness re-checks (expected H1 vs
+    # current H2, before the lookup and again after it) stop it before any
+    # write, so the H2 comment survives. If it still reached decide_write,
+    # the cross-head ordering (review round 3, finding 1) stops it there:
+    # run 101 is newer than run 100 whatever head it was for.
     existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=101)])
     assert publish_evidence.decide_write(
         existing, HEAD_SHA, 100, 1, "evidence"
-    ) == ("patch", 11, [])
+    ) == ("skip", None, [])
 
 
 def test_fresh_head_replaces_a_stale_head_comment():
@@ -1955,11 +1969,15 @@ def test_legacy_bare_marker_is_replaced():
 
 
 def test_multiple_markers_keep_one_and_delete_the_rest():
+    # Every marker here is older than this run: same-head markers win the
+    # pool over the stale cross-head one. (A newer cross-head marker would
+    # skip instead — review round 3, finding 1 — and skip-time cleanup is
+    # covered by the round 3 finding 4 tests.)
     existing = _triples(
         [
             _bot_comment(11, run=90),
             _bot_comment(12, run=95),
-            _bot_comment(13, head=OTHER_HEAD, run=200),
+            _bot_comment(13, head=OTHER_HEAD, run=80),
         ]
     )
     action, keep, delete = publish_evidence.decide_write(
@@ -2166,3 +2184,76 @@ def test_comment_step_replaces_a_stale_head_and_dedupes(tmp_path, monkeypatch):
     drop_url = next(a for a in drop["argv"] if "repos/" in a)
     assert patch_url.endswith("/12")
     assert drop_url.endswith("/11")
+
+
+# Review round 3, finding 1: cross-head monotonic ordering. ------------------
+#
+# Overlapping runs used to order only within one head: run 100 for head A
+# PATCHed head B's evidence from newer run 101 when the PR swung A -> B ->
+# A between the freshness check and the lookup. Ordering is now over every
+# bot marker comment: never replace a comment from a newer (run id,
+# attempt), whatever head it is for. A genuinely newer push always gets a
+# newer CI run id, so it still wins. The shell also re-checks the head
+# after the lookup, immediately before writing.
+
+
+def test_older_run_never_replaces_newer_cross_head_comment():
+    # The reviewer's ABA repro: run 100 is for head A, but head B's
+    # evidence from newer run 101 is already posted.
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=101)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "notice"
+    ) == ("skip", None, [])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("skip", None, [])
+
+
+def test_older_attempt_never_replaces_newer_cross_head_attempt():
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=100, attempt=2)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 100, 1, "evidence"
+    ) == ("skip", None, [])
+
+
+def test_newer_run_replaces_stale_cross_head_comment():
+    # Rollback: a NEW CI run for head A (higher id) correctly replaces
+    # head B's comment.
+    existing = _triples([_bot_comment(11, head=OTHER_HEAD, run=101)])
+    assert publish_evidence.decide_write(
+        existing, HEAD_SHA, 102, 1, "evidence"
+    ) == ("patch", 11, [])
+
+
+def test_comment_step_skips_older_run_over_newer_cross_head_comment(
+    tmp_path, monkeypatch
+):
+    # End to end: the PR is back on head A and run 100's freshness checks
+    # pass, but head B's evidence from run 101 is posted. Nothing is
+    # written: B's comment survives untouched.
+    listing = [_bot_comment(11, head=OTHER_HEAD, run=101)]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "failure",
+        files=files, listing=listing,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [], calls
+
+
+def test_comment_step_rechecks_the_head_after_the_lookup(tmp_path, monkeypatch):
+    # The head moves after the lookup but before the write: the second
+    # freshness re-check stops the step with no writes.
+    listing = [_bot_comment(11, run=90)]
+    files = {"rendered/comment.md": _evidence_comment() + "body\n"}
+    proc, calls = _run_comment_step(
+        tmp_path, monkeypatch, "success", "success",
+        files=files, listing=listing, evidence_sha="c" * 40,
+        heads=[HEAD_SHA, OTHER_HEAD],
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [], calls
+
+
+def test_comment_step_checks_the_head_twice():
+    assert _comment_step_shell().count("check-head") >= 2

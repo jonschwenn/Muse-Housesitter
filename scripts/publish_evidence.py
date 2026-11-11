@@ -743,8 +743,10 @@ def cmd_decide_comment(args: argparse.Namespace) -> int:
 # otherwise both POST. Every comment body therefore carries a hidden marker
 # built only from trusted event data (head SHA, workflow_run id and
 # attempt, outcome), and the write follows monotonic rules over the
-# existing bot-authored comments: never write when the existing comment is
-# for the same head with a newer (run id, attempt); a notice never replaces
+# existing bot-authored comments: never write when any marker comment is
+# from a newer (run id, attempt), whatever head it is for (review round 3,
+# finding 1: ordering is cross-head and monotonic by CI run, since a
+# genuinely newer push always gets a newer run id); a notice never replaces
 # an evidence comment for the same head; otherwise write, keeping one
 # marker comment and deleting the rest. Marker-looking text in anyone
 # else's comments is ignored. Residual: GitHub keeps one pending run per
@@ -851,6 +853,12 @@ def decide_write(
                     parsed["outcome"],
                 )
             )
+    if any(key > new_key for _, _, key, _ in markers):
+        # Cross-head ordering (review round 3, finding 1): a newer run
+        # already wrote — whatever head it was for — so this run writes
+        # nothing. A genuinely newer push always gets a newer CI run id,
+        # so it still wins.
+        return ("skip", None, [])
     same_head = [m for m in markers if m[1] == head_sha]
     if any(key > new_key for _, _, key, _ in same_head):
         return ("skip", None, [])
@@ -958,7 +966,10 @@ def cmd_decide_write(args: argparse.Namespace) -> int:
 # The head used to be checked once per job, then the step fetched, prepared
 # and looked up comments: a head that moved mid-step still pushed and
 # posted. The workflow calls check-head immediately before every `git push`
-# (both attempts) and immediately before posting, after the comment lookup.
+# (both attempts) and twice in the comment step: once before the comment
+# lookup and again after it, immediately before writing (review round 3,
+# finding 1: the lookup itself takes time, so the earlier check is stale
+# by write time).
 # Exit codes: 0 the head is still fresh; 1 it moved (the caller stops
 # without writing); 2 the check itself failed.
 
