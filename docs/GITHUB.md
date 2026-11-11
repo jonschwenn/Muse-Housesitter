@@ -47,12 +47,14 @@ after the PR. Merged branches clean themselves up.
      download the test-results artifacts and read job conclusions from the
      API; no permission was widened.
 
-The publisher serialises runs with a per-PR concurrency group keyed by
-head repository owner and branch, without cancelling the active run. It
-checks the head again before pushing images and before posting. Artifact
-refusals produce a fixed notice with a reason code instead of silently
-leaving out the evidence; stale or ambiguous PR lookups and moved heads
-still stop without writing. These controls add no permissions (D34).
+The publisher re-checks the head immediately before every push attempt and
+immediately before posting, after finding the existing comment. A moved
+head writes nothing; runs for the same head write the same content. A newer
+head's run starts only after that head is pushed, so it writes last.
+Artifact refusals and publish failures produce a fixed notice with a
+reason code; `publish_failed` covers a failed image push or a missing or
+corrupt rendered artifact. Stale or ambiguous PR lookups still stop without
+writing. These controls add no permissions (D34).
 
 Click **Save** in each section.
 

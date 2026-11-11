@@ -47,7 +47,8 @@ PR #1 predates the tooling and has no evidence.
   a temporary worktree) and on its head. It writes structured results to
   `results.json` and a local preview to `evidence.md`: a summary table
   (scenario, changed or unchanged, envelope size as the SDK measures it),
-  then a diff for each changed scenario. Volatile fields
+  then a diff for each changed scenario. The results schema requires every
+  field the renderer reads, with valid UTF-8 strings. Volatile fields
   (`collected_at`, saved ids) are normalised so they don't show up as noise.
 - Each run gets a fresh, empty `HOME` and a minimal environment: the
   variables the SDK gives drop-in commands, plus `PYTHONPATH` and
@@ -82,11 +83,17 @@ PR #1 predates the tooling and has no evidence.
   write token belongs to this workflow, not to the PR. When the artifact is
   invalid, it pushes no images and posts a fixed refusal notice containing
   only main's text and a reason code: `missing`, `too_large`, `bad_png`,
-  `bad_schema`, or `stale_head`. A stale or ambiguous PR lookup still
-  publishes nothing. The workflow checks the head again just before
-  pushing images and before posting; a moved head stops without writing.
-  A per-PR concurrency group, keyed by head owner and branch, prevents
-  overlapping publisher runs without cancelling the active run.
+  `bad_schema`, `stale_head`, `render_error`, or `publish_failed`.
+  These mean missing or unreadable input, a size-limit breach, an invalid
+  screenshot, invalid evidence data, a mismatched artifact head, a render
+  failure, or a publishing failure, respectively. `publish_failed` covers
+  a failed image push or a missing or corrupt rendered artifact. Refusals
+  and publish failures post fixed notices. A stale or ambiguous PR lookup
+  still publishes nothing. The head is re-checked immediately before every
+  push attempt and immediately before posting, after finding the existing
+  comment; a moved head stops without writing. Runs for the same head write
+  the same content. A newer head's run starts only after that head is
+  pushed, so it writes last.
 - Each CI `test` job runs pytest with `--junitxml`, writes a results table
   to its job summary page, and uploads `test-results-<matrix python>`.
   The publisher downloads the XML and reads the run attempt's test-job
@@ -201,8 +208,10 @@ PR #1 predates the tooling and has no evidence.
   validated `ui_manifest.json` — it never pastes pre-rendered markdown
   files from the artifact, and the `evidence` job's `evidence.md` carries
   the text section only. The comment carries only known boilerplate plus a
-  table and images built from the re-validated manifest: capture names
-  against the capture regex, status against the
+  table and images built from the re-validated manifest. The `<details>`
+  summary is fixed text, "Screenshots"; fixture labels appear only in code
+  spans. The renderer checks capture names against the capture regex,
+  status against the
   added/removed/changed/unchanged enum, view against the known views,
   problems escaped (code spans) and length-capped, browser channel against
   an allow-list (`chromium` → Playwright's bundled Chromium, `chrome` →
@@ -244,9 +253,12 @@ PR #1 predates the tooling and has no evidence.
   `https://raw.githubusercontent.com/<owner>/<repo>/<sha>/<path>` works.
 - Trust model, publisher side: the publisher treats the screenshot artifact
   as untrusted data produced by PR code. It validates file names, PNG
-  structure (chunk lengths, CRCs, dimensions and bounded decompression),
-  size and count caps, rejects symlinks and subdirectories, posts only a
-  fixed notice when validation fails, and pushes only to the
+  structure (chunk lengths, CRCs and dimensions), allows only IHDR, PLTE,
+  IDAT and IEND chunks, and requires a complete compressed stream with no
+  trailing data, decoding to exactly the size declared by IHDR. Each
+  scanline's filter byte must be 0–4. It checks size and count caps,
+  rejects symlinks and subdirectories, posts only a fixed notice when
+  validation fails, and pushes only to the
   orphan `pr-evidence` branch — then posts the pixels as the author's claim,
   exactly like the text diffs. Validation passing means the files are PNGs
   of a sane size, not that the pixels are truthful. Main's publisher calls

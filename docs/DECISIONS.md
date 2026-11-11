@@ -260,10 +260,13 @@ handoff's "license not chosen; don't publish."
     main's `scripts/publish_evidence.py`, which rebuilds the text and Web UI
     sections with main's renderers), pushes only validated PNGs to the orphan
     `pr-evidence` branch, and posts or edits the single bot comment. Fork
-    PRs get comments too. Artifact refusals produce a fixed notice with a
-    reason code; stale or ambiguous PR lookups publish nothing. The head
-    is checked again before pushing and posting, and a per-PR concurrency
-    group prevents overlapping publisher runs.
+    PRs get comments too. Artifact refusals and publish failures produce a
+    fixed notice with a reason code; stale or ambiguous PR lookups publish
+    nothing. The head is re-checked immediately before every push attempt
+    and immediately before posting, after finding the existing comment.
+    A moved head writes nothing; same-head runs write the same content.
+    A newer head's run starts only after that head is pushed, so it writes
+    last.
   - `ci-guard.yml` on `pull_request_target` runs from the base commit and
     never touches PR code. `scripts/ci_guard.py` (stdlib only, unit-tested)
     lists the PR's changed files through the API — paginated, failing
@@ -338,10 +341,12 @@ handoff's "license not chosen; don't publish."
     is an explicit, visible act.
 - **Amended (2026-11-11, Jon):** updated the current-state workflow list
   above: shared checks fail the evidence job, main rebuilds both comment
-  sections, and artifact refusal means a fixed notice. PNG validation now
-  checks structure, CRCs, dimensions and bounded decompression, rather than
-  just the signature. Freshness checks before push and post, plus a
-  concurrency group keyed by head owner and branch, limit stale writes.
+  sections, and refusals and publish failures mean a fixed notice. PNG
+  validation checks chunk lengths, CRCs and dimensions, allows only IHDR,
+  PLTE, IDAT and IEND chunks, and requires a complete compressed stream
+  with no trailing data, decoding to exactly the size declared by IHDR.
+  Each scanline's filter byte must be 0–4. The head is re-checked immediately
+  before every push attempt and before posting, after comment lookup.
   Permissions are unchanged. See D33–D35.
 
 ### D17. Dashboard design bakeoff outcome (2026-11-07, Jon)
@@ -658,8 +663,10 @@ handoff's "license not chosen; don't publish."
 ### D33. Rebuild evidence text under the bot's name (2026-11-11, Jon)
 - **Decision:** option A of evidence Decision 13: main's publisher rebuilds
   the text section from the PR's validated `results.json`, never its
-  markdown. Command output appears only inside code blocks. The comment
-  says the outputs come from the PR's own CI run and remain author-attested.
+  markdown. Every field the renderer reads is required, and strings must
+  be valid UTF-8. Command output appears only inside code blocks. The
+  comment says the outputs come from the PR's own CI run and remain
+  author-attested.
 - **Why:** the old publisher posted PR-built markdown under the bot's name.
   A PR could make the bot appear to say "Approved by maintainer" or any
   other forged sentence.
@@ -671,14 +678,22 @@ handoff's "license not chosen; don't publish."
 - **Decision:** both options of evidence Decision 4. The evidence job runs
   the publisher's checks on its artifact; refusal fails `evidence` and
   `ci-ok`. This catches honest mistakes only, because a PR controls its
-  own copy. Main's publisher posts a fixed notice on artifact refusal,
-  using only its own text and one reason code: `missing`, `too_large`,
-  `bad_png`, `bad_schema`, or `stale_head`. Stale or ambiguous PR lookups
-  and a moved head at the final freshness checks still stop without writing.
+  own copy. Main's publisher posts a fixed notice on artifact refusal or
+  publish failure, using only its own text and one reason code: `missing`,
+  `too_large`, `bad_png`, `bad_schema`, `stale_head`, `render_error`, or
+  `publish_failed`. `render_error` means rendering failed; `publish_failed`
+  covers a failed image push or a missing or corrupt rendered artifact.
+  Stale or ambiguous PR lookups and a moved head at the final freshness
+  checks still stop without writing.
 - **Why:** PR #43's 40.3 MB of screenshots exceeded the 40 MB cap. The
   publisher refused twice while CI stayed green; it merged without evidence.
 - **Rejected:** CI checks alone (a hostile PR can edit them); notices alone
   (the publisher is not a required check, so the PR could still merge).
+  A concurrency group was also rejected: GitHub keeps only one pending run
+  per group, and a late stale run can replace the current head's pending
+  run regardless of commit age, losing its evidence. An owner-and-branch
+  key can also collide across PRs. Write-time freshness checks avoid that
+  queue; same-head runs write the same content, and newer heads write last.
 - **Status:** in effect from PR #57.
 
 ### D35. Crop oversized screenshot sets to fit (2026-11-11, Jon)
