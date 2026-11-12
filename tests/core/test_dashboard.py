@@ -25,6 +25,12 @@ from housesitter.core.config import ConfigError, load_config
 from housesitter.core.dashboard import DashboardUnavailable, build_view, clear_cache
 from housesitter.core.registry import Registry
 from housesitter.modules.unifi_wifi import UniFiWifi
+from test_dashboard_contract import (
+    check_view,
+    fetch_view,
+    ids_hidden,
+    live_server,
+)
 
 START = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -509,3 +515,132 @@ def test_cache_drops_entries_for_files_no_longer_listed(tmp_path):
     with dash._cache_lock:
         cached = {key[0] for key in dash._history_cache}
     assert ids[0] not in cached and set(ids[1:]) <= cached
+
+
+# -- live server (moved from test_dashboard_contract.py) -----------------------
+#
+# The same view-state scenarios as above, but through the REAL dashboard
+# server over HTTP instead of calling build_view directly. Each test
+# additionally pins the whole view against the contract (check_view).
+
+
+def test_live_empty_store_is_never(tmp_path):
+    home = tmp_path
+    seed.write_test_config(home, server_port=1)
+    with live_server(home) as url:
+        view = fetch_view(url)
+    check_view(view)
+    assert view["modules"][0]["status"] == "never"
+    assert view["unifi_wifi"] is None
+
+
+def test_live_one_snapshot_has_no_previous(tmp_path):
+    home = tmp_path
+    ids = seed.seed_snapshots(home, count=1, start=START)
+    with live_server(home) as url:
+        view = fetch_view(url)
+    check_view(view, realistic=False)
+    assert view["unifi_wifi"]["snapshots"]["total"] == 1
+    assert view["unifi_wifi"]["latest"]["id"] == ids[0]
+    assert view["unifi_wifi"]["previous"] is None
+
+
+def test_live_two_snapshots_set_previous(tmp_path):
+    home = tmp_path
+    seed.seed_snapshots(home, count=2, start=START)
+    with live_server(home) as url:
+        view = fetch_view(url)
+    check_view(view, realistic=False)
+    assert view["unifi_wifi"]["snapshots"]["total"] == 2
+    assert view["unifi_wifi"]["previous"] is not None
+
+
+def test_live_recent_capped_at_50_with_exact_total(tmp_path):
+    home = tmp_path
+    seed.seed_snapshots(home, count=55, start=START)
+    with live_server(home) as url:
+        view = fetch_view(url)
+    check_view(view, realistic=False)
+    assert view["unifi_wifi"]["snapshots"]["total"] == 55
+    assert len(view["unifi_wifi"]["snapshots"]["recent"]) == 50
+
+
+def test_live_newest_corrupt_file_is_skipped(tmp_path):
+    home = tmp_path
+    ids = seed.seed_snapshots(home, count=2, start=START)
+    (seed.module_dir(home) / (ids[1] + ".json")).write_bytes(b"{broken")
+    with live_server(home) as url:
+        view = fetch_view(url)
+    check_view(view, realistic=False)
+    assert view["unifi_wifi"]["snapshots"]["total"] == 1
+    assert view["unifi_wifi"]["latest"]["id"] == ids[0]
+
+
+def test_live_old_schema_file_is_skipped(tmp_path):
+    home = tmp_path
+    ids = seed.seed_snapshots(home, count=1, start=START)
+    stale = seed.module_dir(home) / "snapshot_20260101T000000Z_0000.json"
+    stale.write_text(json.dumps({
+        "schema": "housesitter.unifi_wifi.snapshot/0",
+        "module": "unifi_wifi",
+        "collected_at": "2026-01-01T00:00:00Z",
+        "data": {},
+        "source": {},
+        "warnings": [],
+    }))
+    with live_server(home) as url:
+        view = fetch_view(url)
+    check_view(view, realistic=False)
+    assert view["unifi_wifi"]["snapshots"]["total"] == 1
+    assert view["unifi_wifi"]["latest"]["id"] == ids[0]
+
+
+def test_live_all_corrupt_is_error_with_null_data(tmp_path):
+    home = tmp_path
+    seed.write_test_config(home, server_port=1)
+    directory = seed.module_dir(home)
+    directory.mkdir(parents=True, exist_ok=True)
+    for suffix in ("aaaa", "bbbb"):
+        (directory / f"snapshot_20261101T120000Z_{suffix}.json").write_bytes(
+            b"not json at all"
+        )
+    with live_server(home) as url:
+        view = fetch_view(url)
+    check_view(view)
+    entry = view["modules"][0]
+    assert entry["status"] == "error"
+    assert view["unifi_wifi"] is None
+
+
+def test_live_disabled_module_has_no_entry(tmp_path):
+    home = tmp_path
+    seed.seed_snapshots(home, count=1, start=START)
+    seed.write_test_config(home, server_port=1, enabled=False)
+    with live_server(home) as url:
+        view = fetch_view(url)
+    check_view(view)
+    assert view["modules"] == []
+    assert view["unifi_wifi"] is None
+
+
+def test_live_hostile_names_are_data_sanitised(tmp_path):
+    home = tmp_path
+    seed.seed_snapshots(home, count=1, start=START, routes_kind="hostile")
+    with live_server(home) as url:
+        view = fetch_view(url)
+    check_view(view, realistic=False)
+    assert "PLANTED-SECRET" not in json.dumps(view)
+
+
+def test_live_identifiers_none_strips_ids(tmp_path):
+    home = tmp_path
+    seed.seed_snapshots(home, count=1, start=START, identifiers="none")
+    with live_server(home) as url:
+        view = fetch_view(url)
+    dumped = json.dumps(view["unifi_wifi"])
+    assert "02:00" not in dumped
+    assert "192.0.2" not in dumped
+    assert view["unifi_wifi"]["snapshots"]["total"] == 1
+    # D24: the keys stay, with null values, so the exact key sets hold.
+    check_view(view, realistic=False)
+    assert ids_hidden(view["unifi_wifi"]["latest"])

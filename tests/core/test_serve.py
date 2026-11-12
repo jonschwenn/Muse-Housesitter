@@ -44,16 +44,19 @@ def _fresh_cache():
     clear_cache()
 
 
-@pytest.fixture()
-def seeded_home(tmp_path):
-    seed.seed_snapshots(tmp_path, count=2, start=START)
-    return tmp_path
+# Module-scoped: no test using `live` mutates the seeded snapshots or the
+# static tree (every request is a read; the read-only guarantee is pinned
+# by TestReadOnly), so one seeded home and one server serve the whole module.
+@pytest.fixture(scope="module")
+def seeded_home(tmp_path_factory):
+    home = tmp_path_factory.mktemp("seeded-home")
+    seed.seed_snapshots(home, count=2, start=START)
+    return home
 
 
-@pytest.fixture()
-def web_tree(tmp_path):
-    root = tmp_path / "web"
-    root.mkdir()
+@pytest.fixture(scope="module")
+def web_tree(tmp_path_factory):
+    root = tmp_path_factory.mktemp("web-tree")
     (root / "index.html").write_text("<p>hello</p>", encoding="utf-8")
     (root / "app.js").write_text("console.log(1)", encoding="utf-8")
     (root / ".secret").write_text("nope", encoding="utf-8")
@@ -64,7 +67,7 @@ def web_tree(tmp_path):
     return root
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def live(seeded_home, web_tree):
     server, thread, url = seed.start_server(
         seeded_home, web_directory=web_tree

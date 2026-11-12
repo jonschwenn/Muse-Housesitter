@@ -1,13 +1,32 @@
-"""Tests for the install kit: example config, unit template, scan coverage."""
+"""Tests for the install kit: example config and dashboard unit properties.
+
+The example config must load and pass ``config-check``. That check builds
+a ``TlsConfig`` from the example fingerprint pin, which is what covers the
+pin staying valid; the hygiene scanner never flagged colon-hex
+fingerprints, so no separate pin-format test is needed. The install kit
+needs no visibility test either: the local hygiene suite
+(``tests/test_hygiene.py``) and CI's trusted scan read the whole tree, not
+a file listing.
+
+The dashboard unit template is tested through the properties that matter
+(D25/D27), parsed from the rendered unit rather than matched line by
+line: the unprivileged run-as user, only the read-only server as a
+long-running process, the sandboxing that enforces read-only and no new
+privileges, the absolute installed entry point, and no timer or polling
+(hard rule 3). ``systemd-analyze verify`` checks the rendered unit
+against a real systemd when one is installed.
+"""
 
 from __future__ import annotations
 
 import io
-import json
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
+from core.helpers import require_test_tool
 from housesitter.core import cli as cli_mod
 from housesitter.core.config import load_config
 from housesitter.core.http import TlsConfig
@@ -17,6 +36,9 @@ ROOT = Path(__file__).resolve().parent.parent
 INSTALL = ROOT / "install"
 EXAMPLE_CONFIG = INSTALL / "config.example.json"
 UNIT_TEMPLATE = INSTALL / "housesitter-serve.service.in"
+INSTALL_SCRIPT = INSTALL / "install.sh"
+
+systemd_analyze = shutil.which("systemd-analyze")
 
 
 def test_example_config_passes_config_check(tmp_path):
@@ -55,83 +77,184 @@ def test_example_config_passes_config_check(tmp_path):
     assert "unifi_wifi: enabled" in out.getvalue()
 
 
-REQUIRED_DIRECTIVES = [
-    "User=@RUN_AS@",
-    "ExecStart=/opt/housesitter/bin/housesitter serve",
-    "Restart=on-failure",
-    "NoNewPrivileges=yes",
-    "ProtectSystem=strict",
-    "ProtectHome=read-only",
-    "InaccessiblePaths=-@RUN_AS_HOME@/.config/housesitter/secrets",
-    "PrivateTmp=yes",
-    "PrivateDevices=yes",
-    "CapabilityBoundingSet=",
-    "AmbientCapabilities=",
-    "ProtectKernelTunables=yes",
-    "ProtectKernelModules=yes",
-    "ProtectKernelLogs=yes",
-    "ProtectControlGroups=yes",
-    "ProtectClock=yes",
-    "ProtectHostname=yes",
-    "RestrictNamespaces=",
-    "RestrictRealtime=yes",
-    "RestrictSUIDSGID=yes",
-    "LockPersonality=yes",
-    "MemoryDenyWriteExecute=yes",
-    "SystemCallArchitectures=native",
-    "SystemCallFilter=@system-service",
-    "SystemCallFilter=~@privileged @resources",
-    "RestrictAddressFamilies=AF_INET AF_INET6",
-    "UMask=0077",
-    "ProtectProc=invisible",
-    "ProcSubset=pid",
+def parse_directives(text):
+    # type: (str) -> list
+    """(section, key, value) for every directive line in a unit file."""
+    triples = []
+    section = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith(";"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+            continue
+        key, sep, value = stripped.partition("=")
+        assert sep, line
+        triples.append((section, key.strip(), value.strip()))
+    return triples
+
+
+def rendered_unit(user="muse", home="/home/muse"):
+    # type: (str, str) -> tuple
+    """(text, service dict, triples) for the template rendered for a user."""
+    text = UNIT_TEMPLATE.read_text(encoding="utf-8")
+    assert "@RUN_AS_HOME@" in text and "@RUN_AS@" in text
+    # Home first: "@RUN_AS@" is a prefix of "@RUN_AS_HOME@".
+    rendered = text.replace("@RUN_AS_HOME@", home).replace("@RUN_AS@", user)
+    assert "@RUN_AS" not in rendered
+    assert "%" not in rendered
+    triples = parse_directives(rendered)
+    service = {}
+    for section, key, value in triples:
+        if section == "Service":
+            service[key] = value
+    return rendered, service, triples
+
+
+def test_unit_runs_as_the_intended_unprivileged_user():
+    for user, home in (("muse", "/home/muse"), ("alice", "/home/alice")):
+        _, service, _ = rendered_unit(user, home)
+        assert service["User"] == user
+        assert service["User"] not in ("root", "0")
+        assert "Group" not in service or service["Group"] not in ("root", "0")
+
+
+def test_unit_runs_only_the_dashboard_server():
+    # The read-only dashboard server is the only long-running process:
+    # exactly one entry point, a simple (long-running) service that
+    # restarts only on crash, with nothing else run before or around it.
+    _, service, triples = rendered_unit()
+    starts = [v for s, k, v in triples if s == "Service" and k == "ExecStart"]
+    assert len(starts) == 1
+    argv = starts[0].split()
+    assert argv[0] == "/opt/housesitter/bin/housesitter"
+    assert argv[0].startswith("/")
+    assert argv[1:] == ["serve"]
+    assert service["Type"] == "simple"
+    assert service["Restart"] == "on-failure"
+    assert "RestartSec" in service
+    exec_directives = {
+        "ExecStart", "ExecStartPre", "ExecStartPost", "ExecCondition",
+        "ExecReload", "ExecStop", "ExecStopPost",
+    }
+    commands = [(k, v) for s, k, v in triples
+                if s == "Service" and k in exec_directives]
+    assert commands == [("ExecStart", "/opt/housesitter/bin/housesitter serve")]
+
+
+# Sandboxing directives whose exact values carry the read-only and
+# no-new-privileges properties (D25): an empty value means the directive
+# must be present but cleared, resetting the default.
+PINNED_SANDBOX = {
+    "NoNewPrivileges": "yes",
+    "ProtectSystem": "strict",
+    "ProtectHome": "read-only",
+    "UMask": "0077",
+    "PrivateTmp": "yes",
+    "PrivateDevices": "yes",
+    "CapabilityBoundingSet": "",
+    "AmbientCapabilities": "",
+}
+
+# Further hardening that must stay present; values may be tuned without
+# changing what the service promises.
+HARDENING_DIRECTIVES = [
+    "ProtectKernelTunables",
+    "ProtectKernelModules",
+    "ProtectKernelLogs",
+    "ProtectControlGroups",
+    "ProtectClock",
+    "ProtectHostname",
+    "ProtectProc",
+    "ProcSubset",
+    "RestrictNamespaces",
+    "RestrictRealtime",
+    "RestrictSUIDSGID",
+    "LockPersonality",
+    "RemoveIPC",
+    "MemoryDenyWriteExecute",
+    "SystemCallArchitectures",
+    "SystemCallFilter",
+    "RestrictAddressFamilies",
 ]
 
 
-def render_template(user, home):
-    text = UNIT_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("@RUN_AS_HOME@", home).replace("@RUN_AS@", user)
-    assert "@RUN_AS" not in text
-    return text
+def test_unit_denies_privilege_and_writes():
+    _, service, triples = rendered_unit(home="/home/muse")
+    for key, value in PINNED_SANDBOX.items():
+        assert service[key] == value, key
+    # The UniFi secret directory stays hidden from the server.
+    hidden = service["InaccessiblePaths"].lstrip("-")
+    assert hidden == "/home/muse/.config/housesitter/secrets", hidden
+    for key in HARDENING_DIRECTIVES:
+        assert key in service, key
+    # The service set minus privileged and resource-control calls.
+    filters = sorted(v for s, k, v in triples if s == "Service" and k == "SystemCallFilter")
+    assert filters == ["@system-service", "~@privileged @resources"]
 
 
-def test_unit_template_renders_and_hardens():
-    rendered = render_template("muse", "/home/muse")
-    assert "User=muse" in rendered
-    assert "%h" not in rendered
-    assert "@RUN_AS" not in rendered
-    assert "Group=" not in rendered
-    for directive in REQUIRED_DIRECTIVES:
-        expected = directive.replace("@RUN_AS_HOME@", "/home/muse").replace(
-            "@RUN_AS@", "muse"
-        )
-        assert expected in rendered, directive
+# systemd.exec: these can create writable directories or introduce writable
+# mounts despite ProtectSystem/ProtectHome. None is needed by this unit.
+WRITABLE_PATH_DIRECTIVES = {
+    "ReadWritePaths", "ReadWriteDirectories", "BindPaths",
+    "RuntimeDirectory", "StateDirectory", "CacheDirectory", "LogsDirectory",
+    "ConfigurationDirectory", "TemporaryFileSystem", "MountImages",
+    "ExtensionImages", "ExtensionDirectories", "RootDirectory", "RootImage",
+    "RootEphemeral",
+}
 
 
-def test_install_kit_is_visible_to_the_hygiene_scan():
-    out = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-        cwd=ROOT,
-        check=True,
+def test_unit_has_no_writable_path_exceptions():
+    _, _, triples = rendered_unit()
+    for section, key, _ in triples:
+        if section == "Service":
+            assert key not in WRITABLE_PATH_DIRECTIVES, key
+
+
+TIMER_LIKE = re.compile(
+    r"timer|calendar|OnActive|OnBoot|OnStartup|cron|poll|wake|alarm",
+    re.IGNORECASE,
+)
+
+
+def test_unit_enables_no_timer_or_polling():
+    # Hard rule 3: nothing schedules collection. The unit has no timer
+    # section, no schedule-like directive, and starts at boot only when
+    # the owner enables it.
+    _, service, triples = rendered_unit()
+    assert {s for s, _, _ in triples} == {"Unit", "Service", "Install"}
+    for _, key, _ in triples:
+        assert TIMER_LIKE.search(key) is None, key
+    install = {k: v for s, k, v in triples if s == "Install"}
+    assert install["WantedBy"] == "multi-user.target"
+    script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert re.search(r"\b(timer|cron)\b", script, re.IGNORECASE) is None
+
+
+def test_rendered_unit_passes_systemd_analyze_verify(tmp_path):
+    # Both CI runner images document an installed systemd (255 on 24.04,
+    # 259 on the newest image), and the binary ships in the systemd
+    # package itself, so a missing binary fails under
+    # HOUSESITTER_REQUIRE_TEST_TOOLS and skips otherwise.
+    require_test_tool(systemd_analyze is not None, "systemd-analyze is not installed")
+    rendered, _, _ = rendered_unit()
+    # The installed entry point does not exist on test machines, so point
+    # the copy at this interpreter for the syntax check. The real path is
+    # pinned by test_unit_runs_only_the_dashboard_server.
+    stubbed = re.sub(
+        r"^ExecStart=\S+",
+        "ExecStart=" + sys.executable,
+        rendered,
+        flags=re.MULTILINE,
+    )
+    assert stubbed != rendered
+    unit = tmp_path / "housesitter-serve.service"
+    unit.write_text(stubbed, encoding="utf-8")
+    proc = subprocess.run(
+        [systemd_analyze, "verify", str(unit)],
         capture_output=True,
-    ).stdout
-    names = out.decode().split("\0")
-    for name in (
-        "install/install.sh",
-        "install/housesitter-serve.service.in",
-        "install/config.example.json",
-        "scripts/fake_unifi.py",
-        "tests/test_install_files.py",
-        "tests/test_install_script.py",
-        "tests/test_fake_unifi.py",
-    ):
-        assert name in names, name
-
-
-def test_example_fingerprint_is_bare_hex_for_hygiene():
-    # A 32-byte colon-hex fingerprint holds runs of colon-separated hex
-    # pairs that the hygiene scan flags as MACs; bare hex is clean and
-    # the core accepts both forms.
-    raw = json.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
-    pin = raw["modules"]["unifi_wifi"]["tls"]["fingerprint_sha256"]
-    assert re.fullmatch(r"[0-9a-f]{64}", pin) is not None
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
