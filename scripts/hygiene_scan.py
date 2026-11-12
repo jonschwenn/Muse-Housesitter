@@ -539,29 +539,40 @@ def is_fixture_rel(rel_posix: str) -> bool:
     return rel_posix.startswith("tests/fixtures/") and PurePosixPath(rel_posix).suffix == ".json"
 
 
-def mac_problems(
+def _mac_problems_counted(
     text: str, bare: bool = False, line_map: list[int] | None = None
-) -> list[str]:
+) -> tuple[list[str], int]:
+    """``(messages, underlying findings)`` for MAC addresses.
+
+    Messages stop at ``MAX_PROBLEMS_PER_CHECK`` with one exact remainder
+    line; the count keeps every finding so callers can report honest
+    totals (round 4, finding 3).
+    """
     # The message names the rule and the line, never the address: values
     # stay out of logs (hard rule 6).
     line_of = _line_lookup(text)
     found = []
-    overflow = 0
+    total = 0
     for pattern in MAC_RES + ([BARE_MAC_RE] if bare else []):
         for match in pattern.finditer(text):
             digits = re.sub("[^0-9a-f]", "", match.group(0).lower())
             if pattern is BARE_MAC_RE and digits.isdigit():
                 continue  # a 12-digit number, e.g. a byte counter
             if not digits.startswith(ALLOWED_MAC_PREFIXES):
+                total += 1
                 if len(found) < MAX_PROBLEMS_PER_CHECK:
                     found.append(
                         f"MAC address at line {_report_line(line_of, match.start(), line_map)}"
                     )
-                else:
-                    overflow += 1
-    if overflow:
-        found.append(f"... and {overflow} more MAC address problem(s) in this file")
-    return found
+    if total > len(found):
+        found.append(f"... and {total - len(found)} more MAC address problem(s) in this file")
+    return found, total
+
+
+def mac_problems(
+    text: str, bare: bool = False, line_map: list[int] | None = None
+) -> list[str]:
+    return _mac_problems_counted(text, bare=bare, line_map=line_map)[0]
 
 
 def _ipv4_allowed(parts: list[int]) -> bool:
@@ -597,6 +608,12 @@ def _ipv6_allowed_head(candidate: str) -> bool | None:
     four hex digits) and outside every allowed net.
     """
     if "::" in candidate:
+        # Three (or more) colons in a row never parse; such a candidate holds
+        # one non-overlapping ``::``, so the count below cannot see it. The
+        # slow path rejects it, so the fast path must not decide it
+        # (round 4, finding 2).
+        if ":::" in candidate:
+            return None
         if candidate.count("::") != 1:
             return None
         if sum(1 for group in candidate.split(":") if group) > 7:
@@ -619,18 +636,21 @@ def _ipv6_allowed_head(candidate: str) -> bool | None:
     return False
 
 
-def ip_problems(text: str, line_map: list[int] | None = None) -> list[str]:
+def _ip_problems_counted(
+    text: str, line_map: list[int] | None = None
+) -> tuple[list[str], int]:
+    """``(messages, underlying findings)`` for IP addresses (see round 4,
+    finding 3, and :func:`_mac_problems_counted`)."""
     # The message names the rule and the line, never the address.
     line_of = _line_lookup(text)
     found = []
-    overflow = 0
+    total = 0
 
     def emit(kind: str, pos: int) -> None:
-        nonlocal overflow
+        nonlocal total
+        total += 1
         if len(found) < MAX_PROBLEMS_PER_CHECK:
             found.append(f"{kind} at line {_report_line(line_of, pos, line_map)}")
-        else:
-            overflow += 1
 
     for match in IPV4_RE.finditer(text):
         parts = [int(p) for p in match.group(0).split(".")]
@@ -652,9 +672,13 @@ def ip_problems(text: str, line_map: list[int] | None = None) -> list[str]:
             continue
         if not any(addr in net for net in ALLOWED_NETS):
             emit("IPv6 address", match.start())
-    if overflow:
-        found.append(f"... and {overflow} more IP address problem(s) in this file")
-    return found
+    if total > len(found):
+        found.append(f"... and {total - len(found)} more IP address problem(s) in this file")
+    return found, total
+
+
+def ip_problems(text: str, line_map: list[int] | None = None) -> list[str]:
+    return _ip_problems_counted(text, line_map=line_map)[0]
 
 
 def _regex_spans(pattern, text: str):
@@ -665,14 +689,16 @@ def _regex_spans(pattern, text: str):
         yield match.group(0), value, match.start()
 
 
-def secret_problems(
+def _secret_problems_counted(
     text: str, unquoted: bool = True, line_map: list[int] | None = None
-) -> list[str]:
+) -> tuple[list[str], int]:
+    """``(messages, underlying findings)`` for likely secrets (see round 4,
+    finding 3, and :func:`_mac_problems_counted`)."""
     # The message names the rule and the line, never the value: values
     # stay out of logs (hard rule 6).
     line_of = _line_lookup(text)
     found = []
-    overflow = 0
+    total = 0
     patterns = SECRET_PATTERNS + (
         [("credential assignment", UNQUOTED_ASSIGNMENT)] if unquoted else []
     )
@@ -685,15 +711,20 @@ def secret_problems(
                 continue
             if value is not None and REFERENCE_VALUE.match(value.strip()):
                 continue
+            total += 1
             if len(found) < MAX_PROBLEMS_PER_CHECK:
                 found.append(
                     f"likely secret ({label}) at line {_report_line(line_of, start, line_map)}"
                 )
-            else:
-                overflow += 1
-    if overflow:
-        found.append(f"... and {overflow} more likely-secret problem(s) in this file")
-    return found
+    if total > len(found):
+        found.append(f"... and {total - len(found)} more likely-secret problem(s) in this file")
+    return found, total
+
+
+def secret_problems(
+    text: str, unquoted: bool = True, line_map: list[int] | None = None
+) -> list[str]:
+    return _secret_problems_counted(text, unquoted=unquoted, line_map=line_map)[0]
 
 
 def ssid_problems(obj: object) -> list[tuple[str, str]]:
@@ -724,30 +755,35 @@ def _ssid_key_line(lines: list[str], key: str) -> int | None:
     return None
 
 
-def scan_text(rel_posix: str, text: str) -> list[str]:
-    """Scan decoded text of the file at repo-relative ``rel_posix``.
+def _scan_text_counted(rel_posix: str, text: str) -> tuple[list[str], int]:
+    """``(messages, underlying findings)`` for one decoded file.
 
-    Problem messages name the rule and the line, never the offending
-    value (at most a short shape like ``SSID value (23 chars)``).
+    Messages stop at ``MAX_PROBLEMS_PER_CHECK`` per check with one exact
+    remainder line each; the count keeps every finding so the tree scan
+    and the CLI can report honest totals (round 4, finding 3).
     """
     numbered = text.splitlines()
     kept = [number for number, line in enumerate(numbered, 1) if SUPPRESS not in line]
     checked = "\n".join(line for line in numbered if SUPPRESS not in line)
     suffix = PurePosixPath(rel_posix).suffix
-    problems = (
-        mac_problems(checked, bare=is_fixture_rel(rel_posix), line_map=kept)
-        + ip_problems(checked, line_map=kept)
-        + secret_problems(
-            checked, unquoted=suffix not in UNQUOTED_EXEMPT_SUFFIXES, line_map=kept
-        )
+    mac_messages, mac_total = _mac_problems_counted(
+        checked, bare=is_fixture_rel(rel_posix), line_map=kept
     )
+    ip_messages, ip_total = _ip_problems_counted(checked, line_map=kept)
+    secret_messages, secret_total = _secret_problems_counted(
+        checked, unquoted=suffix not in UNQUOTED_EXEMPT_SUFFIXES, line_map=kept
+    )
+    problems = mac_messages + ip_messages + secret_messages
+    total = mac_total + ip_total + secret_total
     if is_fixture_rel(rel_posix):
         try:
             offenders = ssid_problems(json.loads(text))
         except ValueError:
             problems.append("fixture is not valid JSON")
+            total += 1
         except RecursionError:
             problems.append("fixture JSON is too deeply nested to check")
+            total += 1
         else:
             # Line numbers point at the file's own lines, not the
             # suppression-filtered text the other checks run on. Offenders
@@ -755,7 +791,7 @@ def scan_text(rel_posix: str, text: str) -> list[str]:
             # once, not once per offender.
             key_lines: dict[str, int | None] = {}
             ssid_kept = 0
-            ssid_overflow = 0
+            ssid_total = 0
             for key, value in offenders:
                 shape = f"SSID value ({len(value)} chars)"
                 if key not in key_lines:
@@ -765,16 +801,25 @@ def scan_text(rel_posix: str, text: str) -> list[str]:
                     problem = f"{shape} does not end in -example"
                 else:
                     problem = f"{shape} at line {at} does not end in -example"
+                ssid_total += 1
                 if ssid_kept < MAX_PROBLEMS_PER_CHECK:
                     problems.append(problem)
                     ssid_kept += 1
-                else:
-                    ssid_overflow += 1
-            if ssid_overflow:
+            if ssid_total > ssid_kept:
                 problems.append(
-                    f"... and {ssid_overflow} more SSID problem(s) in this file"
+                    f"... and {ssid_total - ssid_kept} more SSID problem(s) in this file"
                 )
-    return problems
+            total += ssid_total
+    return problems, total
+
+
+def scan_text(rel_posix: str, text: str) -> list[str]:
+    """Scan decoded text of the file at repo-relative ``rel_posix``.
+
+    Problem messages name the rule and the line, never the offending
+    value (at most a short shape like ``SSID value (23 chars)``).
+    """
+    return _scan_text_counted(rel_posix, text)[0]
 
 
 def scan_bytes(rel_posix: str, data: bytes) -> list[str]:
@@ -833,79 +878,51 @@ def _git(args: list[str], *, cwd: str) -> bytes:
     return proc.stdout
 
 
-def _redact_path(path: str) -> str:
-    """Replace secret-shaped spans in a printed path with ``[redacted]``.
+def _path_is_sensitive(path: str) -> bool:
+    """Whether any secret detector fires on a path or one of its parts.
 
-    File names are PR-controlled data, and a token-shaped name would
-    otherwise reach the CI log verbatim through the suppression listing or
-    a fail-closed error (round 3, finding 4). Every span the secret
-    detectors match — token formats, credential-shaped segments — becomes
-    the fixed placeholder, before escaping and truncation. The planted
-    marker and reference-like values stay readable, exactly as in
+    File names are PR-controlled data, and the credential detector is
+    anchored at line starts, so it flags ``password=...`` but not
+    ``dir/password=...``. Every detector therefore runs on each ``/``
+    component separately as well as on the whole path. The planted marker
+    and reference-like values stay readable, exactly as in
     :func:`secret_problems`: they name or excuse a secret rather than
     carry one.
     """
     detectors = SECRET_PATTERNS + [("credential assignment", UNQUOTED_ASSIGNMENT)]
-    spans = []
-    for _label, pattern in detectors:
-        entries = pattern(path) if callable(pattern) else _regex_spans(pattern, path)
-        for group0, value, start in entries:
-            if PLANTED in group0:
-                continue
-            if value is not None and REFERENCE_VALUE.match(value.strip()):
-                continue
-            spans.append((start, start + len(group0)))
-    if not spans:
-        return path
-    spans.sort()
-    merged = []
-    for start, end in spans:
-        if merged and start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
-    parts = []
-    pos = 0
-    for start, end in merged:
-        parts.append(path[pos:start])
-        parts.append("[redacted]")
-        pos = end
-    parts.append(path[pos:])
-    return "".join(parts)
+    for raw in (path, *path.split("/")):
+        candidate = "\n".join(raw.splitlines())
+        for _label, pattern in detectors:
+            entries = (
+                pattern(candidate)
+                if callable(pattern)
+                else _regex_spans(pattern, candidate)
+            )
+            for group0, value, _start in entries:
+                if PLANTED in group0:
+                    continue
+                if value is not None and REFERENCE_VALUE.match(value.strip()):
+                    continue
+                return True
+    return False
+
+
+_DISPLAY_IDS: dict[str, int] = {}
 
 
 def _display(path: str) -> str:
-    """Make a blob path safe for a bounded log line.
+    """Show plainly safe names; assign every other name a run-local number.
 
-    Secret-shaped spans are redacted first (see :func:`_redact_path`),
-    since a file name can itself be the sensitive value. Surrogates from
-    non-UTF-8 names become ``?`` so printing never raises
-    ``UnicodeEncodeError``; valid UTF-8 (including non-ASCII) passes
-    through; newlines become ``\\n`` so one path cannot inject extra lines;
-    other control characters (including ESC) are escaped so the path cannot
-    drive the terminal; and the result is cut to ``_MAX_DISPLAY_PATH``
-    characters, since file names are PR-controlled data.
+    Numbers contain no information derived from the name and stay stable
+    across all output channels within one scan.
     """
-    safe = _redact_path(path).encode("utf-8", errors="replace").decode("utf-8")
-    out = []
-    for char in safe:
-        if char == "\n":
-            out.append("\\n")
-        elif char == "\r":
-            out.append("\\r")
-        elif char == "\t" or char.isprintable():
-            out.append(char)
-        elif ord(char) < 256:
-            out.append(f"\\x{ord(char):02x}")
-        else:
-            out.append(f"\\u{ord(char):04x}")
-    return "".join(out)[:_MAX_DISPLAY_PATH]
+    if re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", path) and not _path_is_sensitive(path):
+        return path
+    if path not in _DISPLAY_IDS:
+        _DISPLAY_IDS[path] = len(_DISPLAY_IDS) + 1
+    return f"[path {_DISPLAY_IDS[path]}]"
 
 
-# Printed paths are cut here (see _display), and total stdout is capped in
-# main(): a hostile tree cannot flood the workflow log, while the problem
-# and suppression counts stay exact.
-_MAX_DISPLAY_PATH = 200
 # The stdout budget counts encoded UTF-8 bytes, not characters: multibyte
 # names would otherwise multiply the byte count past the cap.
 _MAX_LOG_BYTES = 100_000
@@ -1208,17 +1225,25 @@ def read_blobs(
 
 def scan_git_tree(
     sha: str, *, cwd: str
-) -> tuple[list[str], list[str], int, int]:
-    """Scan every file in the tree at ``sha``. Returns ``(problems,
-    suppressions, files_scanned, bytes_scanned)``; problems are display
-    lines of the form ``path: problem`` and suppressions of the form
-    ``path:lineno`` (never the line content: it may hold the suppressed
-    secret).
+) -> tuple[list[str], int, list[str], int, int, int]:
+    """Scan every file in the tree at ``sha``. Returns ``(problem_lines,
+    problem_total, suppression_lines, suppression_total, files_scanned,
+    bytes_scanned)``; problem lines are display lines of the form ``path:
+    problem`` and suppression entries of the form ``path:lineno`` (never
+    the line content: it may hold the suppressed secret).
+
+    The totals count underlying findings, not compressed messages
+    (round 4, finding 3): each line list stops at its display cap while
+    its total keeps every finding. The display form of each path is built
+    once per file and suppression entries stop at their cap with an exact
+    count, so a tree of huge ``hygiene: ok`` files costs no per-line work
+    proportional to path length (round 4, finding 4).
 
     Any symlink (mode 120000) or gitlink (mode 160000) in the tree fails
     the check outright (see :func:`list_tree_blobs`): links are never
     resolved, so there is no link target to scan and no submodule to skip.
     """
+    _DISPLAY_IDS.clear()
     start = time.monotonic()
     _check_deadline(start, "starting")
     files = list_tree_blobs(sha, cwd=cwd)
@@ -1226,21 +1251,30 @@ def scan_git_tree(
     contents = read_blobs(files, cwd=cwd, start=start)
     _check_deadline(start, "reading the blobs")
     problems = []
+    problem_total = 0
     suppressions = []
+    suppression_total = 0
     scanned_bytes = 0
 
     def check(path: str, data: bytes, size: int) -> None:
         _check_deadline(start, "scanning the blobs")
-        nonlocal scanned_bytes
+        nonlocal scanned_bytes, problem_total, suppression_total
         scanned_bytes += size
         text = decode_bytes(data)
         if text is None:
             return
-        for problem in scan_text(path, text):
-            problems.append(f"{_display(path)}: {problem}")
-        for lineno, _ in suppression_lines(text):
-            # The path is escaped and bounded; the line content never is.
-            suppressions.append(f"{_display(path)}:{lineno}")
+        shown = _display(path)
+        messages, file_total = _scan_text_counted(path, text)
+        problem_total += file_total
+        for problem in messages:
+            problems.append(f"{shown}: {problem}")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if SUPPRESS not in line:
+                continue
+            suppression_total += 1
+            # Only the safe display name is listed, never the line content.
+            if len(suppressions) < MAX_LISTED_SUPPRESSIONS:
+                suppressions.append(f"{shown}:{lineno}")
 
     for (_, size, path), data in zip(files, contents):
         check(path, data, size)
@@ -1248,7 +1282,14 @@ def scan_git_tree(
     # success on an expired deadline. (A step-level timeout-minutes in
     # ci-guard.yml is the hard bound; this is the in-process one.)
     _check_deadline(start, "finishing the scan")
-    return problems, suppressions, len(files), scanned_bytes
+    return (
+        problems,
+        problem_total,
+        suppressions,
+        suppression_total,
+        len(files),
+        scanned_bytes,
+    )
 
 
 def escape_data(text: str) -> str:
@@ -1272,9 +1313,14 @@ def main(argv: list[str] | None = None) -> int:
         sha = fetch_pr_head(cwd=cwd) if args.fetch_and_scan_pr_head else args.git_tree
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise FailClosed("--git-tree needs a 40-char hex SHA")
-        problems, suppressions, files_scanned, bytes_scanned = scan_git_tree(
-            sha, cwd=cwd
-        )
+        (
+            problems,
+            problem_total,
+            suppressions,
+            suppression_total,
+            files_scanned,
+            bytes_scanned,
+        ) = scan_git_tree(sha, cwd=cwd)
     except FailClosed as exc:
         print(f"::error::{escape_data(f'hygiene-scan: fail closed: {exc}')}")
         return 2
@@ -1284,22 +1330,23 @@ def main(argv: list[str] | None = None) -> int:
     shown = problems[:MAX_LISTED_PROBLEMS]
     for problem in shown:
         lines.append(f"::error::{escape_data(f'hygiene-scan: {problem}')}")
-    if len(problems) > len(shown):
-        more = len(problems) - len(shown)
+    if problem_total > len(shown):
+        more = problem_total - len(shown)
         lines.append(
             f"::error::{escape_data(f'hygiene-scan: ... and {more} more problem(s)')}"
         )
-    lines.append(f"hygiene-scan: {len(suppressions)} line(s) carry {SUPPRESS!r}:")
-    for line in suppressions[:MAX_LISTED_SUPPRESSIONS]:
+    lines.append(f"hygiene-scan: {suppression_total} line(s) carry {SUPPRESS!r}:")
+    shown_suppressions = suppressions[:MAX_LISTED_SUPPRESSIONS]
+    for line in shown_suppressions:
         lines.append(f"hygiene-scan: suppression {line}")
-    if len(suppressions) > MAX_LISTED_SUPPRESSIONS:
-        more = len(suppressions) - MAX_LISTED_SUPPRESSIONS
+    if suppression_total > len(shown_suppressions):
+        more = suppression_total - len(shown_suppressions)
         lines.append(f"hygiene-scan: ... and {more} more suppression(s)")
-    if not suppressions:
+    if not suppression_total:
         lines.append("hygiene-scan: no suppression lines")
-    if problems:
+    if problem_total:
         lines.append(
-            f"::error::{escape_data(f'hygiene-scan: {len(problems)} problem(s) found')}"
+            f"::error::{escape_data(f'hygiene-scan: {problem_total} problem(s) found')}"
         )
         _print_capped(lines)
         return 1

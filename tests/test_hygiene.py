@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -856,7 +857,7 @@ def test_trusted_scan_split_records_still_flag_the_leak(tmp_path, monkeypatch):
     monkeypatch.setattr(hygiene_scan, "_LS_TREE_CHUNK", 7)
     leak = PW + '="' + "hunter2" + "hunter2" + '"\n'
     repo, sha = _git_repo(tmp_path, {"notes.txt": leak, "other.txt": "hello\n"})
-    problems, _, _, _ = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
+    problems, _, _, _, _, _ = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
     assert any("credential assignment" in p for p in problems), problems
 
 
@@ -1158,6 +1159,51 @@ def test_ip_fast_paths_agree_with_ipaddress_reference():
         assert got == expected, repr(text)
 
 
+def test_ip_fast_path_matches_ipaddress_without_2001_heads():
+    """Finding 2 (round 4): triple-colon candidates take the slow path.
+
+    ``candidate.count("::")`` counts non-overlapping occurrences, so
+    triple-colon candidates hold exactly one ``::`` and the fast
+    path flagged addresses ``ipaddress`` rejects. The round-3 generator
+    above draws heads from a list holding ``2001``, which forces the slow
+    path; this generator never starts a candidate with a slow-path head
+    (``2001``, ``ff00``-``ffff``, empty, or all-zero), so the fast path
+    decides, plus the exact regression shapes.
+    """
+    import ipaddress
+    import random
+
+    rng = random.Random(20261111)
+    heads = ["fe80", "2002", "abcd", "1234", "1", "db8", "DB8", "9"]
+    tails = ["0", "00", "1", "0001", "abcd", "1234", "fe80", "db8", "ffff"]
+    texts = [head + ":::" + tail + "\n" for head, tail in (
+        ("fe80", "1"), ("fe80", ""), ("2002", "abcd"), ("1", "2"), ("ab", "cd:1")
+    )]
+    for _ in range(500):
+        groups = [rng.choice(heads)] + [
+            rng.choice(tails) for _ in range(rng.randint(1, 7))
+        ]
+        text = ":".join(groups)
+        if rng.random() < 0.5:
+            at = rng.randint(0, len(groups))
+            text = ":".join(groups[:at]) + "::" + ":".join(groups[at:])
+        texts.append(text + "\n")
+    for text in texts:
+        got = hygiene_scan.ip_problems(text)
+        expected = []
+        for found in hygiene_scan.IPV6_RE.finditer(text):
+            candidate = found.group(0)
+            if sum(1 for group in candidate.split(":") if group) < 2:
+                continue
+            try:
+                addr = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if not any(addr in net for net in hygiene_scan.ALLOWED_NETS):
+                expected.append("IPv6 address at line 1")
+        assert got == expected, repr(text)
+
+
 # Review round 3 (PR #56), finding 2 (SHOULD-FIX): every problem recounts
 # newlines from the start of the file (``text.count`` per match), so a 2 MB
 # file of repeated hits took ~52 s; and decode sliced the remaining batch
@@ -1219,15 +1265,70 @@ def test_max_cap_tree_completes_well_under_deadline(tmp_path):
     tree_input = b"".join(entry + f"f{n:05d}".encode() + b"\n" for n in range(10_000))
     sha = run("mktree", input=tree_input).stdout.decode().strip()
     start = time.monotonic()
-    problems, suppressions, files_scanned, bytes_scanned = hygiene_scan.scan_git_tree(
-        sha, cwd=str(repo)
-    )
+    (
+        problems,
+        problem_total,
+        suppressions,
+        suppression_total,
+        files_scanned,
+        bytes_scanned,
+    ) = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
     elapsed = time.monotonic() - start
     print(f"\nceiling: 10,000 entries / 32,000,000 bytes in {elapsed:.1f}s")
     assert (files_scanned, bytes_scanned) == (10_000, 32_000_000)
     assert problems == [], problems[:3]
     assert suppressions == []
+    assert problem_total == 0
+    assert suppression_total == 0
     assert elapsed < 120, f"ceiling scan took {elapsed:.1f}s"
+
+
+def test_counted_totals_match_underlying_findings():
+    """Finding 3 (round 4): totals count findings, not capped messages."""
+    import json
+
+    # Built at run time: bare documentation-range-exempt literals must never
+    # appear in the repo.
+    loop4 = ".".join(["10", "1", "1", "1"]) + "\n"
+    loop_mac = ":".join(REAL_MAC) + "\n"
+    messages, total = hygiene_scan._ip_problems_counted(loop4 * 2000)
+    assert total == 2000
+    assert messages[-1] == "... and 1000 more IP address problem(s) in this file"
+    assert len(messages) == 1001
+    messages, total = hygiene_scan._mac_problems_counted(loop_mac * 2000, bare=True)
+    assert total == 2000
+    assert messages[-1] == "... and 1000 more MAC address problem(s) in this file"
+    assert len(messages) == 1001
+    messages, total = hygiene_scan._secret_problems_counted(("ghp_" + "A" * 30 + "\n") * 2000)
+    assert total == 2000
+    assert messages[-1] == "... and 1000 more likely-secret problem(s) in this file"
+    assert len(messages) == 1001
+    messages, total = hygiene_scan._scan_text_counted("notes.txt", loop4 * 2000)
+    assert total == 2000
+    assert len(messages) == 1001
+    fixture = json.dumps([{"ssid": "bad"}] * 2000)
+    messages, total = hygiene_scan._scan_text_counted("tests/fixtures/t.json", fixture)
+    assert total == 2000
+    assert messages[-1] == "... and 1000 more SSID problem(s) in this file"
+    assert len(messages) == 1001
+    planted = json.dumps([{"ssid": "bad"}])
+    messages, total = hygiene_scan._scan_text_counted("tests/fixtures/t.json", planted)
+    assert (messages, total) == (["SSID value (3 chars) at line 1 does not end in -example"], 1)
+    messages, total = hygiene_scan._scan_text_counted(
+        "tests/fixtures/t.json", "not json"
+    )
+    assert (messages, total) == (["fixture is not valid JSON"], 1)
+
+
+@NEEDS_GIT
+def test_cli_totals_count_underlying_findings(tmp_path):
+    """Finding 3 (round 4): the CLI reports 2,000 findings, not 1,001."""
+    loop4 = ".".join(["10", "1", "1", "1"]) + "\n"
+    repo, sha = _git_repo(tmp_path, {"notes.txt": loop4 * 2000})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "::error::hygiene-scan: ... and 1800 more problem(s)" in proc.stdout
+    assert "::error::hygiene-scan: 2000 problem(s) found" in proc.stdout
 
 
 # Review round 2 (PR #56), finding 5 (SHOULD-FIX): problem messages
@@ -1272,15 +1373,9 @@ def test_ssid_problem_hides_value():
     assert value not in problems[0]
 
 
-def test_display_truncates_and_escapes_paths():
-    """Finding 5 (round 2): printed paths are bounded and terminal-safe."""
-    assert len(hygiene_scan._display("a" * 300)) == 200
-    assert hygiene_scan._display("a\udcff") == "a?"
-    assert "\x1b" not in hygiene_scan._display("a\x1bb")
-    assert "\\x1b" in hygiene_scan._display("a\x1bb")
-    assert "\\n" in hygiene_scan._display("a\nb")
-    assert hygiene_scan._display("a\tb") == "a\tb"
-    assert "caf\u00e9" in hygiene_scan._display("caf\u00e9")
+def test_display_hides_unsafe_paths():
+    for path in ("a" * 300, "a\udcff", "a\x1bb", "a\nb", "a\tb", "caf\u00e9"):
+        assert re.fullmatch(r"\[path [1-9][0-9]*\]", hygiene_scan._display(path))
 
 
 def test_print_capped_respects_budget(capsys):
@@ -1306,43 +1401,123 @@ def test_print_capped_budgets_bytes_not_characters(capsys):
     assert "bytes" in out
 
 
-def test_display_redacts_secret_shaped_names():
-    """Finding 4 (round 3): a token-shaped name never prints verbatim."""
-    token = "gh" + "p_" + "Q" * 30
-    assert hygiene_scan._display(token) == "[redacted]"
-    assert token not in hygiene_scan._display(f"dir/{token}.txt")
-    assert "[redacted]" in hygiene_scan._display(f"dir/{token}.txt")
-    # Credential-shaped names redact too; planted and reference-like values
-    # stay readable, as in secret_problems.
-    assignment = PW + '="hunter2' + 'hunter2"'
-    assert hygiene_scan._display(assignment) == "[redacted]"
-    assert hygiene_scan._display("PLANTED-SECRET-notes") == "PLANTED-SECRET-notes"
-    assert hygiene_scan._display(PW + "=changeme") == PW + "=changeme"
-    # Ordinary names still print in full.
+def _display_id(path: str) -> str:
+    """Display number assigned in this test process."""
+    return hygiene_scan._display(path)
+
+
+def test_display_replaces_secret_shaped_names_with_stable_ids():
+    """Secret-shaped names get distinct, repeatable run-local numbers."""
+    token_a = "gh" + "p_" + "Q" * 30
+    token_b = "mg" + "st_" + "R" * 30
+    sensitive = [
+        token_a,
+        f"dir/{token_a}.txt",
+        PW + '="hunter2' + 'hunter2"',
+        "dir/" + PW + "=AbCd123456.txt",
+        "dir/X_AUTH" + "KEY=AbCd123456.txt",
+        "dir/" + token_b,
+    ]
+    for path in sensitive:
+        shown = hygiene_scan._display(path)
+        assert shown == _display_id(path), (path, shown)
+        for secret in (token_a, token_b, PW, "AbCd123456"):
+            assert secret not in shown, (path, shown)
+    # Distinct names get distinct ids; repeats are stable.
+    assert hygiene_scan._display(token_a) != hygiene_scan._display(token_b)
+    assert hygiene_scan._display(token_a) == hygiene_scan._display(token_a)
+    # Safe ordinary and planted names print in full; assignments stay opaque.
     assert hygiene_scan._display("notes.txt") == "notes.txt"
+    assert hygiene_scan._display("PLANTED-SECRET-notes") == "PLANTED-SECRET-notes"
+    assert re.fullmatch(r"\[path [1-9][0-9]*\]", hygiene_scan._display(PW + "=changeme"))
+
+
+@NEEDS_GIT
+def test_single_huge_suppression_file_scans_in_ci_time(tmp_path):
+    """Finding 4 (round 4): one 2 MB suppression file under a deep path < 2 s.
+
+    The reviewer's full 32 MB ceiling (16 such files under 20 path
+    components) hit the 300 s deadline because every suppression line
+    re-redacted and re-escaped the whole path. The path is now formatted
+    once per file and only a bounded number of entries is kept, so the
+    single-file repro below runs in CI time; the full 32 MB timing is
+    reported in the PR.
+    """
+    import time
+
+    deep = "/".join(["d" * 190] * 20)
+    rel = f"{deep}/f0.txt"
+    data = ("hygiene: ok\n" * ((2_000_000 // len("hygiene: ok\n")) + 1))[:2_000_000]
+    repo, sha = _git_repo(tmp_path, {rel: data})
+    start = time.monotonic()
+    (
+        problems,
+        problem_total,
+        suppressions,
+        suppression_total,
+        files_scanned,
+        bytes_scanned,
+    ) = hygiene_scan.scan_git_tree(sha, cwd=str(repo))
+    elapsed = time.monotonic() - start
+    assert (problems, problem_total, files_scanned, bytes_scanned) == ([], 0, 1, 2_000_000)
+    assert suppression_total == sum(1 for line in data.splitlines() if "hygiene: ok" in line)
+    assert len(suppressions) == hygiene_scan.MAX_LISTED_SUPPRESSIONS
+    assert elapsed < 2.0, f"single-file repro took {elapsed:.1f}s"
 
 
 @NEEDS_GIT
 def test_trusted_scan_suppression_listing_redacts_secret_name(tmp_path):
-    """Finding 4 (round 3): the suppression path hides a token-shaped name."""
+    """Findings 1 and 5 (round 4): the suppression path hides every shape."""
     token = "gh" + "p_" + "Q" * 30
-    repo, sha = _git_repo(tmp_path, {token: "# hygiene: ok\n"})
+    nested = "dir/" + PW + "=AbCd123456.txt"
+    repo, sha = _git_repo(
+        tmp_path, {token: "# hygiene: ok\n", nested: "# hygiene: ok\n"}
+    )
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert token not in proc.stdout
-    assert "suppression [redacted]:1" in proc.stdout
+    assert PW not in proc.stdout
+    assert "AbCd123456" not in proc.stdout
+    assert "suppression [path 2]:1" in proc.stdout
+    assert "suppression [path 1]:1" in proc.stdout
+    assert _display_id(token) != _display_id(nested)
+
+
+@NEEDS_GIT
+def test_trusted_scan_problem_listing_redacts_nested_secret_name(tmp_path):
+    """Findings 1 and 5 (round 4): problem lines hide a nested secret name."""
+    nested = "dir/" + PW + "=AbCd123456.txt"
+    planted = "server at " + ".".join(REAL10) + "\n"
+    repo, sha = _git_repo(tmp_path, {nested: planted})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert PW not in proc.stdout
+    assert "AbCd123456" not in proc.stdout
+    assert "hygiene-scan: [path 1]: IPv4 address at line 1" in proc.stdout
+
+
+@NEEDS_GIT
+def test_trusted_scan_symlink_error_redacts_nested_secret_name(tmp_path):
+    """Findings 1 and 5 (round 4): the symlink error hides the entry name."""
+    link = "dir/" + PW + "=AbCd123456.txt"
+    repo, sha = _git_repo(tmp_path, {"target.txt": "hello\n"}, links={link: "target.txt"})
+    proc = _scan_tree(repo, sha)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert PW not in proc.stdout
+    assert "AbCd123456" not in proc.stdout
+    assert "[path 1]" in proc.stdout
 
 
 @NEEDS_GIT
 def test_trusted_scan_oversized_blob_error_redacts_secret_name(tmp_path):
-    """Finding 4 (round 3): the fail-closed path hides a token-shaped name."""
+    """Finding 1 (round 4): the fail-closed path hides a token-shaped name."""
     token = "gh" + "p_" + "Q" * 30
     repo, sha = _git_repo(tmp_path, {token: "Z" * (hygiene_scan.MAX_FILE_BYTES + 1)})
     proc = _scan_tree(repo, sha)
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "fail closed" in proc.stdout
     assert token not in proc.stdout
-    assert "[redacted]" in proc.stdout
+    assert "[path 1]" in proc.stdout
 
 
 @NEEDS_GIT
@@ -1381,3 +1556,55 @@ def test_fetch_and_scan_end_to_end_like_the_workflow(tmp_path):
     assert proc.returncode == 1
     assert "IPv4 address at line 1" in proc.stdout
     assert planted not in proc.stdout
+
+@pytest.mark.parametrize(
+    "boundary", ["\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+@pytest.mark.parametrize("channel", ["suppression", "problem", "oversize", "symlink", "submodule"])
+@NEEDS_GIT
+def test_path_boundaries_never_disclose_secrets(tmp_path, boundary, channel):
+    """PR #61: every output channel hides splitlines credential paths."""
+    value = "AbCd" + "123456"
+    name = "dir/" + boundary + PW + "=" + value + ".txt"
+    data = {
+        "suppression": "# hygiene: ok\n",
+        "problem": ".".join(REAL10) + "\n",
+        "oversize": "Z" * (hygiene_scan.MAX_FILE_BYTES + 1),
+        "symlink": "",
+        "submodule": "",
+    }[channel]
+    if channel == "symlink":
+        repo, sha = _git_repo(tmp_path, {"target.txt": "hello\n"}, links={name: "target.txt"})
+    elif channel == "submodule":
+        repo, _ = _git_repo(tmp_path, {"target.txt": "hello\n"})
+        entry = f"160000 commit {'1' * 40}\t{boundary}{PW}={value}.txt\0"
+        sub = subprocess.check_output(
+            ["git", "mktree", "-z", "--missing"], cwd=repo, input=entry.encode()
+        ).decode().strip()
+        sha = subprocess.check_output(
+            ["git", "mktree"], cwd=repo, input=f"040000 tree {sub}\tdir\n".encode()
+        ).decode().strip()
+    else:
+        repo, sha = _git_repo(tmp_path, {name: data})
+    proc = _scan_tree(repo, sha)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == (0 if channel == "suppression" else 1 if channel == "problem" else 2)
+    assert "[path 1]" in output
+    for part in (value, value[:4], value[4:]):
+        assert part not in output
+
+
+def test_display_current_tree_verbatim():
+    paths = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT)
+    for raw in paths.split(b"\0"):
+        if raw:
+            path = os.fsdecode(raw)
+            assert hygiene_scan._display(path) == path
+
+
+def test_display_uses_run_local_counters():
+    first = hygiene_scan._display("one unsafe name")
+    second = hygiene_scan._display("two unsafe names")
+    assert first != second
+    assert hygiene_scan._display("one unsafe name") == first
+    assert re.fullmatch(r"\[path [1-9][0-9]*\]", first)
