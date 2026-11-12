@@ -746,3 +746,18 @@ handoff's "license not chosen; don't publish."
 - **Rejected:** raising the cap (the `pr-evidence` branch grows forever);
   posting no images over the cap (the PR most needing pictures gets none).
 - **Status:** in effect from PR #57.
+
+### D36. Shorter watchdog waits in stdio tests (2026-11-11, Jon)
+- **Decision:** most stdio-guard tests (D26) run the helper with a test-only
+  1 s watchdog instead of the production 5 s one. Slow work in those tests
+  sleeps 1.6 s so it still outlives the watchdog. One test keeps the real
+  5 s watchdog end to end; another pins the production value. Production
+  code and its default are unchanged, and every assertion is kept.
+- **Why:** these waits were the biggest remaining cost in the test suite.
+  `tests/test_stdio.py` went from about 64 s to about 39 s on Python 3.9,
+  with no flakes in 50 repeated runs, 30 of them under parallel load.
+- **Rejected:** keeping the real 5 s everywhere (slow, and the ordering
+  being tested does not depend on the exact value); shortening every test
+  (nothing would exercise production timing).
+- **Status:** in effect from PR #60. A two-way door, like other
+  test-practice entries.

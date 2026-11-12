@@ -38,6 +38,26 @@ STRAY_LINE_RE = re.compile(
     r"outside its result; discarded$"
 )
 
+# Decision 7 (option A): most watchdog-fires tests run the helper with
+# this shortened seal watchdog instead of the production 5 s one, via
+# the test-only HOUSESITTER_STDIO_WATCHDOG_S env var read by
+# tests/stdio_helper.py. Slow legitimate work sleeps FAST_SLOW_S so it
+# still outlives the shortened watchdog (1.6x headroom, above the 1.5x
+# floor). Exactly one test (TestGuardDownProductionBound's full-stdout
+# refusal) keeps the real 5 s watchdog end to end, and
+# TestProductionWatchdogValue pins the production default.
+FAST_WATCHDOG_S = 1.0
+FAST_SLOW_S = 1.6
+
+
+def _fast_env(monkeypatch, slow=False):
+    """Point one helper run at the shortened watchdog (plus slow sleep)."""
+    monkeypatch.setenv(
+        "HOUSESITTER_STDIO_WATCHDOG_S", str(FAST_WATCHDOG_S)
+    )
+    if slow:
+        monkeypatch.setenv("HOUSESITTER_STDIO_SLOW_S", str(FAST_SLOW_S))
+
 
 def _close_fd_zero():
     # preexec_fn: run after fork, before exec. Closes stdin so the helper
@@ -2291,15 +2311,29 @@ class TestSealSigintDiesPromptly:
         assert len(_json_objects(out)) == 1
 
 
+class TestProductionWatchdogValue:
+    """The production seal watchdog stays 5 s; fast tests only shrink
+    their own helper run through the test-only env var."""
+
+    def test_production_watchdog_is_five_seconds(self):
+        from housesitter.core import cli as cli_mod
+
+        assert cli_mod._SEAL_WATCHDOG_S == 5
+
+
 class TestFinalDeliveryWatchdog:
     """F3 (should-fix): blocked final delivery exits 1 within the bound.
 
     A daemon watchdog hard-exits 1 after the module constant when the
     reader of the real stdout or stderr stalls. Each test fails by
-    tight subprocess timeout when the process hangs instead.
+    tight subprocess timeout when the process hangs instead. Both run
+    the helper with the shortened 1 s watchdog (was: production 5 s);
+    the one production-5 s end-to-end watchdog test lives in
+    TestGuardDownProductionBound.
     """
 
-    def test_stdout_pipe_nobody_reads_exits_1(self, tmp_path):
+    def test_stdout_pipe_nobody_reads_exits_1(self, tmp_path, monkeypatch):
+        _fast_env(monkeypatch)
         read_fd, write_fd = os.pipe()
         try:
             _set_pipe_capacity(read_fd, write_fd, 4096)
@@ -2310,10 +2344,10 @@ class TestFinalDeliveryWatchdog:
             os.close(write_fd)
             write_fd = -1
             start = time.monotonic()
-            _, err = _reap(proc, 15, "blocked stdout delivery")
+            _, err = _reap(proc, 8, "blocked stdout delivery")
             elapsed = time.monotonic() - start
             assert proc.returncode == 1
-            assert elapsed < 15
+            assert elapsed < 8
             prefix = os.read(read_fd, 65536)
             assert 0 < len(prefix) <= 4096
         finally:
@@ -2327,7 +2361,8 @@ class TestFinalDeliveryWatchdog:
             except OSError:
                 pass
 
-    def test_stderr_pipe_full_exits_1(self, tmp_path):
+    def test_stderr_pipe_full_exits_1(self, tmp_path, monkeypatch):
+        _fast_env(monkeypatch)
         read_fd, write_fd = os.pipe()
         try:
             _set_pipe_capacity(read_fd, write_fd, 4096)
@@ -2340,10 +2375,10 @@ class TestFinalDeliveryWatchdog:
             os.close(write_fd)
             write_fd = -1
             start = time.monotonic()
-            out, _ = _reap(proc, 15, "blocked stderr delivery")
+            out, _ = _reap(proc, 8, "blocked stderr delivery")
             elapsed = time.monotonic() - start
             assert proc.returncode == 1
-            assert elapsed < 15
+            assert elapsed < 8
             assert b"STRAY-MARKER-print-leak" not in out
         finally:
             if write_fd >= 0:
@@ -2615,26 +2650,34 @@ class TestSlowWorkCompletesBeforeDelivery:
     watchdog arms only before the first CLI byte, never before slow
     file, subprocess, or handler work."""
 
-    def test_slow_install_commands_completes(self, tmp_path):
+    def test_slow_install_commands_completes(
+        self, tmp_path, monkeypatch
+    ):
         # A real (non-dry-run) install prints only the restart step:
         # per-file progress would go to the reserved real fds via the
-        # child. The 7 s sleeping backend must finish first: the exit
-        # is 0 with full output only if the watchdog did not fire early.
+        # child. The 1.6 s sleeping backend must finish first with the
+        # helper's shortened 1 s watchdog (was: 7 s vs production 5 s):
+        # the exit is 0 with full output only if the watchdog did not
+        # fire early.
+        _fast_env(monkeypatch, slow=True)
         start = time.monotonic()
-        out, err, code = run_helper_limited(tmp_path, "slow_install", 20)
+        out, err, code = run_helper_limited(tmp_path, "slow_install", 10)
         elapsed = time.monotonic() - start
         assert code == 0
         assert err == b""
-        assert elapsed >= 6
+        assert elapsed >= 1.5
         assert out.decode("utf-8") == (
             "restart with: sudo systemctl restart musegadget\n"
             "warning: restarting musegadget stops any command "
             "Muse is running right now\n"
         )
 
-    def test_slow_doctor_check_completes(self, tmp_path):
+    def test_slow_doctor_check_completes(self, tmp_path, monkeypatch):
+        # 1.6 s check vs the helper's shortened 1 s watchdog
+        # (was: 7 s vs production 5 s): same ordering, less waiting.
+        _fast_env(monkeypatch, slow=True)
         out, err, code = run_helper_limited(
-            tmp_path, "slow_check", 20, cmd="doctor-check"
+            tmp_path, "slow_check", 10, cmd="doctor-check"
         )
         assert code == 0
         assert err == b""
@@ -2654,7 +2697,18 @@ class TestGuardDownProductionBound:
     """W2: a guard-down production refusal is watchdog-bounded and ends
     with a hard exit, so a stalled reader cannot hang it."""
 
-    def test_guard_down_full_stdout_exits_1(self, tmp_path):
+    def test_guard_down_full_stdout_exits_1(self, tmp_path, monkeypatch):
+        # The designated production-watchdog test: the ONLY test that
+        # runs the real 5 s seal watchdog end to end (every other
+        # watchdog-fires test uses the helper's shortened 1 s one).
+        # Clear the test-only overrides so a stray value in the
+        # environment cannot shorten this run.
+        monkeypatch.delenv("HOUSESITTER_STDIO_WATCHDOG_S", raising=False)
+        monkeypatch.delenv("HOUSESITTER_STDIO_SLOW_S", raising=False)
+        # The helper logs, inside the child, when the watchdog timer arms
+        # and fires, so the interval is measured where it happens.
+        wd_log = tmp_path / "watchdog.log"
+        monkeypatch.setenv("HOUSESITTER_STDIO_WATCHDOG_LOG", str(wd_log))
         read_fd, write_fd = os.pipe()
         try:
             _set_pipe_capacity(read_fd, write_fd, 4096)
@@ -2669,6 +2723,17 @@ class TestGuardDownProductionBound:
             assert proc.returncode == 1
             # The 5 s watchdog fired: bounded, not instant, not a hang.
             assert elapsed < 12
+            # Measured in the child, from arming to firing: the real
+            # production interval, whatever start-up or scheduling cost.
+            events = [
+                line.split()
+                for line in wd_log.read_text().splitlines()
+            ]
+            armed = [float(t) for label, t in events if label == "armed"]
+            fired = [float(t) for label, t in events if label == "fired"]
+            assert armed and fired
+            interval = fired[0] - armed[0]
+            assert 4.9 <= interval < 8
         finally:
             if write_fd >= 0:
                 try:
@@ -2681,18 +2746,23 @@ class TestGuardDownProductionBound:
                 pass
 
 
-    def test_guard_down_slow_install_commands_completes(self, tmp_path):
+    def test_guard_down_slow_install_commands_completes(
+        self, tmp_path, monkeypatch
+    ):
         # Commands that continue unguarded after the guard-unavailable
         # warning must not run their remaining work under the delivery
         # watchdog: a slow installer (or a sudo password prompt) longer
-        # than the watchdog must still finish with exit 0.
+        # than the watchdog must still finish with exit 0. The 1.6 s
+        # sleep still outlives the helper's shortened 1 s watchdog
+        # (was: 7 s vs production 5 s).
+        _fast_env(monkeypatch, slow=True)
         start = time.monotonic()
         out, err, code = run_helper_limited(
-            tmp_path, "guard_down_slow_install", 20
+            tmp_path, "guard_down_slow_install", 10
         )
         elapsed = time.monotonic() - start
         assert code == 0
-        assert elapsed >= 6
+        assert elapsed >= 1.5
         assert err == (
             b"housesitter: housesitter: log: output guard unavailable; "
             b"continuing without it\n"
