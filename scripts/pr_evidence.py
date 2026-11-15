@@ -517,26 +517,25 @@ def run_fake(head_tree: Path, spec: dict, cert_path: str, key_path: str):
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError as exc:
         raise _SkipScenario(f"the fake controller could not start: {exc}") from exc
+    # One cleanup for everything after a successful Popen: startup-wait
+    # failures (including KeyboardInterrupt and unexpected OSError, which
+    # are not _SkipScenario), unparseable startup lines, and exceptions or
+    # interrupts during the run all reap the child.
     try:
         lines = _wait_for_lines(
             proc,
             ["listening on https://127.0.0.1:", "fingerprint_sha256:"],
             FAKE_BOOT_TIMEOUT_S,
         )
-    except _SkipScenario:
-        _stop_fake(proc)
-        raise
-    try:
-        port = int(lines["listening on https://127.0.0.1:"].rsplit(":", 1)[1].strip())
-        fingerprint = lines["fingerprint_sha256:"].split("fingerprint_sha256:", 1)[1].strip()
-        if not 1 <= port <= 65535 or not fingerprint:
-            raise ValueError("unparseable startup line")
-    except (ValueError, IndexError) as exc:
-        _stop_fake(proc)
-        raise _SkipScenario(
-            f"the fake controller printed an unparseable startup line: {exc}"
-        ) from exc
-    try:
+        try:
+            port = int(lines["listening on https://127.0.0.1:"].rsplit(":", 1)[1].strip())
+            fingerprint = lines["fingerprint_sha256:"].split("fingerprint_sha256:", 1)[1].strip()
+            if not 1 <= port <= 65535 or not fingerprint:
+                raise ValueError("unparseable startup line")
+        except (ValueError, IndexError) as exc:
+            raise _SkipScenario(
+                f"the fake controller printed an unparseable startup line: {exc}"
+            ) from exc
         yield FakeInfo(proc, port, fingerprint)
     finally:
         _stop_fake(proc)

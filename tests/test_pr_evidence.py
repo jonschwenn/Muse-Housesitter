@@ -1712,6 +1712,34 @@ def test_changed_unifi_sections_keep_tests_line_and_screenshots(tmp_path):
     assert "### `zzz-trailing-probe`" in body
 
 
+def test_run_fake_reaps_child_when_startup_is_interrupted(tmp_path, monkeypatch):
+    # Everything after a successful Popen is covered by one cleanup finally:
+    # an interruption during startup waiting must still reap the child.
+    require_test_tool(openssl is not None, "openssl is not installed")
+    certdir = tmp_path / "cert"
+    certdir.mkdir()
+    cert_path, key_path = pr_evidence.make_cert(str(certdir))
+    spec = pr_evidence.validate_fake_spec({"fixture_set": "typical"}, "probe")
+    children = []
+    real_popen = pr_evidence.subprocess.Popen
+
+    def capture(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(pr_evidence.subprocess, "Popen", capture)
+    for exc in (KeyboardInterrupt(), OSError("select failed")):
+        def boom(*args, _exc=exc, **kwargs):
+            raise _exc
+
+        monkeypatch.setattr(pr_evidence, "_wait_for_lines", boom)
+        with pytest.raises(type(exc)):
+            with pr_evidence.run_fake(ROOT, spec, cert_path, key_path):
+                pass  # pragma: no cover - startup never completes
+        assert children[-1].poll() is not None
+
+
 def test_evidence_password_never_leaks(tmp_path):
     require_test_tool(openssl is not None, "openssl is not installed")
     fakes, volatile = _repo_fake_scenarios()
