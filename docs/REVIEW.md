@@ -37,24 +37,50 @@ is created on first use.
 PR #1 predates the tooling and has no evidence.
 
 **How it works**
-- `tests/evidence/scenarios.json` lists the scenarios: a fixed set of
-  Housesitter invocations against the **fixture house**.
-  - `describe` and `doctor`
-  - each module command with representative params
-  - a truncated (paged) result
-  - one or two error cases (e.g. bad password, TLS mismatch)
+- `tests/evidence/scenarios.json` lists the fixture-house scenarios:
+  `describe`, `doctor`, other CLI checks, and these `unifi_wifi` cases:
+  typical and empty snapshots; no config (`config_invalid`); rejected login
+  (`upstream_auth`); wrong certificate fingerprint (`upstream_tls`); a large,
+  truncated snapshot and its first follow-up page; and a snapshot followed
+  by `get` of its saved id.
 - `scripts/pr_evidence.py` runs every scenario on the PR's base (`main`, in
-  a temporary worktree) and on its head. It writes structured results to
-  `results.json` and a local preview to `evidence.md`: a summary table
-  (scenario, changed or unchanged, envelope size as the SDK measures it),
-  then a diff for each changed scenario. The results schema requires every
-  field the renderer reads, with valid UTF-8 strings. Volatile fields
-  (`collected_at`, saved ids) are normalised so they don't show up as noise.
-- Each run gets a fresh, empty `HOME` and a minimal environment: the
-  variables the SDK gives drop-in commands, plus `PYTHONPATH` and
-  `PYTHONDONTWRITEBYTECODE`. A real config or secret therefore can't be
-  *found* through `HOME` or the environment. That guards against accidents,
-  not against code that reads absolute paths on purpose.
+  a temporary worktree) and on its head. A scenario with a `"fake"` key
+  starts the head tree's `scripts/fake_unifi.py` on `127.0.0.1` with an
+  OS-assigned port, serving the head tree's invented fixtures from
+  `tests/fixtures/unifi_wifi/`. Both trees run the real CLI against that
+  same fake and fixtures; the base tree's fake and fixtures are never used.
+  This gives both sides identical input, including fixtures added by the PR.
+  The fake options are `fixture_set` (`typical`, `empty`, or `large`),
+  `reject_login` (every login gets 401), and `bad_fingerprint` (pin a wrong
+  certificate fingerprint in config).
+- Each run gets a fresh `HOME` and a minimal environment: the variables the
+  SDK gives drop-in commands, plus `PYTHONPATH` and `PYTHONDONTWRITEBYTECODE`.
+  Fake scenarios write `config.json` and the `unifi_password` secrets file
+  there, the same two files a user sets up. The password is invented and
+  contains `PLANTED-SECRET`; a test checks that it never appears in output
+  or `results.json`. A real config or secret can't be *found* through
+  `HOME` or the environment. That guards against accidents, not against
+  code that reads absolute paths on purpose.
+- A fake scenario's `"steps"` runs several CLI calls in the same HOME.
+  `$saved_id(N)`, `$more_command(N)` and `$more_params(N)` replay values
+  from an earlier step's envelope, counting from zero. Each step has its
+  own output header; the table's command column joins every step with `&&`.
+- One throwaway self-signed certificate is made with `openssl` per evidence
+  run and never committed. If `openssl` is missing or the fake cannot start,
+  the scenario stays visible as `(skipped on base/head: reason)`, with the
+  actual side named. With `HOUSESITTER_REQUIRE_TEST_TOOLS=1`, as set in CI,
+  missing `openssl` fails the run instead.
+- The script writes structured results to `results.json` and a local
+  preview to `evidence.md`: a summary table (scenario, changed or unchanged,
+  and raw output size as the SDK measures it), then a diff for each changed
+  scenario. For steps, the size column is the largest single call's raw
+  size, not the combined rendering. The results schema requires every field
+  the renderer reads, with valid UTF-8 strings.
+- Volatile values become `<volatile>`: `collected_at` and `saved` at any
+  depth, and `more.params.id` only from the envelope root. Data fields named
+  `id`, including AP and client MACs, stay intact. The run's own saved ids
+  and timestamps are also blanked in step headers. The port and certificate
+  fingerprint do not reach output.
 - A scenario that is meant to fail (an error case) sets `"expect_exit"`. The
   comment calls out any scenario whose exit code doesn't match, and
   `tests/test_pr_evidence.py` fails on it.
@@ -357,7 +383,7 @@ PR #1 predates the tooling and has no evidence.
 **Rules**
 - **Fixture data only.** Never capture a real house: no live controller
   output, and no screenshot of a real Muse chat, unless it was driven by the
-  fixture house (Muse can run `--fixture` too). The script refuses to run if
+  fixture house. The script refuses to run if
   `HOUSESITTER_LIVE` or `HOUSESITTER_CONFIG` is set, or if
   `~/.config/housesitter/config.json` exists.
 - A new module or command adds its scenarios **in the same PR**.

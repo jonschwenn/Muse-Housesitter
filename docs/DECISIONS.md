@@ -104,6 +104,8 @@ handoff's "license not chosen; don't publish."
   section from `results.json`; it never posts PR-built markdown. The
   comment identifies the outputs as coming from the PR's own CI run.
   D33–D35 record the trust, refusal and crop decisions in PR #57.
+- **Amended (2026-11-15, Jon):** module-output evidence now runs the real
+  CLI against a shared fake controller and invented fixtures. See D37.
 
 ### D12. Minimal GitHub-only CI, with `main` locked by a ruleset (2026-11-04, Jon)
 - **CI:** one workflow, `.github/workflows/ci.yml`, with three jobs
@@ -761,3 +763,27 @@ handoff's "license not chosen; don't publish."
   (nothing would exercise production timing).
 - **Status:** in effect from PR #60. A two-way door, like other
   test-practice entries.
+
+### D37. Evidence runs module commands against the fake controller (2026-11-15, Jon)
+- **Decision:** option A: evidence runs the base and head trees' real CLI
+  against the head tree's `scripts/fake_unifi.py` and invented fixtures.
+  Both sides share the same fake, even when the PR adds fixtures the base
+  lacks. Each run gets config and an invented password file in a fresh
+  HOME. Scenarios cover typical and empty snapshots, rejected login, a
+  wrong certificate fingerprint, a truncated large snapshot with its first
+  follow-up page, and retrieval of a saved snapshot. Keep the no-config
+  case too. Steps share a HOME and replay earlier envelopes; volatile
+  timestamps and saved ids are blanked without hiding AP or client ids.
+- **Why:** the old UniFi scenarios had no config and returned only
+  `config_invalid`, so they showed nothing about module output. A test
+  changes the normaliser in a copied tree and checks that typical-snapshot
+  evidence changes while the no-config evidence stays unchanged.
+- **Rejected:** option B, only correcting REVIEW.md to admit the gap
+  (leaves module output uncovered); feeding fixtures in-process through
+  each tree's own test helpers (base runs would break when a PR changes
+  those internals); a test hook in the shipped CLI (puts test code in the
+  runtime).
+- **Known limit:** the large scenario's text is about 237 KB, above the
+  whole comment's 60,000-byte budget. When it changes, the standard
+  omission notice replaces its section; its table row still shows whether
+  it changed and its output size.
