@@ -1849,6 +1849,50 @@ def test_normalise_change_shows_in_snapshot_evidence(tmp_path):
     assert evidence_checks.validate_results(results, set(wanted)) == []
 
 
+def test_shared_head_fake_serves_both_sides(tmp_path, monkeypatch):
+    # The base tree's own fake is unusable and its fixtures differ, while
+    # HEAD's are normal: both sides must still succeed with identical HEAD
+    # fixture data, from exactly one fake boot for the scenario.
+    require_test_tool(openssl is not None, "openssl is not installed")
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    typical = next(
+        scenario for scenario in scenarios if scenario["id"] == "unifi-wifi-snapshot-typical"
+    )
+    pruned = {"volatile_keys": volatile_keys, "scenarios": [typical]}
+    base = _copy_repo_tree(tmp_path, "base")
+    head = _copy_repo_tree(tmp_path, "head")
+    for tree in (base, head):
+        (tree / "tests" / "evidence" / "scenarios.json").write_text(json.dumps(pruned))
+    (base / "scripts" / "fake_unifi.py").write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.exit('base fake is broken')\n"
+    )
+    sta = base / "tests" / "fixtures" / "unifi_wifi" / "unifi_os_sta.json"
+    doc = json.loads(sta.read_text())
+    doc["data"][0]["name"] = "BASE-MUTANT-CLIENT"
+    sta.write_text(json.dumps(doc))
+    boots = []
+    real_popen = pr_evidence.subprocess.Popen
+
+    def counting(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", [])
+        if any("fake_unifi.py" in str(part) for part in argv):
+            boots.append(argv)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(pr_evidence.subprocess, "Popen", counting)
+    results = pr_evidence.build_results(base, head)
+    assert len(boots) == 1, boots
+    (entry,) = results["scenarios"]
+    assert entry["id"] == "unifi-wifi-snapshot-typical"
+    assert entry["changed"] is False
+    assert "Kitchen Speaker" in entry["before"]
+    assert "Kitchen Speaker" in entry["after"]
+    dumped = json.dumps(results)
+    assert "BASE-MUTANT" not in dumped
+    assert "skipped" not in dumped
+    assert evidence_checks.validate_results(results, {"unifi-wifi-snapshot-typical"}) == []
+
+
 def test_stepped_scenario_reports_sdk_size_and_every_step(tmp_path):
     # The size column is "envelope size as the SDK measures it": for a
     # stepped scenario it must be the largest single call's raw stdout,
