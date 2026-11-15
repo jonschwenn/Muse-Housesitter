@@ -1233,15 +1233,14 @@ def test_main_skips_the_base_capture_with_skip_base(tmp_path, monkeypatch):
 
 
 def test_evidence_job_fetches_only_the_two_commits():
-    # R9: a shallow head checkout plus --depth 1 fetches of exactly the
-    # base and head commits, never a full-history checkout. Raw SHAs are
-    # not fetchable refs, so the base comes from its branch and the head
-    # from the pull-request head ref, each checked against the event SHA.
+    # R9: a shallow head checkout plus one --depth 1 fetch of exactly the
+    # base and head commits by SHA, never a full-history checkout and never
+    # a branch tip (which moves when main does).
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert "fetch-depth: 1" in workflow
     assert "fetch-depth: 0" not in workflow
-    assert 'fetch --depth 1 origin "$BASE_REF"' in workflow
-    assert 'fetch --depth 1 origin "pull/$PR/head"' in workflow
+    assert 'fetch --depth 1 --no-tags origin "$BASE_SHA" "$HEAD_SHA"' in workflow
+    assert "BASE_REF" not in workflow
     assert "worktree add" in workflow
     assert "persist-credentials: false" in workflow
 

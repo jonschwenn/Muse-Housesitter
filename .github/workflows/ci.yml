@@ -133,29 +133,18 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x"
-      # R9: fetch only the two commits the evidence needs. A raw SHA is
-      # not a fetchable ref on GitHub, so the base comes from its branch
-      # and the head from the pull-request head ref; each fetched tip is
-      # checked against the event's SHA before the worktree is added, so a
-      # branch that moved mid-run fails loudly instead of comparing the
-      # wrong commits.
+      # R9: fetch only the two commits the evidence needs, by SHA. GitHub
+      # serves any reachable commit by id (actions/checkout fetches the
+      # same way), so the base is the event's exact base commit even after
+      # main has moved on, and the head is the PR's exact head commit
+      # (the checkout above is the merge commit).
       - name: Fetch the base and head commits
         env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git -C head fetch --depth 1 origin "$BASE_REF"
-          fetched_base=$(git -C head rev-parse FETCH_HEAD)
-          if [ "$fetched_base" != "$BASE_SHA" ]; then
-            echo "base moved during the run: fetched $fetched_base, want $BASE_SHA"; exit 1
-          fi
-          git -C head fetch --depth 1 origin "pull/$PR/head"
-          fetched_head=$(git -C head rev-parse FETCH_HEAD)
-          if [ "$fetched_head" != "$HEAD_SHA" ]; then
-            echo "head moved during the run: fetched $fetched_head, want $HEAD_SHA"; exit 1
-          fi
+          set -euo pipefail
+          git -C head fetch --depth 1 --no-tags origin "$BASE_SHA" "$HEAD_SHA"
           git -C head worktree add "$GITHUB_WORKSPACE/base" "$BASE_SHA"
       # Screenshots use the Google Chrome that GitHub's runner image ships
       # (updated weekly, like real users' Chrome), not a Playwright-bundled
