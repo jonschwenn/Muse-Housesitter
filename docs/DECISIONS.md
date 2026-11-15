@@ -106,6 +106,9 @@ handoff's "license not chosen; don't publish."
   D33–D35 record the trust, refusal and crop decisions in PR #57.
 - **Amended (2026-11-15, Jon):** module-output evidence now runs the real
   CLI against a shared fake controller and invented fixtures. See D37.
+- **Amended (2026-11-15, Jon):** base dashboard screenshots may be skipped
+  when UI inputs are identical, with an explicit notice and independent
+  verification by main's publisher. See D38.
 
 ### D12. Minimal GitHub-only CI, with `main` locked by a ruleset (2026-11-04, Jon)
 - **CI:** one workflow, `.github/workflows/ci.yml`, with three jobs
@@ -786,3 +789,32 @@ handoff's "license not chosen; don't publish."
   sections. The typical changed section is about 32 KB; other large changes
   such as `describe` (about 16 KB of output) can still squeeze Tests.
   Changing the publisher's shrink order is a separate follow-up.
+
+### D38. Skip base screenshots when UI inputs are identical; fetch only two commits (2026-11-15, Jon)
+- **Decision:** option A of evidence Decision 6: skip base dashboard
+  captures when every path in `scripts/evidence_checks.py`'s fixed
+  `UI_INPUTS` list has the same git object id at the PR's base and head.
+  Missing on one side counts as different; missing on both counts as
+  identical. Head captures and every UI check still run. The manifest
+  records `base_skipped: "ui_inputs_identical"`; the comment always says
+  "Before not captured: UI inputs identical." See REVIEW.md, "Evidence,"
+  for the paths and what each covers.
+  The PR-side check re-verifies against local git objects before upload.
+  Main's publisher uses its own list and GitHub API tree listings, fetching
+  the head tree from the head repository so forks work. A differing input,
+  failed fetch or truncated listing refuses publication with `bad_skip`.
+  Token permissions are unchanged.
+  For R9, the evidence job checks out at depth 1, fetches only the exact
+  base and head commits by SHA at depth 1, and adds the base worktree.
+  It never needs full history or uses a moving branch tip.
+- **Why:** in the supplied local measurement of a docs-only change with
+  seven fixtures and four views, full capture took about 62 s; skipping
+  base captures took about 31 s. Only the two commits' objects are needed
+  to compare inputs and run evidence.
+- **Rejected:** option B, always capturing both sides: simpler, but costs
+  every PR roughly 30–50 s. Fetching full history adds work that evidence
+  does not need; using a branch tip would change the base when main moves.
+- **Known limit:** an influence on rendering outside the list could hide a
+  visual change until it is added. The import guard covers only the dev
+  server's imports, including transitive imports; it does not prove the
+  list covers every rendering input.
