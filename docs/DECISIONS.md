@@ -765,25 +765,24 @@ handoff's "license not chosen; don't publish."
   test-practice entries.
 
 ### D37. Evidence runs module commands against the fake controller (2026-11-15, Jon)
-- **Decision:** option A: evidence runs the base and head trees' real CLI
-  against the head tree's `scripts/fake_unifi.py` and invented fixtures.
-  Both sides share the same fake, even when the PR adds fixtures the base
-  lacks. Each run gets config and an invented password file in a fresh
-  HOME. Scenarios cover typical and empty snapshots, rejected login, a
-  wrong certificate fingerprint, a truncated large snapshot with its first
-  follow-up page, and retrieval of a saved snapshot. Keep the no-config
-  case too. Steps share a HOME and replay earlier envelopes; volatile
-  timestamps and saved ids are blanked without hiding AP or client ids.
-- **Why:** the old UniFi scenarios had no config and returned only
-  `config_invalid`, so they showed nothing about module output. A test
-  changes the normaliser in a copied tree and checks that typical-snapshot
-  evidence changes while the no-config evidence stays unchanged.
-- **Rejected:** option B, only correcting REVIEW.md to admit the gap
-  (leaves module output uncovered); feeding fixtures in-process through
-  each tree's own test helpers (base runs would break when a PR changes
-  those internals); a test hook in the shipped CLI (puts test code in the
-  runtime).
-- **Known limit:** the large scenario's text is about 237 KB, above the
-  whole comment's 60,000-byte budget. When it changes, the standard
-  omission notice replaces its section; its table row still shows whether
-  it changed and its output size.
+- **Decision:** option A: run both trees' real CLI against the head tree's
+  fake controller and invented fixtures, with a fresh HOME per run. Cover
+  typical and empty snapshots, auth and TLS failures, large-snapshot paging,
+  and a snapshot followed by `get` using its saved id; keep the no-config
+  case. Use empty fixtures for the saved round trip. Only the large uses
+  `data-counts`: lists inside `data` become item counts, while summary
+  counts and paging fields stay visible. Its roughly 90 KB truncated page
+  cannot fit in full. Blank volatile keys in bodies and exact saved ids
+  and timestamps only in echoed step command lines.
+- **Why:** no-config evidence showed only `config_invalid`. A test changes
+  the normaliser and checks that typical evidence changes while no-config
+  evidence stays unchanged. Another pins both sides to the same head fake.
+- **Rejected:** docs alone (leaves output uncovered); each tree's test
+  helpers (can drift); a shipped CLI test hook (adds test code to runtime).
+- **Known limit:** main's unchanged publisher shows a diff plus full before
+  and after. Above 60,000 bytes it degrades the Tests line, then screenshot
+  details, then keeps only a prefix of text sections. All UniFi scenarios
+  changed fit at about 49.6 KB, preserving Tests, a screenshot and later
+  sections. The typical changed section is about 32 KB; other large changes
+  such as `describe` (about 16 KB of output) can still squeeze Tests.
+  Changing the publisher's shrink order is a separate follow-up.

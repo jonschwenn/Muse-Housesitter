@@ -42,7 +42,7 @@ PR #1 predates the tooling and has no evidence.
   typical and empty snapshots; no config (`config_invalid`); rejected login
   (`upstream_auth`); wrong certificate fingerprint (`upstream_tls`); a large,
   truncated snapshot and its first follow-up page; and a snapshot followed
-  by `get` of its saved id.
+  by `get` of its saved id, using the empty fixture set for that round trip.
 - `scripts/pr_evidence.py` runs every scenario on the PR's base (`main`, in
   a temporary worktree) and on its head. A scenario with a `"fake"` key
   starts the head tree's `scripts/fake_unifi.py` on `127.0.0.1` with an
@@ -65,6 +65,17 @@ PR #1 predates the tooling and has no evidence.
   `$saved_id(N)`, `$more_command(N)` and `$more_params(N)` replay values
   from an earlier step's envelope, counting from zero. Each step has its
   own output header; the table's command column joins every step with `&&`.
+- A fake scenario can set `"render": "data-counts"` (the default is
+  `"full"`; unknown values fail with an error). In each step's JSON envelope,
+  lists anywhere inside `data` become `"<N items>"`. Scalars and objects
+  stay, so summary counts remain visible. Everything outside `data`,
+  including `truncated`, `more` (command, params, remaining), `warnings`
+  and `source`, renders in full, subject to volatile-key blanking below.
+  Each step header says "(data lists shown as item counts)". Only the large
+  scenario uses this mode; paging still diffs, and its changed section is
+  about 4 KB. The size column still measures raw output.
+  A fake scenario's rendered text must fit the publisher's budget; use
+  `data-counts` or a smaller fixture set when needed.
 - One throwaway self-signed certificate is made with `openssl` per evidence
   run and never committed. If `openssl` is missing or the fake cannot start,
   the scenario stays visible as `(skipped on base/head: reason)`, with the
@@ -79,7 +90,10 @@ PR #1 predates the tooling and has no evidence.
 - Volatile values become `<volatile>`: `collected_at` and `saved` at any
   depth, and `more.params.id` only from the envelope root. Data fields named
   `id`, including AP and client MACs, stay intact. The run's own saved ids
-  and timestamps are also blanked in step headers. The port and certificate
+  and `collected_at` values are also blanked by exact-string matching only
+  in each step header's echoed `$ housesitter ...` command line. This
+  matching never touches output bodies or stderr: bodies are blanked only
+  through volatile keys, and stderr stays verbatim. The port and certificate
   fingerprint do not reach output.
 - A scenario that is meant to fail (an error case) sets `"expect_exit"`. The
   comment calls out any scenario whose exit code doesn't match, and
