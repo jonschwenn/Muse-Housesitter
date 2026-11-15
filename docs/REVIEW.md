@@ -73,7 +73,10 @@ PR #1 predates the tooling and has no evidence.
   and `source`, renders in full, subject to volatile-key blanking below.
   Each step header says "(data lists shown as item counts)". Only the large
   scenario uses this mode; paging still diffs, and its changed section is
-  about 4 KB. The size column still measures raw output.
+  about 4 KB. The size column still measures raw output. Counts hide a
+  change to individual records when the number of records stays the same,
+  so "unchanged" for this scenario means the projection is unchanged;
+  per-record output is compared in the typical, empty and `get` scenarios.
   A fake scenario's rendered text must fit the publisher's budget; use
   `data-counts` or a smaller fixture set when needed.
 - One throwaway self-signed certificate is made with `openssl` per evidence

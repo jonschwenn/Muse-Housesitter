@@ -227,7 +227,9 @@ def _boot(tmp_path, name, *extra_args):
             proc, ["listening on https://127.0.0.1:", "fingerprint_sha256:"]
         )
         port = int(lines["listening on https://127.0.0.1:"].rsplit(":", 1)[1].rstrip())
-    except (AssertionError, ValueError):
+    except BaseException:
+        # Any exit before the caller holds the process (including
+        # KeyboardInterrupt) must reap it: nobody else can.
         _stop(proc)
         raise
     return proc, port, cert
@@ -304,7 +306,16 @@ def test_startup_reader_keeps_lines_across_calls():
             proc.kill()
 
 
-def test_boot_stops_child_when_startup_fails(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        AssertionError("never saw 'listening on' in fake_unifi output"),
+        KeyboardInterrupt(),
+        OSError("select failed"),
+    ],
+    ids=["assertion", "keyboard-interrupt", "oserror"],
+)
+def test_boot_stops_child_when_startup_fails(tmp_path, monkeypatch, failure):
     # Startup failure before _boot returns must still reap the child: the
     # failure is injected, but the booted fake is real and stays alive.
     require_test_tool(openssl is not None, "openssl is not installed")
@@ -319,11 +330,11 @@ def test_boot_stops_child_when_startup_fails(tmp_path, monkeypatch):
         return child
 
     def boom(*args, **kwargs):
-        raise AssertionError("never saw 'listening on' in fake_unifi output")
+        raise failure
 
     monkeypatch.setattr(subprocess, "Popen", capture)
     monkeypatch.setattr(tf, "wait_for_startup", boom)
-    with pytest.raises(AssertionError):
+    with pytest.raises(type(failure)):
         tf._boot(tmp_path, "badboot", "--fixture-set", "typical")
     assert children, "the fake was never started"
     assert all(child.poll() is not None for child in children)
