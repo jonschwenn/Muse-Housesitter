@@ -140,3 +140,134 @@ def test_fake_unifi_serves_fixtures_over_tls(tmp_path):
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def _mint_cert(tmp_path):
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    subprocess.run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=127.0.0.1",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    return cert, key
+
+
+def _boot(tmp_path, name, *extra_args):
+    """Boot the fake with extra flags; returns (proc, port, cert)."""
+    (tmp_path / name).mkdir(exist_ok=True)
+    cert, key = _mint_cert(tmp_path / name)
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(FAKE),
+            "--cert",
+            str(cert),
+            "--key",
+            str(key),
+            "--port",
+            "0",
+            *extra_args,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+    )
+    listening = wait_for_line(proc, "listening on https://127.0.0.1:")
+    port = int(listening.rsplit(":", 1)[1].rstrip())
+    return proc, port, cert
+
+
+def _tls_get(port, path):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    conn = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=10)
+    conn.request("GET", path)
+    response = conn.getresponse()
+    data = json.loads(response.read().decode())
+    status = response.status
+    conn.close()
+    return status, data
+
+
+def _tls_login(port, username, password):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    conn = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=10)
+    payload = json.dumps({"username": username, "password": password}).encode()
+    conn.request("POST", "/api/auth/login", body=payload)
+    response = conn.getresponse()
+    response.read()
+    status = response.status
+    conn.close()
+    return status
+
+
+def _stop(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def test_fake_unifi_fixture_sets(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    cases = {
+        "typical": ("unifi_os_sta.json", 16),
+        "empty": ("empty_sta.json", 0),
+        "large": ("large_sta.json", 600),
+    }
+    for fixture_set, (sta_file, sta_count) in cases.items():
+        proc, port, _ = _boot(tmp_path, fixture_set, "--fixture-set", fixture_set)
+        try:
+            assert f"fixture_set: {fixture_set}" in wait_for_line(
+                proc, "fixture_set:"
+            )
+            status, sysinfo = _tls_get(port, "/proxy/network/api/s/default/stat/sysinfo")
+            assert status == 200
+            assert sysinfo == json.loads(
+                (ROOT / "tests" / "fixtures" / "unifi_wifi" / "unifi_os_sysinfo.json")
+                .read_text()
+            )
+            status, sta = _tls_get(port, "/proxy/network/api/s/default/stat/sta")
+            assert status == 200
+            assert sta == json.loads(
+                (ROOT / "tests" / "fixtures" / "unifi_wifi" / sta_file).read_text()
+            )
+            assert len(sta["data"]) == sta_count
+        finally:
+            _stop(proc)
+
+
+def test_fake_unifi_reject_login(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    proc, port, _ = _boot(tmp_path, "reject", "--reject-login")
+    try:
+        assert "reject_login: on" in wait_for_line(proc, "reject_login:")
+        assert _tls_login(port, "housesitter-readonly", "PLANTED-SECRET-x") == 401
+        assert _tls_login(port, "housesitter-readonly", "") == 401
+        # Only the login is gated: the stat routes still serve the fixtures.
+        status, sta = _tls_get(port, "/proxy/network/api/s/default/stat/sta")
+        assert status == 200
+        assert len(sta["data"]) == 16
+    finally:
+        _stop(proc)

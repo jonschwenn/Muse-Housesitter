@@ -1,5 +1,5 @@
 {
-  "volatile_keys": ["collected_at", "saved"],
+  "volatile_keys": ["collected_at", "saved", "more.params.id"],
   "scenarios": [
     {
       "id": "version",
@@ -60,15 +60,55 @@
     },
     {
       "id": "invoke-unifi-wifi-snapshot",
-      "title": "Invoke the unifi_wifi snapshot command",
+      "title": "Snapshot with no config (config_invalid)",
       "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
       "expect_exit": 1
     },
     {
-      "id": "invoke-unifi-wifi-get",
-      "title": "Invoke the unifi_wifi get command",
-      "argv": ["invoke", "housesitter.unifi_wifi.get", "--params", "{\"id\":\"snapshot_20261104T151500Z_3fa1\"}"],
+      "id": "unifi-wifi-snapshot-typical",
+      "title": "Snapshot from the fake controller (typical house)",
+      "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+      "fake": {"fixture_set": "typical"}
+    },
+    {
+      "id": "unifi-wifi-snapshot-empty",
+      "title": "Snapshot from the fake controller (empty house)",
+      "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+      "fake": {"fixture_set": "empty"}
+    },
+    {
+      "id": "unifi-wifi-snapshot-auth-rejected",
+      "title": "Snapshot with the login rejected (upstream_auth)",
+      "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+      "fake": {"fixture_set": "typical", "reject_login": true},
       "expect_exit": 1
+    },
+    {
+      "id": "unifi-wifi-snapshot-tls-mismatch",
+      "title": "Snapshot with a wrong certificate fingerprint (upstream_tls)",
+      "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+      "fake": {"fixture_set": "typical", "bad_fingerprint": true},
+      "expect_exit": 1
+    },
+    {
+      "id": "unifi-wifi-snapshot-large",
+      "title": "Snapshot from the large fixture, truncated, plus its first follow-up page",
+      "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+      "fake": {"fixture_set": "large"},
+      "steps": [
+        {"argv": ["invoke", "housesitter.unifi_wifi.snapshot"]},
+        {"argv": ["invoke", "$more_command(0)", "--params", "$more_params(0)"]}
+      ]
+    },
+    {
+      "id": "unifi-wifi-get-saved",
+      "title": "Get of the snapshot just taken",
+      "argv": ["invoke", "housesitter.unifi_wifi.get", "--params", "{\"id\": \"$saved_id(0)\"}"],
+      "fake": {"fixture_set": "typical"},
+      "steps": [
+        {"argv": ["invoke", "housesitter.unifi_wifi.snapshot"]},
+        {"argv": ["invoke", "housesitter.unifi_wifi.get", "--params", "{\"id\": \"$saved_id(0)\"}"]}
+      ]
     }
   ]
 }

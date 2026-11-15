@@ -7,14 +7,24 @@ import json
 import random
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
+
+from core.helpers import require_test_tool
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("pr_evidence", ROOT / "scripts" / "pr_evidence.py")
 pr_evidence = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pr_evidence)
+CHECKS_SPEC = importlib.util.spec_from_file_location(
+    "evidence_checks", ROOT / "scripts" / "evidence_checks.py"
+)
+evidence_checks = importlib.util.module_from_spec(CHECKS_SPEC)
+CHECKS_SPEC.loader.exec_module(evidence_checks)
+
+openssl = shutil.which("openssl")
 
 
 def make_tree(tmp_path: Path, name: str, version: str | None, scenarios: list[dict]) -> Path:
@@ -110,10 +120,15 @@ def test_refuses_when_a_real_config_exists(tmp_path, monkeypatch):
 
 
 def test_every_scenario_in_the_repo_exits_as_expected():
-    scenarios, _ = pr_evidence.load_scenarios(ROOT)
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
     assert scenarios, "tests/evidence/scenarios.json must list at least one scenario"
     for scenario in scenarios:
-        result = pr_evidence.run_scenario(ROOT, scenario)
+        result = pr_evidence.run_scenario(ROOT, scenario, volatile=set(volatile_keys))
+        if result.get("skipped"):
+            # No fake available (openssl missing and not required): the
+            # skip is reported, not silent.
+            require_test_tool(False, result["skipped"])
+            continue
         assert result["exit"] == scenario.get("expect_exit", 0), (scenario["id"], result["stderr"])
 
 
@@ -1244,3 +1259,161 @@ def test_hostile_fixture_label_never_renders_as_prose():
     _assert_no_prose_leak(
         full + "\n" + table, ["Approved by maintainer", "example.com/pwn"]
     )
+
+
+# Fake-controller evidence (Decision 9, option A) ---------------------------
+#
+# The unifi_wifi scenarios run the installed CLI against scripts/fake_unifi.py
+# (the HEAD tree's copy, serving the HEAD tree's fixtures) with a written
+# config plus secrets file, exactly as a user would set it up.
+
+
+def _repo_fake_scenarios():
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    fakes = [scenario for scenario in scenarios if scenario.get("fake")]
+    assert len(fakes) >= 6, "the unifi_wifi evidence scenarios are missing"
+    return fakes, set(volatile_keys)
+
+
+def test_fake_scenarios_are_deterministic(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    fakes, volatile = _repo_fake_scenarios()
+    certdir = tempfile.mkdtemp(prefix="hs-evidence-test-cert-", dir=str(tmp_path))
+    for scenario in fakes:
+        spec = pr_evidence.validate_fake_spec(scenario["fake"], scenario["id"])
+        cert_paths = pr_evidence.make_cert(certdir)
+        try:
+            with pr_evidence.run_fake(ROOT, spec, *cert_paths) as first:
+                first_run = pr_evidence.run_scenario(ROOT, scenario, first, volatile)
+            with pr_evidence.run_fake(ROOT, spec, *cert_paths) as second:
+                second_run = pr_evidence.run_scenario(ROOT, scenario, second, volatile)
+        except pr_evidence._SkipScenario as exc:
+            require_test_tool(False, str(exc))
+            continue
+        assert first_run["exit"] == second_run["exit"] == scenario.get("expect_exit", 0)
+        first_text = pr_evidence.render(first_run, volatile)
+        second_text = pr_evidence.render(second_run, volatile)
+        assert first_text == second_text, scenario["id"]
+        # Neither run's endpoint may reach the output: the port is per-run.
+        assert f"127.0.0.1:{first.port}" not in first_text
+        assert f"127.0.0.1:{second.port}" not in second_text
+        if scenario["id"] in (
+            "unifi-wifi-snapshot-typical",
+            "unifi-wifi-snapshot-empty",
+            "unifi-wifi-snapshot-large",
+            "unifi-wifi-get-saved",
+        ):
+            # Snapshots carry collected_at and saved ids, so the redaction
+            # must have fired: without it this equality would prove nothing.
+            assert first_text.count(pr_evidence.VOLATILE) >= 2, scenario["id"]
+        else:
+            assert "upstream_auth" in first_text or "upstream_tls" in first_text
+
+
+def test_evidence_password_never_leaks(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    fakes, volatile = _repo_fake_scenarios()
+    # The secret really is configured: the run writes it into the fresh HOME.
+    home = tmp_path / "home"
+    pr_evidence.write_fake_home(
+        str(home),
+        pr_evidence.FakeInfo(None, 8443, "AA"),
+        {"fixture_set": "typical", "reject_login": False, "bad_fingerprint": False},
+    )
+    secret_file = home / ".config" / "housesitter" / "secrets" / "unifi_password"
+    assert secret_file.read_text() == pr_evidence.EVIDENCE_PASSWORD
+    assert "PLANTED-SECRET" in pr_evidence.EVIDENCE_PASSWORD
+    runs = []
+    for scenario in fakes:
+        try:
+            result = pr_evidence.run_scenario(ROOT, scenario, volatile=volatile)
+        except pr_evidence._SkipScenario as exc:
+            require_test_tool(False, str(exc))
+            continue
+        assert not result.get("skipped"), (scenario["id"], result)
+        assert pr_evidence.EVIDENCE_PASSWORD not in result["stdout"], scenario["id"]
+        assert pr_evidence.EVIDENCE_PASSWORD not in result["stderr"], scenario["id"]
+        text = pr_evidence.render(result, volatile)
+        assert pr_evidence.EVIDENCE_PASSWORD not in text, scenario["id"]
+        runs.append((scenario, result, result))
+    # The same string must be absent from the structured results too.
+    doc = pr_evidence._results_from_runs(fakes, volatile, fakes, True, runs, None)
+    dumped = json.dumps(doc)
+    assert pr_evidence.EVIDENCE_PASSWORD not in dumped
+    assert "PLANTED-SECRET" not in dumped
+    known_ids = {scenario["id"] for scenario in fakes}
+    assert evidence_checks.validate_results(doc, known_ids) == []
+
+
+def test_skipped_scenario_is_reported_not_dropped(tmp_path, monkeypatch):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    typical = next(
+        scenario for scenario in scenarios if scenario["id"] == "unifi-wifi-snapshot-typical"
+    )
+    base = make_tree(tmp_path, "base", "1.0.0", [typical])
+    head = make_tree(tmp_path, "head", "1.0.0", [typical])
+
+    real_popen = pr_evidence.subprocess.Popen
+
+    def _boom(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", [])
+        if any("fake_unifi.py" in str(part) for part in argv):
+            raise OSError("the network is unavailable")
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(pr_evidence.subprocess, "Popen", _boom)
+    direct = pr_evidence.run_scenario(ROOT, typical, volatile=set(volatile_keys))
+    assert direct.get("skipped")
+    assert "the fake controller could not start" in direct["skipped"]
+    results = pr_evidence.build_results(base, head)
+    (entry,) = results["scenarios"]
+    assert entry["exit_before"] == 1
+    assert entry["exit_after"] == 1
+    # The side labels differ, so the reason renders instead of vanishing
+    # into an "unchanged" row.
+    assert entry["changed"] is True
+    assert "(skipped on base: the fake controller could not start" in entry["before"]
+    assert "(skipped on head: the fake controller could not start" in entry["after"]
+    assert evidence_checks.validate_results(results, {"unifi-wifi-snapshot-typical"}) == []
+
+
+def _copy_repo_tree(tmp_path, name):
+    """A full working copy of the repo checkout (code, scripts, fixtures)."""
+    tree = tmp_path / name
+    shutil.copytree(
+        ROOT,
+        tree,
+        ignore=shutil.ignore_patterns(
+            ".git", ".venv", "__pycache__", ".pytest_cache", ".hypothesis"
+        ),
+    )
+    return tree
+
+
+def test_normalise_change_shows_in_snapshot_evidence(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    wanted = {"invoke-unifi-wifi-snapshot", "unifi-wifi-snapshot-typical"}
+    subset = [scenario for scenario in scenarios if scenario["id"] in wanted]
+    assert len(subset) == 2
+    base = _copy_repo_tree(tmp_path, "base")
+    head = _copy_repo_tree(tmp_path, "head")
+    pruned = {"volatile_keys": volatile_keys, "scenarios": subset}
+    for tree in (base, head):
+        (tree / "tests" / "evidence" / "scenarios.json").write_text(json.dumps(pruned))
+    normalise = head / "src" / "housesitter" / "modules" / "unifi_wifi" / "normalise.py"
+    text = normalise.read_text()
+    old = '"tx_rate_mbps": tx_rate / 1000'
+    assert old in text
+    normalise.write_text(text.replace(old, '"tx_rate_mbps": tx_rate / 100'))
+    results = pr_evidence.build_results(base, head)
+    by_id = {entry["id"]: entry for entry in results["scenarios"]}
+    assert by_id["unifi-wifi-snapshot-typical"]["changed"] is True
+    rebuilt = pr_evidence.render_text_from_results(results, "c" * 40)
+    assert "### `unifi-wifi-snapshot-typical`" in rebuilt
+    assert "tx_rate_mbps" in rebuilt
+    # The old no-config scenario cannot show the change: it only ever
+    # proves config_invalid. This is what the evidence showed before.
+    assert by_id["invoke-unifi-wifi-snapshot"]["changed"] is False
+    assert evidence_checks.validate_results(results, set(wanted)) == []
