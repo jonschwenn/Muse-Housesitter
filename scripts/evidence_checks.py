@@ -17,6 +17,7 @@ import argparse
 import json
 import re
 import struct
+import subprocess
 import sys
 import zlib
 from pathlib import Path
@@ -71,6 +72,7 @@ REFUSAL_REASONS = (
     "too_large",
     "bad_png",
     "bad_schema",
+    "bad_skip",
     "stale_head",
     "render_error",
     "publish_failed",
@@ -80,6 +82,10 @@ REFUSAL_SENTENCES = {
     "too_large": "the evidence exceeded its size limit, so the whole artifact was refused.",
     "bad_png": "a screenshot failed validation, so the whole artifact was refused.",
     "bad_schema": "the evidence data failed validation, so the whole artifact was refused.",
+    "bad_skip": (
+        "the base captures were skipped without identical UI inputs, "
+        "so the whole artifact was refused."
+    ),
     "stale_head": (
         "the evidence is not for the PR's current head commit; "
         "a newer run will publish."
@@ -454,6 +460,199 @@ def validate_png(data: bytes) -> list[str]:
     return []
 
 
+# UI inputs for Decision 6 (skip the base captures) --------------------------
+#
+# ONE fixed list of every repo path that can change a screenshot capture.
+# The ``ci.yml`` evidence job compares the PR's base and head commits on
+# these paths through git object ids; when every input is identical it
+# skips the base captures (but still captures the head and runs every UI
+# check on it) and records the skip in the manifest. The privileged
+# publisher re-verifies the claim with MAIN's copy of this list through the
+# GitHub API before it publishes anything.
+#
+# A path missing on one side counts as different, unless it is missing on
+# both. Directories (trailing slash) compare by tree id, files by blob id.
+#
+# What each entry covers, and why it is here:
+# - web/: the served pages, stylesheets, and scripts. Every captured pixel
+#   comes from these files.
+# - tests/fixtures/dashboard/: the fixture data every capture renders.
+# - scripts/dev_dashboard.py: serves web/ and the fixtures in the capture
+#   job. It imports only the stdlib (pinned by test), so it needs no
+#   wider entry; if it ever gains a repo-local import, the import test
+#   fails until that file is listed here.
+# - scripts/ui_evidence.py: the capture, the UI checks, and the manifest
+#   builder.
+# - scripts/make_dashboard_fixtures.py: generates the fixture files above.
+# - scripts/evidence_checks.py: this file, the list itself. Any edit to the
+#   list changes this blob, so a PR that weakens the list can never claim
+#   a skip; the publisher (with main's list) would refuse it anyway.
+# - pyproject.toml: pins Playwright (the ``ui`` extra), whose browser
+#   binary renders the pixels.
+# - .github/workflows/ci.yml: the capture step (browser channel, views).
+#
+# Left out on purpose:
+# - src/housesitter/**: the dashboard server. Captures use
+#   scripts/dev_dashboard.py, never the real server.
+# - scripts/pr_evidence.py and scripts/publish_evidence.py: they render the
+#   comment from the manifest but never serve or screenshot a page.
+# - tests/** (except the fixtures above): pins, not pixels.
+# - docs/**, README.md, web/DESIGN.md prose: words, not captures.
+#   (web/ itself is listed because the capture serves it as bytes.)
+UI_INPUTS = (
+    "web/",
+    "tests/fixtures/dashboard/",
+    "scripts/dev_dashboard.py",
+    "scripts/ui_evidence.py",
+    "scripts/make_dashboard_fixtures.py",
+    "scripts/evidence_checks.py",
+    "pyproject.toml",
+    ".github/workflows/ci.yml",
+)
+
+# The manifest's ``base_skipped`` value when the base captures were
+# skipped, and the sentence the comment states in that case. Duplicated in
+# scripts/pr_evidence.py and scripts/ui_evidence.py (which never import
+# each other); a test pins the copies identical.
+UI_SKIP_REASON = "ui_inputs_identical"
+UI_SKIP_NOTE = "Before not captured: UI inputs identical."
+
+# Cap for a fetched git-trees API response. The listing for this repo is
+# far smaller; the cap only bounds what the publisher reads and parses.
+TREES_MAX_BYTES = 1_000_000
+
+
+def _checked_sha(sha: str, name: str) -> str:
+    if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+        raise ValueError(f"bad {name} SHA: {sha!r}")
+    return sha
+
+
+def git_object_id(repo: Path, sha: str, path: str) -> str | None:
+    """The blob or tree id of ``path`` at commit ``sha``, or None if missing.
+
+    Directories compare by tree id, files by blob id; both come from one
+    ``git rev-parse <sha>:<path>`` call. Only the two commits' objects are
+    read, never history, so a shallow checkout holding both commits is
+    enough. Raises ValueError for a malformed SHA, OSError when git fails.
+    """
+    _checked_sha(sha, "commit")
+    if not path or ".." in path.split("/"):
+        raise ValueError(f"bad input path: {path!r}")
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", f"{sha}:{path}"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def _input_lookup_key(path: str) -> str:
+    return path[:-1] if path.endswith("/") else path
+
+
+def ui_inputs_differ_git(
+    repo: Path, base_sha: str, head_sha: str, inputs: tuple = UI_INPUTS
+) -> list[str]:
+    """Listed inputs whose git object ids differ between two commits."""
+    _checked_sha(base_sha, "base")
+    _checked_sha(head_sha, "head")
+    try:
+        base_exists = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{base_sha}^{{commit}}"],
+            capture_output=True,
+        ).returncode == 0
+        head_exists = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{head_sha}^{{commit}}"],
+            capture_output=True,
+        ).returncode == 0
+    except OSError as exc:
+        raise OSError(f"cannot run git in {repo}: {exc}") from exc
+    if not base_exists or not head_exists:
+        raise OSError(f"cannot resolve base or head commit in {repo}")
+    differ = []
+    for path in inputs:
+        base_id = git_object_id(repo, base_sha, _input_lookup_key(path))
+        head_id = git_object_id(repo, head_sha, _input_lookup_key(path))
+        if base_id != head_id and (base_id is not None or head_id is not None):
+            differ.append(path)
+    return differ
+
+
+def parse_tree_json(doc: object, expected_sha: str) -> dict:
+    """Map a git-trees API response to ``{path: object id}``.
+
+    The response lists blobs and trees flat with ``recursive=1``; directory
+    paths carry no trailing slash. Refuses a truncated listing, a response
+    for another commit, and malformed shapes: the publisher cannot verify
+    its claim from any of those, so all of them fail closed.
+    """
+    _checked_sha(expected_sha, "expected")
+    if not isinstance(doc, dict) or not isinstance(doc.get("tree"), list):
+        raise ValueError("tree response must be an object with a tree list")
+    if doc.get("truncated"):
+        raise ValueError("tree listing is truncated")
+    if doc.get("sha") != expected_sha:
+        raise ValueError("tree is not for the expected commit")
+    mapping: dict = {}
+    for entry in doc["tree"]:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("sha"), str)
+            or not SHA_RE.fullmatch(entry["sha"])
+        ):
+            raise ValueError("tree has a malformed entry")
+        mapping[entry["path"]] = entry["sha"]
+    return mapping
+
+
+def check_ui_skip(
+    base_sha: str, head_sha: str, base_map: dict, head_map: dict
+) -> None:
+    """Accept a base skip, or raise ValueError when it cannot be honored.
+
+    Both maps are ``{path: object id}`` for the listed inputs (missing
+    paths are simply absent). Keys may carry the input's trailing slash or
+    the API's bare form; both normalize the same way. Anything differing,
+    or anything missing from the maps that is not missing on both sides,
+    refuses: a skipped capture is reported, never silently missing, and
+    never trusted on a claim.
+    """
+    _checked_sha(base_sha, "base")
+    _checked_sha(head_sha, "head")
+    if not isinstance(base_map, dict) or not isinstance(head_map, dict):
+        raise ValueError("UI tree data is missing or unreadable")
+    base_ids = {_input_lookup_key(str(key)): value for key, value in base_map.items()}
+    head_ids = {_input_lookup_key(str(key)): value for key, value in head_map.items()}
+    differ = []
+    for path in UI_INPUTS:
+        key = _input_lookup_key(path)
+        base_id = base_ids.get(key)
+        head_id = head_ids.get(key)
+        if base_id != head_id and (base_id is not None or head_id is not None):
+            differ.append(path)
+    if differ:
+        # The paths are this module's own allow-listed constants, so they
+        # are safe to log; the posted notice stays fixed text.
+        raise ValueError(f"UI inputs differ: {', '.join(differ)}")
+
+
+def manifest_claims_skip(ui_dir: Path) -> bool:
+    """Whether the artifact's manifest claims the base captures were skipped.
+
+    Unreadable or corrupt manifests return False: the renderer refuses them
+    on its own, with its own reason.
+    """
+    try:
+        doc = json.loads((Path(ui_dir) / "ui_manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(doc, dict) and "base_skipped" in doc
+
+
 def cmd_check(args) -> int:
     """Run the publisher's refusal decision over an artifact directory.
 
@@ -461,15 +660,60 @@ def cmd_check(args) -> int:
     an honest mistake fails the job (red ``ci-ok``) before upload. This
     runs the PR's own copy of every script, so it catches honest mistakes
     only; the publisher's notice (main's code) covers hostile artifacts.
+    A manifest that claims the base captures were skipped is re-verified
+    here against the local git objects with this copy's input list — never
+    against a scenario list — so the check agrees with the publisher
+    except when the PR weakened its own list, which the publisher catches.
     Exit codes mirror the publisher: 0 the publisher would publish, 1 it
     would refuse (the reason prints to stdout), 2 bad caller arguments.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import publish_evidence  # noqa: E402  (same copy: the PR's, or main's)
 
+    base_map = head_map = None
+    if manifest_claims_skip(Path(args.artifact_dir) / "ui_out"):
+        # The claim must be verifiable from local git objects: without the
+        # SHAs and a checkout holding both commits, fail closed.
+        # getattr: direct cmd_check callers may build their own namespace
+        # without the newer verification arguments.
+        base_sha = getattr(args, "base_sha", None)
+        git_dir = getattr(args, "git_dir", None)
+        if base_sha is None or git_dir is None:
+            print(
+                "evidence_checks: publisher would refuse: bad_skip: "
+                "base skip is unverifiable without --base-sha and --git-dir"
+            )
+            return 1
+        try:
+            base_map = {
+                _input_lookup_key(path): git_object_id(
+                    Path(git_dir), base_sha, _input_lookup_key(path)
+                )
+                for path in UI_INPUTS
+            }
+            head_map = {
+                _input_lookup_key(path): git_object_id(
+                    Path(git_dir), args.head_sha, _input_lookup_key(path)
+                )
+                for path in UI_INPUTS
+            }
+        except ValueError as exc:
+            print(f"evidence_checks: bad argument: {exc}", file=sys.stderr)
+            return 2
+        except OSError as exc:
+            print(
+                f"evidence_checks: publisher would refuse: bad_skip: {exc}"
+            )
+            return 1
     try:
         publish_evidence.render_comment(
-            Path(args.artifact_dir), args.repo, args.pr, args.head_sha
+            Path(args.artifact_dir),
+            args.repo,
+            args.pr,
+            args.head_sha,
+            base_sha=getattr(args, "base_sha", None),
+            base_map=base_map,
+            head_map=head_map,
         )
     except publish_evidence.PublishError as exc:
         # The message goes to the job log (PR-visible anyway) so an honest
@@ -483,6 +727,36 @@ def cmd_check(args) -> int:
     return 0
 
 
+def cmd_inputs_identical(args) -> int:
+    """Decide whether the base captures can be skipped (exit 0) or not (1).
+
+    Used by the ``ci.yml`` evidence job before capturing: exit 0 records
+    that every UI input is identical between the base and head commits, so
+    the job may pass ``--skip-base`` to ``ui_evidence.py``. Exit 1 means an
+    input differs (named on stdout) or cannot be compared; the job then
+    captures both sides, exactly as today. Exit 2 is a bad caller argument.
+    Nothing here reads a scenario list, so this decision agrees with the
+    publisher's re-verification for every honest run.
+    """
+    try:
+        differ = ui_inputs_differ_git(
+            Path(args.git_dir), args.base_sha, args.head_sha
+        )
+    except ValueError as exc:
+        print(f"evidence_checks: bad argument: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"evidence_checks: cannot compare UI inputs: {exc}")
+        return 1
+    if differ:
+        print(f"evidence_checks: UI inputs differ: {', '.join(differ)}")
+        return 1
+    print(
+        f"evidence_checks: UI inputs identical ({len(UI_INPUTS)} paths)"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -493,7 +767,25 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--repo", required=True)
     check.add_argument("--pr", required=True, type=int)
     check.add_argument("--head-sha", required=True)
+    check.add_argument(
+        "--base-sha",
+        default=None,
+        help="base commit SHA (required to verify a base skip claim)",
+    )
+    check.add_argument(
+        "--git-dir",
+        default=None,
+        help="checkout holding the base and head commits (with --base-sha)",
+    )
     check.set_defaults(func=cmd_check)
+    identical = sub.add_parser(
+        "inputs-identical",
+        help="exit 0 when every UI input is identical between two commits",
+    )
+    identical.add_argument("--git-dir", required=True)
+    identical.add_argument("--base-sha", required=True)
+    identical.add_argument("--head-sha", required=True)
+    identical.set_defaults(func=cmd_inputs_identical)
     args = parser.parse_args(argv)
     try:
         return args.func(args)

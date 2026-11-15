@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import struct
+import subprocess
 import zlib
 from pathlib import Path
 
@@ -190,6 +191,7 @@ def test_refusal_reasons_are_a_fixed_enum():
         "too_large",
         "bad_png",
         "bad_schema",
+        "bad_skip",
         "stale_head",
         "render_error",
         "publish_failed",
@@ -697,6 +699,418 @@ def test_trailing_zlib_data_is_rejected():
     raw = _raw_rgba()
     payload = zlib.compress(raw) + zlib.compress(b"garbage")
     assert evidence_checks.validate_png(_png_idat(4, 4, 6, payload)) != []
+
+
+# Decision 6 (skip the base captures when every UI input is identical). ------
+#
+# One fixed list of UI-input paths lives in evidence_checks (trusted,
+# ci-guard-protected code shared by the PR-side check and main's
+# publisher). Skip decisions compare git object ids, never file contents or
+# PR claims.
+
+
+def test_ui_inputs_cover_every_capture_input():
+    # Loosening this list silently widens what counts as "identical", so the
+    # values are pinned here: changing them is a visible change to this
+    # protected test file.
+    assert set(evidence_checks.UI_INPUTS) == {
+        "web/",
+        "tests/fixtures/dashboard/",
+        "scripts/dev_dashboard.py",
+        "scripts/ui_evidence.py",
+        "scripts/make_dashboard_fixtures.py",
+        "scripts/evidence_checks.py",
+        "pyproject.toml",
+        ".github/workflows/ci.yml",
+    }
+    # Directories carry a trailing slash; everything else is a file.
+    for path in evidence_checks.UI_INPUTS:
+        assert path == path.strip() and ".." not in path.split("/")
+        if path.endswith("/"):
+            assert (ROOT / path).is_dir(), path
+        else:
+            assert (ROOT / path).is_file(), path
+    assert evidence_checks.UI_SKIP_REASON == "ui_inputs_identical"
+    assert (
+        evidence_checks.UI_SKIP_NOTE
+        == "Before not captured: UI inputs identical."
+    )
+
+
+def _git(repo, *args):
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _git_commit(repo, message):
+    _git(
+        repo,
+        "-c", "user.email=test@example.com",
+        "-c", "user.name=evidence-test",
+        "commit", "-qm", message,
+    )
+    done = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return done.stdout.strip()
+
+
+def _git_repo_with_inputs(tmp_path, name="repo"):
+    """A git repo holding every UI input path, committed once."""
+    repo = tmp_path / name
+    for path in evidence_checks.UI_INPUTS:
+        target = repo / path
+        if path.endswith("/"):
+            (target / "placeholder.txt").parent.mkdir(parents=True)
+            (target / "placeholder.txt").write_text("fixture\n")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"# {path}\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    return repo, _git_commit(repo, "inputs")
+
+
+def test_identical_inputs_compare_equal(tmp_path):
+    repo, sha = _git_repo_with_inputs(tmp_path)
+    assert evidence_checks.ui_inputs_differ_git(repo, sha, sha) == []
+
+
+def test_one_changed_input_is_reported(tmp_path):
+    repo, base = _git_repo_with_inputs(tmp_path)
+    (repo / "web" / "placeholder.txt").write_text("changed\n")
+    _git(repo, "add", "-A")
+    head = _git_commit(repo, "change web")
+    assert evidence_checks.ui_inputs_differ_git(repo, base, head) == ["web/"]
+
+
+def test_input_missing_on_one_side_counts_as_different(tmp_path):
+    repo, base = _git_repo_with_inputs(tmp_path)
+    (repo / "web" / "placeholder.txt").unlink()
+    _git(repo, "add", "-A")
+    head = _git_commit(repo, "drop web")
+    assert "web/" in evidence_checks.ui_inputs_differ_git(repo, base, head)
+
+
+def test_input_missing_on_both_sides_is_identical(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "notes.txt").write_text("docs only\n")
+    _git(repo, "add", "-A")
+    base = _git_commit(repo, "one")
+    (repo / "notes.txt").write_text("docs only, revised\n")
+    _git(repo, "add", "-A")
+    head = _git_commit(repo, "two")
+    assert (
+        evidence_checks.ui_inputs_differ_git(repo, base, head, inputs=["web/"])
+        == []
+    )
+
+
+def test_inputs_identical_command_reports_the_decision(tmp_path, capsys):
+    repo, sha = _git_repo_with_inputs(tmp_path)
+    assert (
+        evidence_checks.main(
+            [
+                "inputs-identical",
+                "--git-dir", str(repo),
+                "--base-sha", sha,
+                "--head-sha", sha,
+            ]
+        )
+        == 0
+    )
+    assert "identical" in capsys.readouterr().out
+
+
+def test_inputs_identical_command_reports_differences(tmp_path, capsys):
+    repo, base = _git_repo_with_inputs(tmp_path)
+    (repo / "scripts" / "ui_evidence.py").write_text("# changed\n")
+    _git(repo, "add", "-A")
+    head = _git_commit(repo, "change capture")
+    assert (
+        evidence_checks.main(
+            [
+                "inputs-identical",
+                "--git-dir", str(repo),
+                "--base-sha", base,
+                "--head-sha", head,
+            ]
+        )
+        == 1
+    )
+    assert "scripts/ui_evidence.py" in capsys.readouterr().out
+
+
+def test_inputs_identical_command_rejects_bad_shas(tmp_path, capsys):
+    repo, _ = _git_repo_with_inputs(tmp_path)
+    assert (
+        evidence_checks.main(
+            [
+                "inputs-identical",
+                "--git-dir", str(repo),
+                "--base-sha", "nope",
+                "--head-sha", "a" * 40,
+            ]
+        )
+        == 2
+    )
+
+
+def _tree_doc(sha, entries):
+    """A git-trees API response shape: dir paths carry no trailing slash."""
+    kinds = {"web": "tree", "tests/fixtures/dashboard": "tree"}
+    return {
+        "sha": sha,
+        "url": "https://api.github.com/repos/o/n/git/trees/" + sha,
+        "tree": [
+            {
+                "path": path,
+                "mode": "040000" if kinds.get(path) == "tree" else "100644",
+                "type": kinds.get(path, "blob"),
+                "sha": "e" * 40 if kinds.get(path) == "tree" else "b" * 40,
+            }
+            for path in entries
+        ],
+        "truncated": False,
+    }
+
+
+def test_parse_tree_json_keeps_listed_paths():
+    sha = "a" * 40
+    doc = _tree_doc(sha, ["web", "scripts/ui_evidence.py", "README.md"])
+    mapping = evidence_checks.parse_tree_json(doc, sha)
+    assert mapping["web"] == "e" * 40
+    assert mapping["scripts/ui_evidence.py"] == "b" * 40
+
+
+def test_parse_tree_json_refuses_a_truncated_listing():
+    sha = "a" * 40
+    doc = _tree_doc(sha, ["web"])
+    doc["truncated"] = True
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_json(doc, sha)
+
+
+def test_parse_tree_json_refuses_a_mismatched_sha():
+    doc = _tree_doc("a" * 40, ["web"])
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_json(doc, "b" * 40)
+
+
+def test_parse_tree_json_refuses_bad_shapes():
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_json({"tree": []}, "a" * 40)
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_json(
+            {"sha": "a" * 40, "tree": [{"path": "web"}]}, "a" * 40
+        )
+
+
+def test_check_ui_skip_accepts_identical_trees():
+    base = {"web": "e" * 40, "scripts/ui_evidence.py": "b" * 40}
+    assert (
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, dict(base), dict(base))
+        is None
+    )
+
+
+def test_check_ui_skip_refuses_a_differing_input():
+    base = {"web": "e" * 40}
+    head = {"web": "d" * 40}
+    with pytest.raises(ValueError, match="web/"):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, base, head)
+
+
+def test_check_ui_skip_refuses_unverifiable_maps():
+    with pytest.raises(ValueError):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, None, {})
+    with pytest.raises(ValueError):
+        evidence_checks.check_ui_skip("nope", "c" * 40, {}, {})
+
+
+def test_manifest_claims_skip_only_with_the_reason(tmp_path):
+    ui_dir = tmp_path / "ui_out"
+    ui_dir.mkdir()
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    (ui_dir / "ui_manifest.json").write_text(
+        json.dumps({"version": 1, "captures": []})
+    )
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    (ui_dir / "ui_manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "base_skipped": "ui_inputs_identical",
+                "captures": [],
+            }
+        )
+    )
+    assert evidence_checks.manifest_claims_skip(ui_dir) is True
+
+
+def _covered_by_inputs(path):
+    """Whether a repo-relative path is a listed input or under a listed dir."""
+    text = path.as_posix()
+    for entry in evidence_checks.UI_INPUTS:
+        if entry.endswith("/"):
+            if text == entry.rstrip("/") or text.startswith(entry):
+                return True
+        elif text == entry:
+            return True
+    return False
+
+
+def _transitive_repo_imports(start):
+    """Repo-local files reachable from ``start`` through imports.
+
+    Stdlib names resolve outside the repo (stdlib dir, built in); anything
+    else must resolve to a file under the repo root. Unresolvable names fail
+    closed: an import the test cannot see is an import the list cannot cover.
+    """
+    import ast
+    import importlib.util
+
+    stdlib_marker = ("site-packages", "dist-packages")
+    seen = set()
+    queue = [start]
+    while queue:
+        path = queue.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.update(part.name.split(".")[0] for part in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    raise AssertionError(
+                        f"{path}: relative imports are not covered by UI_INPUTS"
+                    )
+                if node.module is not None:
+                    names.add(node.module.split(".")[0])
+        for name in names:
+            if name == "__future__":
+                continue
+            try:
+                spec = importlib.util.find_spec(name)
+            except ImportError:
+                spec = None
+            if spec is None:
+                raise AssertionError(f"{path}: unresolvable import {name!r}")
+            origin = spec.origin
+            if origin in (None, "built-in", "frozen"):
+                continue
+            resolved = Path(origin).resolve()
+            if resolved == ROOT or ROOT in resolved.parents:
+                if resolved.suffix == ".py" and resolved.is_file():
+                    queue.append(resolved)
+                elif not _covered_by_inputs(resolved.relative_to(ROOT)):
+                    raise AssertionError(
+                        f"{path}: repo-local import {name!r} "
+                        f"({resolved.relative_to(ROOT).as_posix()}) "
+                        "is not covered by UI_INPUTS"
+                    )
+            elif any(marker in resolved.parts for marker in stdlib_marker):
+                raise AssertionError(
+                    f"{path}: third-party import {name!r} is not covered "
+                    "by UI_INPUTS"
+                )
+            # Anything else is a stdlib location outside site packages.
+    return seen
+
+
+def test_ui_inputs_cover_dev_dashboard_imports():
+    """dev_dashboard (and everything it imports) stays within the input list.
+
+    The capture serves web/ and the fixtures through dev_dashboard only, so
+    a repo-local import outside UI_INPUTS could change captures without
+    breaking the skip. This fails until the new file is listed.
+    """
+    start = ROOT / "scripts" / "dev_dashboard.py"
+    assert _covered_by_inputs(start.relative_to(ROOT))
+    assert _transitive_repo_imports(start) == {start}
+
+
+def _skip_gate_artifact(tmp_path, repo, head):
+    """An artifact whose manifest claims the base captures were skipped."""
+    artifact = _gate_artifact(tmp_path)
+    doc = json.loads((artifact / "results.json").read_text())
+    doc["metadata"]["head_sha"] = head
+    (artifact / "results.json").write_text(json.dumps(doc))
+    manifest = json.loads((artifact / "ui_out" / "ui_manifest.json").read_text())
+    manifest["captures"] = [
+        {
+            "fixture": "typical",
+            "view": "index-phone",
+            "status": "unchanged",
+            "base": None,
+            "head": None,
+            "diff": None,
+            "head_problems": [],
+        }
+    ]
+    manifest["base_skipped"] = "ui_inputs_identical"
+    (artifact / "ui_out" / "ui_manifest.json").write_text(json.dumps(manifest))
+    for png in (artifact / "ui_out").glob("*.png"):
+        png.unlink()
+    return artifact
+
+
+def _check_skip(artifact, repo, base, head):
+    return evidence_checks.main(
+        [
+            "check",
+            "--artifact-dir", str(artifact),
+            "--repo", "example-owner/example-repo",
+            "--pr", "7",
+            "--head-sha", head,
+            "--base-sha", base,
+            "--git-dir", str(repo),
+        ]
+    )
+
+
+def test_check_accepts_a_verified_skip(tmp_path, capsys):
+    repo, sha = _git_repo_with_inputs(tmp_path)
+    assert _check_skip(_skip_gate_artifact(tmp_path, repo, sha), repo, sha, sha) == 0
+
+
+def test_check_refuses_a_skip_with_differing_inputs(tmp_path, capsys):
+    repo, base = _git_repo_with_inputs(tmp_path)
+    (repo / "web" / "placeholder.txt").write_text("changed\n")
+    _git(repo, "add", "-A")
+    head = _git_commit(repo, "change web")
+    assert _check_skip(_skip_gate_artifact(tmp_path, repo, head), repo, base, head) == 1
+    assert "bad_skip" in capsys.readouterr().out
+
+
+def test_check_refuses_a_skip_it_cannot_verify(tmp_path, capsys):
+    repo, sha = _git_repo_with_inputs(tmp_path)
+    artifact = _skip_gate_artifact(tmp_path, repo, sha)
+    assert (
+        evidence_checks.main(
+            [
+                "check",
+                "--artifact-dir", str(artifact),
+                "--repo", "example-owner/example-repo",
+                "--pr", "7",
+                "--head-sha", sha,
+            ]
+        )
+        == 1
+    )
+    assert "bad_skip" in capsys.readouterr().out
 
 
 def test_invalid_filter_byte_is_rejected():

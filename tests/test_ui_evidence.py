@@ -1069,6 +1069,192 @@ def test_validator_ignores_the_browser_key(tmp_path):
     assert ui_evidence.validate_artifact(directory) == []
 
 
+# Decision 6 (skip the base captures when every UI input is identical). ----
+
+
+def test_build_manifest_with_skipped_base_forces_unchanged(tmp_path):
+    # The skip path never runs the base capture, so there are no base PNGs;
+    # every pair is recorded unchanged with the skip reason on top.
+    base, head = _manifest_trees(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    head_shot = rgb_png(4, 4)
+    for view in VIEWS_UNDER_TEST:
+        (out / f"typical__{view}__head.png").write_bytes(head_shot)
+    records = {
+        f"typical__{view}__head.png": {"fixture": "typical", "problems": []}
+        for view in VIEWS_UNDER_TEST
+    }
+    manifest = ui_evidence.build_manifest(
+        base, head, out, records, base_skipped=True
+    )
+    assert manifest["base_skipped"] == "ui_inputs_identical"
+    assert [c["status"] for c in manifest["captures"]] == ["unchanged"] * len(
+        VIEWS_UNDER_TEST
+    )
+    assert [c["base"] for c in manifest["captures"]] == [None] * len(
+        VIEWS_UNDER_TEST
+    )
+    assert [c["head"] for c in manifest["captures"]] == [None] * len(
+        VIEWS_UNDER_TEST
+    )
+    # Unchanged pairs drop their PNGs, so a skipped run uploads nothing but
+    # the manifest and the push step stays empty.
+    assert list(out.glob("*.png")) == []
+
+
+def test_build_manifest_without_a_skip_claim_has_no_skip_key(tmp_path):
+    base, head = _manifest_trees(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    shot = rgb_png(4, 4)
+    _write_pair(out, shot, shot)
+    manifest = ui_evidence.build_manifest(base, head, out, {})
+    assert "base_skipped" not in manifest
+
+
+def test_skip_section_states_the_skip_plainly():
+    manifest = make_manifest(status="unchanged", fixture="typical")
+    manifest["captures"][0]["head"] = None
+    manifest["base_skipped"] = "ui_inputs_identical"
+    full, table = ui_evidence.build_ui_section(
+        manifest, REPO, 7, HEAD_SHA, 60_000, True
+    )
+    assert "Before not captured: UI inputs identical." in full
+    assert "Before not captured: UI inputs identical." in table
+
+
+def test_full_capture_section_has_no_skip_sentence():
+    full, table = ui_evidence.build_ui_section(
+        make_manifest(), REPO, 7, HEAD_SHA, 60_000, True
+    )
+    assert "Before not captured" not in full
+    assert "Before not captured" not in table
+
+
+def test_validator_accepts_a_skipped_manifest(tmp_path):
+    directory = tmp_path / "skipped"
+    directory.mkdir()
+    (directory / ui_evidence.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "base_skipped": "ui_inputs_identical",
+                "captures": [
+                    {
+                        "fixture": "typical",
+                        "view": "index-phone",
+                        "status": "unchanged",
+                        "base": None,
+                        "head": None,
+                        "diff": None,
+                        "head_problems": ["console.error: boom"],
+                    }
+                ],
+            }
+        )
+    )
+    assert ui_evidence.validate_artifact(directory) == []
+
+
+def test_validator_rejects_a_bad_skip_reason(tmp_path):
+    directory = tmp_path / "badskip"
+    directory.mkdir()
+    (directory / ui_evidence.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "base_skipped": "trust me",
+                "captures": [],
+            }
+        )
+    )
+    assert ui_evidence.validate_artifact(directory) != []
+
+
+def test_validator_rejects_a_skip_with_changed_captures(tmp_path):
+    directory = write_valid_artifact(tmp_path / "skipchanged")
+    manifest = json.loads((directory / ui_evidence.MANIFEST_NAME).read_text())
+    manifest["base_skipped"] = "ui_inputs_identical"
+    (directory / ui_evidence.MANIFEST_NAME).write_text(json.dumps(manifest))
+    assert ui_evidence.validate_artifact(directory) != []
+
+
+def test_main_skips_the_base_capture_with_skip_base(tmp_path, monkeypatch):
+    # Same browser-free harness as the browser test above: --skip-base must
+    # not serve the base tree at all, but still capture the head and record
+    # the skip in the manifest.
+    import sys
+    import types
+
+    playwright = types.ModuleType("playwright")
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = lambda: None
+    playwright.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", playwright)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+    monkeypatch.delenv("HOUSESITTER_LIVE", raising=False)
+    monkeypatch.delenv("HOUSESITTER_CONFIG", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    calls = []
+
+    def fake_capture(tree, out_dir, side, check, channel=None):
+        calls.append(side)
+        shot = rgb_png(4, 4)
+        for fixture in ui_evidence.fixtures_in(tree):
+            for view_id, *_ in ui_evidence.VIEWS:
+                (out_dir / ui_evidence.capture_name(fixture, view_id, side)).write_bytes(
+                    shot
+                )
+        return {}, dict(HEAD_BROWSER)
+
+    monkeypatch.setattr(ui_evidence, "capture_side", fake_capture)
+    base, head = _manifest_trees(tmp_path)
+    out = tmp_path / "out"
+    rc = ui_evidence.main(
+        [
+            "--base-tree", str(base),
+            "--head-tree", str(head),
+            "--out-dir", str(out),
+            "--repo", REPO,
+            "--pr", "7",
+            "--head-sha", HEAD_SHA,
+            "--skip-base",
+        ]
+    )
+    assert rc == 0
+    assert calls == ["head"]
+    manifest = json.loads((out / ui_evidence.MANIFEST_NAME).read_text())
+    assert manifest["base_skipped"] == "ui_inputs_identical"
+    assert [c["status"] for c in manifest["captures"]] == ["unchanged"] * len(
+        VIEWS_UNDER_TEST
+    )
+
+
+def test_evidence_job_fetches_only_the_two_commits():
+    # R9: a shallow head checkout plus --depth 1 fetches of exactly the
+    # base and head commits, never a full-history checkout. Raw SHAs are
+    # not fetchable refs, so the base comes from its branch and the head
+    # from the pull-request head ref, each checked against the event SHA.
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "fetch-depth: 1" in workflow
+    assert "fetch-depth: 0" not in workflow
+    assert 'fetch --depth 1 origin "$BASE_REF"' in workflow
+    assert 'fetch --depth 1 origin "pull/$PR/head"' in workflow
+    assert "worktree add" in workflow
+    assert "persist-credentials: false" in workflow
+
+
+def test_evidence_job_decides_the_skip_from_git_object_ids():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "inputs-identical" in workflow
+    assert "SKIP_BASE" in workflow
+    assert "--skip-base" in workflow
+    assert "--base-sha" in workflow
+    assert "--git-dir" in workflow
+
+
 def test_section_names_the_capturing_browser():
     manifest = make_manifest()
     manifest["browser"] = {"channel": "chrome", "version": "131.0.6778"}
