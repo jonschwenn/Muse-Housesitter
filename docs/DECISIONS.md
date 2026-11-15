@@ -107,8 +107,9 @@ handoff's "license not chosen; don't publish."
 - **Amended (2026-11-15, Jon):** module-output evidence now runs the real
   CLI against a shared fake controller and invented fixtures. See D37.
 - **Amended (2026-11-15, Jon):** base dashboard screenshots may be skipped
-  when UI inputs are identical, with an explicit notice and independent
-  verification by main's publisher. See D38.
+  when no capture-affecting path differs, with an explicit notice and
+  independent verification bound to the compared base and head commits
+  by main's publisher. See D38.
 
 ### D12. Minimal GitHub-only CI, with `main` locked by a ruleset (2026-11-04, Jon)
 - **CI:** one workflow, `.github/workflows/ci.yml`, with three jobs
@@ -790,31 +791,32 @@ handoff's "license not chosen; don't publish."
   such as `describe` (about 16 KB of output) can still squeeze Tests.
   Changing the publisher's shrink order is a separate follow-up.
 
-### D38. Skip base screenshots when UI inputs are identical; fetch only two commits (2026-11-15, Jon)
+### D38. Skip base screenshots when no capture-affecting path differs; fetch only two commits (2026-11-15, Jon)
 - **Decision:** option A of evidence Decision 6: skip base dashboard
-  captures when every path in `scripts/evidence_checks.py`'s fixed
-  `UI_INPUTS` list has the same git object id at the PR's base and head.
-  Missing on one side counts as different; missing on both counts as
-  identical. Head captures and every UI check still run. The manifest
-  records `base_skipped: "ui_inputs_identical"`; the comment always says
-  "Before not captured: UI inputs identical." See REVIEW.md, "Evidence,"
-  for the paths and what each covers.
-  The PR-side check re-verifies against local git objects before upload.
-  Main's publisher uses its own list and GitHub API tree listings, fetching
-  the head tree from the head repository so forks work. A differing input,
-  failed fetch or truncated listing refuses publication with `bad_skip`.
-  Token permissions are unchanged.
+  captures when no capture-affecting path differs between base and head.
+  Every differing path must be on `scripts/evidence_checks.py`'s fixed safe
+  list; mode changes and changed symlink or submodule entries force full
+  captures. Head captures and every UI check still run. The manifest records
+  `base_skipped: "ui_inputs_identical"` and both compared SHAs. Every comment
+  size tier says "Before not captured: UI inputs identical."
+  Main's publisher independently checks GitHub API tree listings with its
+  own safe list and requires the recorded SHAs to match the API-resolved
+  base and current PR head. An unsafe change, SHA mismatch, failed fetch or
+  truncated listing refuses with `bad_skip`. See REVIEW.md, "Evidence,"
+  for the safe paths. Token permissions are unchanged.
   For R9, the evidence job checks out at depth 1, fetches only the exact
   base and head commits by SHA at depth 1, and adds the base worktree.
   It never needs full history or uses a moving branch tip.
 - **Why:** in the supplied local measurement of a docs-only change with
   seven fixtures and four views, full capture took about 62 s; skipping
-  base captures took about 31 s. Only the two commits' objects are needed
-  to compare inputs and run evidence.
-- **Rejected:** option B, always capturing both sides: simpler, but costs
-  every PR roughly 30–50 s. Fetching full history adds work that evidence
-  does not need; using a branch tip would change the base when main moves.
-- **Known limit:** an influence on rendering outside the list could hide a
-  visual change until it is added. The import guard covers only the dev
-  server's imports, including transitive imports; it does not prove the
-  list covers every rendering input.
+  base captures took about 31 s. A fixed safe list makes unknown paths
+  force captures. Binding the skip to both SHAs prevents reuse after main
+  moves. Only two commits' objects are needed to compare and run evidence.
+- **Rejected:** always capturing both sides (roughly 30–50 s extra per PR);
+  an allow-list of UI inputs (can't be made complete: a new file can shadow
+  a standard-library module); full history (unneeded work); a moving branch
+  tip (changes the base).
+- **Known limit:** a moved base refuses the skip even if the new trees
+  would allow it. Update the branch before merging; the next run evidences
+  the new base. The safe list depends on the capture setup described in
+  REVIEW.md and must be reviewed when that setup changes.
