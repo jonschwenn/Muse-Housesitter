@@ -742,7 +742,10 @@ def _run_fake_scenario(
         "exit": exit_code,
         "stdout": combined,
         "stderr": "",
-        "sdk_size": len(json.dumps(combined)) - 2,
+        # The SDK measures each call's raw stdout, not this rendering; a
+        # stepped scenario reports its largest call, the one closest to the
+        # budget.
+        "sdk_size": max(len(json.dumps(step["stdout"])) - 2 for step in step_results),
         "stepped": True,
     }
 
@@ -1272,10 +1275,14 @@ def _results_from_runs(
         after_text = render(after, volatile)
         new = before is None or scenario["id"] not in base_ids
         command = ["housesitter", *scenario["argv"]]
-        if scenario.get("fake") is not None:
-            step_count = len(scenario.get("steps") or [None])
-            if step_count > 1:
-                command = [*command, f"[+{step_count - 1} more step(s)]"]
+        if scenario.get("fake") is not None and scenario.get("steps"):
+            # Show every step in order, as authored (replay references
+            # unresolved), so the table names what actually ran.
+            command = []
+            for index, step in enumerate(scenario["steps"]):
+                if index:
+                    command.append("&&")
+                command.extend(["housesitter", *step["argv"]])
         entries.append(
             {
                 "id": scenario["id"],

@@ -1417,3 +1417,52 @@ def test_normalise_change_shows_in_snapshot_evidence(tmp_path):
     # proves config_invalid. This is what the evidence showed before.
     assert by_id["invoke-unifi-wifi-snapshot"]["changed"] is False
     assert evidence_checks.validate_results(results, set(wanted)) == []
+
+
+def test_stepped_scenario_reports_sdk_size_and_every_step(tmp_path):
+    # The size column is "envelope size as the SDK measures it": for a
+    # stepped scenario it must be the largest single call's raw stdout,
+    # never the size of the multi-step rendering. The command column must
+    # name every step that ran, in order.
+    require_test_tool(openssl is not None, "openssl is not installed")
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    stepped = next(
+        scenario for scenario in scenarios if scenario["id"] == "unifi-wifi-get-saved"
+    )
+    volatile = set(volatile_keys)
+    spec = pr_evidence.validate_fake_spec(stepped["fake"], stepped["id"])
+    raw_sizes = []
+    real_run_one_step = pr_evidence._run_one_step
+
+    def recording(*args, **kwargs):
+        result = real_run_one_step(*args, **kwargs)
+        raw_sizes.append(len(json.dumps(result["stdout"])) - 2)
+        return result
+
+    certdir = tempfile.mkdtemp(prefix="hs-evidence-test-cert-", dir=str(tmp_path))
+    try:
+        cert_paths = pr_evidence.make_cert(certdir)
+        with pr_evidence.run_fake(ROOT, spec, *cert_paths) as fake:
+            pr_evidence._run_one_step = recording
+            try:
+                result = pr_evidence.run_scenario(ROOT, stepped, fake, volatile)
+            finally:
+                pr_evidence._run_one_step = real_run_one_step
+    except pr_evidence._SkipScenario as exc:
+        require_test_tool(False, str(exc))
+        return
+    assert len(raw_sizes) == 2
+    assert result["sdk_size"] == max(raw_sizes)
+    assert result["sdk_size"] < len(json.dumps(result["stdout"])) - 2
+    doc = pr_evidence._results_from_runs(
+        [stepped], volatile, [stepped], True, [(stepped, result, result)], None
+    )
+    (entry,) = doc["scenarios"]
+    assert entry["size_after"] == max(raw_sizes)
+    expected = []
+    for index, step in enumerate(stepped["steps"]):
+        if index:
+            expected.append("&&")
+        expected.extend(["housesitter", *step["argv"]])
+    assert entry["command"] == expected
+    assert evidence_checks.validate_results(doc, {stepped["id"]}) == []
