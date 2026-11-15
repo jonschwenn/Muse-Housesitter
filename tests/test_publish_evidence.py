@@ -2921,6 +2921,57 @@ def test_render_refuses_a_skip_with_a_bad_reason(tmp_path):
     )
 
 
+def test_render_refuses_a_skip_when_the_base_has_moved(tmp_path):
+    # F2: the manifest honestly records (BASE_SHA, HEAD_SHA) with identical
+    # trees, but main has moved on: the trusted base no longer matches the
+    # recorded one, so the skip is refused and the PR must update.
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    moved = _skip_tree_doc("d" * 40)
+    rc, out = _render_skip(
+        tmp_path, artifact, "d" * 40, moved, _skip_tree_doc(HEAD_SHA)
+    )
+    assert rc == 1
+    assert json.loads((out / "refusal.json").read_text()) == {
+        "reason": "bad_skip"
+    }
+
+
+def test_render_refuses_a_skip_with_a_lying_base_sha(tmp_path):
+    # F2: a lying artifact can at most claim the current trusted base, and
+    # only the recorded SHAs are compared. Here the manifest names a base
+    # the run never compared, so the identical trees do not save it.
+    artifact = _artifact(
+        tmp_path, pngs=(), manifest=_skip_manifest(base_sha="d" * 40)
+    )
+    rc, out = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+    )
+    assert rc == 1
+    assert json.loads((out / "refusal.json").read_text()) == {
+        "reason": "bad_skip"
+    }
+
+
+def test_render_accepts_a_skip_with_matching_bases(tmp_path):
+    # F2: when the manifest's recorded SHAs match the resolved base and
+    # head, and the trusted trees agree, the skip publishes.
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    rc, out = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+    )
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "Before not captured: UI inputs identical." in body
+
+
 def test_bad_skip_notice_is_fixed_text():
     notice = evidence_checks.refusal_notice("bad_skip")
     assert notice.startswith("<!-- housesitter-evidence -->\n")

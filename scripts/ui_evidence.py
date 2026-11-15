@@ -82,6 +82,10 @@ CAPTURE_RE = re.compile(
 REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 
+
+def _is_hex_sha(value: object) -> bool:
+    return isinstance(value, str) and SHA_RE.fullmatch(value) is not None
+
 # Full-page desktop shots of the 600-client fixture compress to ~6 MB, so the
 # caps fit those with headroom rather than pretending screenshots are small.
 MAX_FILE_BYTES = 8_000_000  # per-PNG cap for the evidence branch
@@ -755,14 +759,17 @@ def build_manifest(
     head_records: dict,
     browser: dict | None = None,
     base_skipped: bool = False,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
 ) -> dict:
     """Classify every fixture x view pair, writing diff images for changes.
 
-    With ``base_skipped`` (Decision 6: every UI input identical, so the
-    base side was never captured), every pair with a head shot is recorded
-    unchanged and its PNGs are dropped as usual; pairs with no head shot
-    fall through to the normal classification. The manifest records the
-    skip reason on top.
+    With ``base_skipped`` (Decision 6: nothing capture-affecting changed,
+    so the base side was never captured), every pair with a head shot is
+    recorded unchanged and its PNGs are dropped as usual; pairs with no
+    head shot fall through to the normal classification. The manifest
+    records the skip reason plus the compared base and head SHAs on top,
+    so the publisher can bind the claim to the run's own revisions (F2).
     """
     base_fixtures = set(fixtures_in(base_tree)) if has_web(base_tree) else set()
     head_fixtures = set(fixtures_in(head_tree)) if has_web(head_tree) else set()
@@ -826,7 +833,12 @@ def build_manifest(
             )
     manifest: dict = {"version": 1, "browser": browser, "captures": captures}
     if base_skipped:
+        for name, sha in (("base", base_sha), ("head", head_sha)):
+            if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+                raise ValueError(f"base skip needs a 40-hex {name} SHA, got {sha!r}")
         manifest["base_skipped"] = UI_SKIP_REASON
+        manifest["base_sha"] = base_sha
+        manifest["head_sha"] = head_sha
     return manifest
 
 
@@ -1097,8 +1109,9 @@ def validate_artifact(directory: Path) -> list:
             elif "base_skipped" in manifest:
                 # The skip claim is core to the artifact's honesty, so its
                 # shape is validated here; the publisher re-verifies the
-                # claim itself. Anything but the fixed reason, or any
-                # non-unchanged capture beside it, fails closed.
+                # claim itself. Anything but the fixed reason, any
+                # non-unchanged capture beside it, or a missing or
+                # malformed compared-revision binding fails closed.
                 if manifest["base_skipped"] != UI_SKIP_REASON:
                     errors.append("manifest has an invalid base_skipped value")
                 elif any(
@@ -1106,6 +1119,10 @@ def validate_artifact(directory: Path) -> list:
                     for cap in manifest.get("captures", [])
                 ):
                     errors.append("manifest claims a skip with changed captures")
+                elif not _is_hex_sha(manifest.get("base_sha")) or not _is_hex_sha(
+                    manifest.get("head_sha")
+                ):
+                    errors.append("manifest skip is missing its compared SHAs")
             else:
                 try:
                     names = {
@@ -1139,6 +1156,12 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--repo", required=True, help="owner/name of the GitHub repo")
     parser.add_argument("--pr", type=int, required=True, help="pull request number")
     parser.add_argument("--head-sha", required=True, help="head commit SHA (40 hex)")
+    parser.add_argument(
+        "--base-sha",
+        default=None,
+        help="base commit SHA (40 hex): recorded in the manifest with "
+        "--skip-base so the publisher can bind the claim to this run",
+    )
     parser.add_argument(
         "--browser-channel",
         default=None,
@@ -1180,6 +1203,9 @@ def main(argv: list | None = None) -> int:
     # Both sides capture with the same browser in one run; the head side's
     # record wins when it exists, else the base's, else null.
     browser = head_browser if head_browser is not None else base_browser
+    if args.skip_base and args.base_sha is None:
+        print("ui_evidence: --skip-base needs --base-sha", file=sys.stderr)
+        return 2
     manifest = build_manifest(
         args.base_tree,
         args.head_tree,
@@ -1187,6 +1213,8 @@ def main(argv: list | None = None) -> int:
         head_records,
         browser=browser,
         base_skipped=args.skip_base,
+        base_sha=args.base_sha,
+        head_sha=args.head_sha,
     )
     # Crop full-page shots shorter when the push cap would refuse them all
     # (Decision 5). The manifest records each cropped height, and the

@@ -175,6 +175,7 @@ jobs:
         env:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           ui_exit=0
@@ -183,6 +184,7 @@ jobs:
           python head/scripts/ui_evidence.py \
             --base-tree base --head-tree head --out-dir ui_out \
             --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --base-sha "$BASE_SHA" \
             --browser-channel chrome "${skip_args[@]}" || ui_exit=$?
           echo "UI_EXIT=$ui_exit" >> "$GITHUB_ENV"
       # Text plus structured results: the privileged publisher

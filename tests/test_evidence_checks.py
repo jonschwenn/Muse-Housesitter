@@ -1183,6 +1183,17 @@ def test_check_refuses_a_skip_with_differing_inputs(tmp_path, capsys):
     assert "bad_skip" in capsys.readouterr().out
 
 
+def test_check_refuses_a_skip_claimed_for_another_base(tmp_path, capsys):
+    # F2: the manifest must record the base it was compared against. A
+    # manifest that names a different base than the run's own is refused,
+    # even when the trees for that other base would allow the skip.
+    repo, sha = _git_repo_with_paths(tmp_path)
+    other = "d" * 40
+    artifact = _skip_gate_artifact(tmp_path, repo, other, sha)
+    assert _check_skip(artifact, repo, sha, sha) == 1
+    assert "bad_skip" in capsys.readouterr().out
+
+
 def test_check_refuses_a_skip_it_cannot_verify(tmp_path, capsys):
     repo, sha = _git_repo_with_paths(tmp_path)
     artifact = _skip_gate_artifact(tmp_path, repo, sha, sha)

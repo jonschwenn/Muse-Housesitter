@@ -806,7 +806,10 @@ def cmd_check(args) -> int:
     base_map = head_map = None
     if manifest_claims_skip(Path(args.artifact_dir) / "ui_out"):
         # The claim must be verifiable from local git objects: without the
-        # SHAs and a checkout holding both commits, fail closed.
+        # SHAs and a checkout holding both commits, fail closed. The
+        # manifest must also record the same base and head SHAs the run
+        # compared (F2): a claim for another base is refused even when its
+        # trees would allow the skip.
         # getattr: direct cmd_check callers may build their own namespace
         # without the newer verification arguments.
         base_sha = getattr(args, "base_sha", None)
@@ -815,6 +818,24 @@ def cmd_check(args) -> int:
             print(
                 "evidence_checks: publisher would refuse: bad_skip: "
                 "base skip is unverifiable without --base-sha and --git-dir"
+            )
+            return 1
+        try:
+            manifest = json.loads(
+                (Path(args.artifact_dir) / "ui_out" / "ui_manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, ValueError, RecursionError):
+            manifest = None
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("base_sha") != base_sha
+            or manifest.get("head_sha") != args.head_sha
+        ):
+            print(
+                "evidence_checks: publisher would refuse: bad_skip: "
+                "base skip names another base or head than this run"
             )
             return 1
         try:

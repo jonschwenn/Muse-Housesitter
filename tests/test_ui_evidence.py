@@ -1086,9 +1086,13 @@ def test_build_manifest_with_skipped_base_forces_unchanged(tmp_path):
         for view in VIEWS_UNDER_TEST
     }
     manifest = ui_evidence.build_manifest(
-        base, head, out, records, base_skipped=True
+        base, head, out, records, base_skipped=True,
+        base_sha="c" * 40, head_sha="a" * 40,
     )
     assert manifest["base_skipped"] == "ui_inputs_identical"
+    # F2: the skip is bound to the compared revisions.
+    assert manifest["base_sha"] == "c" * 40
+    assert manifest["head_sha"] == "a" * 40
     assert [c["status"] for c in manifest["captures"]] == ["unchanged"] * len(
         VIEWS_UNDER_TEST
     )
@@ -1111,6 +1115,15 @@ def test_build_manifest_without_a_skip_claim_has_no_skip_key(tmp_path):
     _write_pair(out, shot, shot)
     manifest = ui_evidence.build_manifest(base, head, out, {})
     assert "base_skipped" not in manifest
+
+
+def test_build_manifest_skip_without_shas_is_rejected(tmp_path):
+    # F2: a skip claim without the compared revisions is a caller bug.
+    base, head = _manifest_trees(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(ValueError):
+        ui_evidence.build_manifest(base, head, out, {}, base_skipped=True)
 
 
 def test_skip_section_states_the_skip_plainly():
@@ -1140,6 +1153,8 @@ def test_validator_accepts_a_skipped_manifest(tmp_path):
             {
                 "version": 1,
                 "base_skipped": "ui_inputs_identical",
+                "base_sha": "c" * 40,
+                "head_sha": HEAD_SHA,
                 "captures": [
                     {
                         "fixture": "typical",
@@ -1220,6 +1235,7 @@ def test_main_skips_the_base_capture_with_skip_base(tmp_path, monkeypatch):
             "--repo", REPO,
             "--pr", "7",
             "--head-sha", HEAD_SHA,
+            "--base-sha", "c" * 40,
             "--skip-base",
         ]
     )

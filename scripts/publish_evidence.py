@@ -444,9 +444,27 @@ def render_comment(
         if manifest is not None:
             if manifest.get("base_skipped") is not None:
                 # Decision 6: the base captures were skipped, so re-verify
-                # the claim with MAIN's input list before rendering
+                # the claim with MAIN's safe list before rendering
                 # anything. Missing maps, an unverifiable listing, or any
-                # differing input refuses with bad_skip.
+                # forcing change refuses with bad_skip. The manifest must
+                # record the same base and head SHAs the run compared (F2):
+                # base_sha here is resolved from the PR API at publish
+                # time (trusted), so a claim for another base — because
+                # main has moved on, or because the artifact lies — is
+                # refused even when its trees would allow the skip.
+                if base_sha is None:
+                    raise PublishError(
+                        "base skip unverified: base SHA was not provided",
+                        "bad_skip",
+                    )
+                if (
+                    manifest.get("base_sha") != base_sha
+                    or manifest.get("head_sha") != head_sha
+                ):
+                    raise PublishError(
+                        "base skip is for another base or head commit",
+                        "bad_skip",
+                    )
                 try:
                     evidence_checks.check_ui_skip(
                         base_sha, head_sha, base_map, head_map
