@@ -73,12 +73,19 @@ VOLATILE = "<volatile>"
 #            "reject_login": false,                 # 401 on every login
 #            "bad_fingerprint": false},             # pin a wrong fingerprint
 #   "steps": [{"argv": [...]}, ...]                 # sharing one HOME
+#   "render": "data-counts"                        # optional: project every
+#                                                 # list inside "data" to an
+#                                                 # "<N items>" count string
+#                                                 # (default "full" renders
+#                                                 # every record)
 #
 # Without "steps", one step runs scenario["argv"]. Every step's argv may
 # carry $saved_id(N), $more_command(N), or $more_params(N), replaying step
 # N's envelope (the follow-up page replays step 0's "more" call exactly).
 # Steps render with one header each, so a reviewer can tell which step
-# produced which output.
+# produced which output. "data-counts" keeps scalars, dicts, and everything
+# outside "data" (truncated, more, warnings, source, schema) in full, so
+# summary counts and paging behaviour still diff; the step header says so.
 EVIDENCE_PASSWORD = "PLANTED-SECRET-evidence-unifi-wifi-01"
 FAKE_SCRIPT = Path("scripts/fake_unifi.py")
 FAKE_BOOT_TIMEOUT_S = 30
@@ -342,6 +349,39 @@ def validate_fake_spec(spec: object, scenario_id: str) -> dict:
         "reject_login": bool(spec.get("reject_login", False)),
         "bad_fingerprint": bool(spec.get("bad_fingerprint", False)),
     }
+
+
+RENDER_MODES = ("full", "data-counts")
+
+
+def validate_render_mode(value: object, scenario_id: str) -> str:
+    """Check a scenario's "render" option; authoring bugs fail loudly."""
+    mode = "full" if value is None else value
+    if mode not in RENDER_MODES:
+        raise ValueError(
+            f"scenario {scenario_id!r}: 'render' must be one of "
+            f"{list(RENDER_MODES)}, got {value!r}"
+        )
+    return mode
+
+
+def _lists_to_counts(node: object) -> object:
+    if isinstance(node, list):
+        return f"<{len(node)} items>"
+    if isinstance(node, dict):
+        return {key: _lists_to_counts(value) for key, value in node.items()}
+    return node
+
+
+def project_data_counts(envelope: object) -> object:
+    """Project an envelope for "data-counts" rendering: every list inside
+    "data" (recursively) becomes an "<N items>" string. Scalars, dicts, and
+    everything outside "data" pass through untouched."""
+    if not isinstance(envelope, dict) or "data" not in envelope:
+        return envelope
+    projected = dict(envelope)
+    projected["data"] = _lists_to_counts(envelope["data"])
+    return projected
 
 
 def scenario_steps(scenario: dict) -> list:
@@ -648,8 +688,8 @@ def _run_one_step(tree: Path, argv: list, home: str, env: dict) -> dict:
 
 def _collect_redactions(step_results: list) -> set:
     """Volatile strings the run produced (saved ids, collection times):
-    blanking the exact strings keeps headers deterministic without touching
-    real module output."""
+    redacting the exact strings in the echoed step headers keeps runs
+    deterministic without touching real module output."""
     values = set()
     for step in step_results:
         envelope = _envelope_of(step)
@@ -667,17 +707,41 @@ def _collect_redactions(step_results: list) -> set:
     return values
 
 
-def _render_step(step: dict, index: int, count: int, volatile: set) -> str:
+def _render_step(
+    step: dict,
+    index: int,
+    count: int,
+    volatile: set,
+    redactions: set | frozenset = frozenset(),
+    data_counts: bool = False,
+) -> str:
     out = step["stdout"]
     try:
         parsed = json.loads(out)
     except ValueError:
         pass
     else:
-        out = json.dumps(blank_volatile(parsed, volatile), indent=2, sort_keys=True) + "\n"
+        blanked = blank_volatile(parsed, volatile)
+        if data_counts:
+            blanked = project_data_counts(blanked)
+        out = json.dumps(blanked, indent=2, sort_keys=True) + "\n"
+    # Redaction applies ONLY to the echoed argv header: the replayed saved
+    # and follow-up ids must not leak run-specific values into the diff, but
+    # the JSON body is already blanked by volatile_keys and any real module
+    # datum that happens to equal a volatile string (a client name matching
+    # collected_at, say) must survive verbatim, or a real change to that
+    # datum would compare as unchanged. Stderr renders verbatim: module logs
+    # below WARNING never reach it (only fixed info strings exist), and the
+    # determinism test pins two real runs byte-identical, which would fail
+    # if stderr carried anything volatile.
+    header_argv = " ".join(step["argv"])
+    if redactions:
+        header_argv = _redact_known_values(header_argv, redactions)
+    notice = "(data lists shown as item counts)\n" if data_counts else ""
     text = (
         f"--- step {index + 1}/{count} ---\n"
-        f"$ housesitter {' '.join(step['argv'])}\n"
+        f"{notice}"
+        f"$ housesitter {header_argv}\n"
         f"$ exit {step['exit']}\n--- stdout ---\n{out}"
     )
     if step["stderr"]:
@@ -692,6 +756,7 @@ def _run_fake_scenario(
 ) -> dict:
     spec = validate_fake_spec(scenario.get("fake"), scenario["id"])
     steps = scenario_steps(scenario)
+    data_counts = validate_render_mode(scenario.get("render"), scenario["id"]) == "data-counts"
     with tempfile.TemporaryDirectory(prefix="hs-evidence-") as home:
         env = {
             "HOME": home,
@@ -726,11 +791,11 @@ def _run_fake_scenario(
             step_results.append(result)
             envelopes.append(_envelope_of(result))
     volatile_set = set(volatile)
+    redactions = _collect_redactions(step_results)
     combined = "".join(
-        _render_step(step, index, len(step_results), volatile_set)
+        _render_step(step, index, len(step_results), volatile_set, redactions, data_counts)
         for index, step in enumerate(step_results)
     )
-    combined = _redact_known_values(combined, _collect_redactions(step_results))
     exit_code: object = 0
     for step in step_results:
         if step["exit"] != 0:

@@ -95,6 +95,7 @@
       "title": "Snapshot from the large fixture, truncated, plus its first follow-up page",
       "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
       "fake": {"fixture_set": "large"},
+      "render": "data-counts",
       "steps": [
         {"argv": ["invoke", "housesitter.unifi_wifi.snapshot"]},
         {"argv": ["invoke", "$more_command(0)", "--params", "$more_params(0)"]}
@@ -104,7 +105,7 @@
       "id": "unifi-wifi-get-saved",
       "title": "Get of the snapshot just taken",
       "argv": ["invoke", "housesitter.unifi_wifi.get", "--params", "{\"id\": \"$saved_id(0)\"}"],
-      "fake": {"fixture_set": "typical"},
+      "fake": {"fixture_set": "empty"},
       "steps": [
         {"argv": ["invoke", "housesitter.unifi_wifi.snapshot"]},
         {"argv": ["invoke", "housesitter.unifi_wifi.get", "--params", "{\"id\": \"$saved_id(0)\"}"]}
