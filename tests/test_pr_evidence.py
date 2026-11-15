@@ -1302,7 +1302,7 @@ def test_fake_scenarios_are_deterministic(tmp_path):
             "unifi-wifi-snapshot-typical",
             "unifi-wifi-snapshot-empty",
             "unifi-wifi-snapshot-large",
-            "unifi-wifi-get-saved",
+            "invoke-unifi-wifi-get",
         ):
             # Snapshots carry collected_at and saved ids, so the redaction
             # must have fired: without it this equality would prove nothing.
@@ -1644,7 +1644,7 @@ def test_changed_unifi_sections_keep_tests_line_and_screenshots(tmp_path):
         return match
 
     large = section_size("unifi-wifi-snapshot-large")
-    get_saved = section_size("unifi-wifi-get-saved")
+    get_saved = section_size("invoke-unifi-wifi-get")
     typical = section_size("unifi-wifi-snapshot-typical")
     assert large < 12_000, large
     assert get_saved < 12_000, get_saved
@@ -1901,7 +1901,7 @@ def test_stepped_scenario_reports_sdk_size_and_every_step(tmp_path):
     require_test_tool(openssl is not None, "openssl is not installed")
     scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
     stepped = next(
-        scenario for scenario in scenarios if scenario["id"] == "unifi-wifi-get-saved"
+        scenario for scenario in scenarios if scenario["id"] == "invoke-unifi-wifi-get"
     )
     volatile = set(volatile_keys)
     spec = pr_evidence.validate_fake_spec(stepped["fake"], stepped["id"])

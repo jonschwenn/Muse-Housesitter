@@ -102,7 +102,7 @@
       ]
     },
     {
-      "id": "unifi-wifi-get-saved",
+      "id": "invoke-unifi-wifi-get",
       "title": "Get of the snapshot just taken",
       "argv": ["invoke", "housesitter.unifi_wifi.get", "--params", "{\"id\": \"$saved_id(0)\"}"],
       "fake": {"fixture_set": "empty"},
