@@ -2972,6 +2972,47 @@ def test_render_accepts_a_skip_with_matching_bases(tmp_path):
     assert "Before not captured: UI inputs identical." in body
 
 
+def test_smallest_tier_keeps_the_skip_notice(tmp_path):
+    # F3: a large text diff plus a verified skipped manifest, fitted through
+    # the real 60,000-byte budget, must still state the skip in the
+    # smallest (pointer-only) tier. Sizes sweep the range where the fitter
+    # drops to the pointer tier; no limits are monkeypatched.
+    seen_pointer = False
+    for n in range(14000, 16000, 500):
+        results = _results()
+        scenario = results["scenarios"][0]
+        scenario["changed"] = True
+        scenario["before"] = "a" * n + "\n"
+        scenario["after"] = "b" * n + "\n"
+        case = tmp_path / f"case{n}"
+        case.mkdir()
+        artifact = _artifact(case, pngs=(), manifest=_skip_manifest(), results=results)
+        rc, out = _render_skip(
+            case,
+            artifact,
+            BASE_SHA,
+            _skip_tree_doc(BASE_SHA),
+            _skip_tree_doc(HEAD_SHA),
+        )
+        assert rc == 0
+        body = (out / "comment.md").read_text()
+        assert len(body.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+        if "Web UI evidence omitted" in body:
+            seen_pointer = True
+            assert "Before not captured: UI inputs identical." in body
+    assert seen_pointer, "sweep never reached the pointer-only tier"
+
+
+def test_every_ui_tier_states_the_skip():
+    # F3: the fixed sentence survives every tier the publisher can choose,
+    # including the smallest pointer-only one.
+    manifest = _skip_manifest()
+    suffixes, _ = pr_evidence.ui_tiers(manifest, REPO, PR, HEAD_SHA)
+    assert len(suffixes) == 3
+    for suffix in suffixes:
+        assert "Before not captured: UI inputs identical." in suffix
+
+
 def test_bad_skip_notice_is_fixed_text():
     notice = evidence_checks.refusal_notice("bad_skip")
     assert notice.startswith("<!-- housesitter-evidence -->\n")

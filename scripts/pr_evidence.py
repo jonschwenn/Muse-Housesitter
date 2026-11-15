@@ -1245,11 +1245,16 @@ def ui_tiers(
     Returns (suffixes, check-failure count). The publisher walks the
     suffixes in order against one final-form budget, so screenshots survive
     everything except a comment that cannot fit them after the Tests line
-    has already degraded away (review round 4, finding 2).
+    has already degraded away (review round 4, finding 2). Every tier
+    states the base-capture skip (F3): a comment that fits only the
+    pointer must still say the before side was never captured.
     """
     full, table, failures = render_ui_section(manifest, repo, pr, head_sha)
+    pointer = UI_SECTION_OMITTED_SUFFIX
+    if manifest.get("base_skipped") == UI_SKIP_REASON:
+        pointer = "\n" + UI_SKIP_NOTE + pointer
     return (
-        ["\n" + full, "\n" + table + UI_DETAILS_OMITTED_SUFFIX, UI_SECTION_OMITTED_SUFFIX],
+        ["\n" + full, "\n" + table + UI_DETAILS_OMITTED_SUFFIX, pointer],
         failures,
     )
 
