@@ -12,12 +12,16 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
+import select
 import shutil
 import ssl
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from core.helpers import require_test_tool
 
@@ -27,23 +31,52 @@ FAKE = ROOT / "scripts" / "fake_unifi.py"
 openssl = shutil.which("openssl")
 
 
-def wait_for_line(process, needle, timeout=20.0):
-    # type: (subprocess.Popen, str, float) -> str
-    deadline = time.time() + timeout
-    buf = ""
-    while time.time() < deadline:
-        if process.poll() is not None and not buf:
-            break
-        chunk = process.stdout.read1(4096) if process.stdout else b""
-        if not chunk:
-            time.sleep(0.05)
-            continue
-        buf += chunk.decode("utf-8", errors="replace")
+def wait_for_startup(process, needles, timeout=20.0):
+    """Collect every startup line in ``needles`` at once.
+
+    Lines already read stay in a buffer on the process object, so later
+    calls see them without touching the pipe; every read is bounded by the
+    remaining deadline via select, so a silent child cannot hang the wait
+    past the timeout.
+    """
+    # type: (subprocess.Popen, list, float) -> dict
+    found = {}
+    buf = getattr(process, "_hs_startup_buf", "")
+    fd = process.stdout.fileno()
+    deadline = time.monotonic() + timeout
+    while len(found) < len(needles):
         while "\n" in buf:
             line, buf = buf.split("\n", 1)
-            if needle in line:
-                return line
-    raise AssertionError(f"never saw {needle!r} in fake_unifi output")
+            for needle in needles:
+                if needle not in found and needle in line:
+                    found[needle] = line
+            if len(found) == len(needles):
+                break
+        if len(found) == len(needles):
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            break
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            break  # EOF: the child is gone
+        buf += chunk.decode("utf-8", errors="replace")
+    process._hs_startup_buf = buf
+    missing = [needle for needle in needles if needle not in found]
+    if missing:
+        raise AssertionError(f"never saw {missing[0]!r} in fake_unifi output")
+    return found
+
+
+def wait_for_line(process, needle, timeout=20.0):
+    # type: (subprocess.Popen, str, float) -> str
+    return wait_for_startup(process, [needle], timeout)[needle]
 
 
 def test_fake_unifi_serves_fixtures_over_tls(tmp_path):
@@ -140,3 +173,212 @@ def test_fake_unifi_serves_fixtures_over_tls(tmp_path):
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def _mint_cert(tmp_path):
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    subprocess.run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=127.0.0.1",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    return cert, key
+
+
+def _boot(tmp_path, name, *extra_args):
+    """Boot the fake with extra flags; returns (proc, port, cert)."""
+    (tmp_path / name).mkdir(exist_ok=True)
+    cert, key = _mint_cert(tmp_path / name)
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(FAKE),
+            "--cert",
+            str(cert),
+            "--key",
+            str(key),
+            "--port",
+            "0",
+            *extra_args,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+    )
+    try:
+        lines = wait_for_startup(
+            proc, ["listening on https://127.0.0.1:", "fingerprint_sha256:"]
+        )
+        port = int(lines["listening on https://127.0.0.1:"].rsplit(":", 1)[1].rstrip())
+    except BaseException:
+        # Any exit before the caller holds the process (including
+        # KeyboardInterrupt) must reap it: nobody else can.
+        _stop(proc)
+        raise
+    return proc, port, cert
+
+
+def _tls_get(port, path):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    conn = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=10)
+    conn.request("GET", path)
+    response = conn.getresponse()
+    data = json.loads(response.read().decode())
+    status = response.status
+    conn.close()
+    return status, data
+
+
+def _tls_login(port, username, password):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    conn = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=10)
+    payload = json.dumps({"username": username, "password": password}).encode()
+    conn.request("POST", "/api/auth/login", body=payload)
+    response = conn.getresponse()
+    response.read()
+    status = response.status
+    conn.close()
+    return status
+
+
+def _stop(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def test_startup_reader_keeps_lines_across_calls():
+    # The fake prints its whole banner in one write, then stays silent: a
+    # later lookup for an already-emitted line must succeed from the
+    # persisted buffer instead of blocking on an empty pipe.
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, time; "
+            "os.write(1, b'fake_unifi: listening on https://127.0.0.1:12345\\n"
+            "fake_unifi: fingerprint_sha256: AA\\n"
+            "fake_unifi: fixture_set: typical reject_login: off\\n'); "
+            "time.sleep(5)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+    )
+    try:
+        assert "listening on" in wait_for_line(proc, "listening on", timeout=5.0)
+        start = time.monotonic()
+        assert "fingerprint_sha256:" in wait_for_line(
+            proc, "fingerprint_sha256:", timeout=5.0
+        )
+        assert time.monotonic() - start < 2.0
+        assert "fixture_set: typical" in wait_for_line(
+            proc, "fixture_set:", timeout=5.0
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        AssertionError("never saw 'listening on' in fake_unifi output"),
+        KeyboardInterrupt(),
+        OSError("select failed"),
+    ],
+    ids=["assertion", "keyboard-interrupt", "oserror"],
+)
+def test_boot_stops_child_when_startup_fails(tmp_path, monkeypatch, failure):
+    # Startup failure before _boot returns must still reap the child: the
+    # failure is injected, but the booted fake is real and stays alive.
+    require_test_tool(openssl is not None, "openssl is not installed")
+    tf = sys.modules[__name__]
+
+    children = []
+    real_popen = subprocess.Popen
+
+    def capture(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def boom(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    monkeypatch.setattr(tf, "wait_for_startup", boom)
+    with pytest.raises(type(failure)):
+        tf._boot(tmp_path, "badboot", "--fixture-set", "typical")
+    assert children, "the fake was never started"
+    assert all(child.poll() is not None for child in children)
+
+
+def test_fake_unifi_fixture_sets(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    cases = {
+        "typical": ("unifi_os_sta.json", 16),
+        "empty": ("empty_sta.json", 0),
+        "large": ("large_sta.json", 600),
+    }
+    for fixture_set, (sta_file, sta_count) in cases.items():
+        proc, port, _ = _boot(tmp_path, fixture_set, "--fixture-set", fixture_set)
+        try:
+            assert f"fixture_set: {fixture_set}" in wait_for_line(
+                proc, "fixture_set:"
+            )
+            status, sysinfo = _tls_get(port, "/proxy/network/api/s/default/stat/sysinfo")
+            assert status == 200
+            assert sysinfo == json.loads(
+                (ROOT / "tests" / "fixtures" / "unifi_wifi" / "unifi_os_sysinfo.json")
+                .read_text()
+            )
+            status, sta = _tls_get(port, "/proxy/network/api/s/default/stat/sta")
+            assert status == 200
+            assert sta == json.loads(
+                (ROOT / "tests" / "fixtures" / "unifi_wifi" / sta_file).read_text()
+            )
+            assert len(sta["data"]) == sta_count
+        finally:
+            _stop(proc)
+
+
+def test_fake_unifi_reject_login(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    proc, port, _ = _boot(tmp_path, "reject", "--reject-login")
+    try:
+        assert "reject_login: on" in wait_for_line(proc, "reject_login:")
+        assert _tls_login(port, "housesitter-readonly", "PLANTED-SECRET-x") == 401
+        assert _tls_login(port, "housesitter-readonly", "") == 401
+        # Only the login is gated: the stat routes still serve the fixtures.
+        status, sta = _tls_get(port, "/proxy/network/api/s/default/stat/sta")
+        assert status == 200
+        assert len(sta["data"]) == 16
+    finally:
+        _stop(proc)

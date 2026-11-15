@@ -15,6 +15,9 @@ can be tested end to end in a container:
 
      python3 scripts/fake_unifi.py \\
        --cert /tmp/fake-cert.pem --key /tmp/fake-key.pem
+       # Options: --fixture-set typical|empty|large (default typical),
+       # --reject-login (every login gets 401), --port 0 for an
+       # OS-assigned port on 127.0.0.1.
 
 3. Point ``install/config.example.json`` at ``https://127.0.0.1:8443``
    with the printed ``fingerprint_sha256``, start ``housesitter serve``
@@ -56,10 +59,27 @@ FIXTURE_DIR = (
 _SITE_STAT_RE = re.compile(
     r"^/proxy/network/api/s/([A-Za-z0-9_-]{1,64})/stat/(sysinfo|device|sta)$"
 )
-_ENDPOINT_FILES = {
-    "sysinfo": "unifi_os_sysinfo.json",
-    "device": "unifi_os_device.json",
-    "sta": "unifi_os_sta.json",
+# Which invented fixture file answers each stat endpoint. "typical" is the
+# small house in unifi_os_*.json; "empty" answers no APs and no clients;
+# "large" replays the bulk-client sta fixture. Every set reuses the existing
+# files under tests/fixtures/unifi_wifi/; sysinfo is the same everywhere
+# because no empty/large sysinfo fixture exists.
+_FIXTURE_SETS = {
+    "typical": {
+        "sysinfo": "unifi_os_sysinfo.json",
+        "device": "unifi_os_device.json",
+        "sta": "unifi_os_sta.json",
+    },
+    "empty": {
+        "sysinfo": "unifi_os_sysinfo.json",
+        "device": "empty_device.json",
+        "sta": "empty_sta.json",
+    },
+    "large": {
+        "sysinfo": "unifi_os_sysinfo.json",
+        "device": "unifi_os_device.json",
+        "sta": "large_sta.json",
+    },
 }
 
 MAX_BODY_BYTES = 1024 * 1024
@@ -117,13 +137,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         match = _SITE_STAT_RE.match(self.path or "")
         if match is not None:
-            name = _ENDPOINT_FILES[match.group(2)]
+            name = self.server.fixture_files[match.group(2)]
             self._send_json(json.loads(_fixture(name).decode("utf-8")))
             return
         self._send_json({"error": "not found"}, status=404)
 
     def do_POST(self):
         if self.path == "/api/auth/login":
+            if self.server.reject_login:
+                self._send_json({"meta": {"rc": "error"}}, status=401)
+                return
             body = self._read_json_body()
             name = body.get("username") if isinstance(body, dict) else ""
             code = body.get("password") if isinstance(body, dict) else ""
@@ -162,12 +185,16 @@ class Handler(BaseHTTPRequestHandler):
     do_PATCH = do_PUT
 
 
-def build_server(cert_path, key_path, bind, port):
-    # type: (str, str, str, int) -> ThreadingHTTPServer
+def build_server(cert_path, key_path, bind, port, fixture_set="typical", reject_login=False):
+    # type: (str, str, str, int, str, bool) -> ThreadingHTTPServer
     # Test data only, and login accepts any secret: never reachable off-host.
     if not ipaddress.ip_address(bind).is_loopback:
         raise SystemExit("fake_unifi: --bind must be a loopback address")
+    if fixture_set not in _FIXTURE_SETS:
+        raise SystemExit(f"fake_unifi: unknown --fixture-set {fixture_set!r}")
     server = ThreadingHTTPServer((bind, port), Handler)
+    server.fixture_files = _FIXTURE_SETS[fixture_set]
+    server.reject_login = reject_login
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert_path, key_path)
     server.socket = context.wrap_socket(server.socket, server_side=True)
@@ -180,11 +207,29 @@ def main(argv=None):
     parser.add_argument("--key", required=True, help="PEM private key.")
     parser.add_argument("--bind", default="127.0.0.1", help="Loopback address only.")
     parser.add_argument("--port", type=int, default=8443)
+    parser.add_argument(
+        "--fixture-set",
+        default="typical",
+        choices=sorted(_FIXTURE_SETS),
+        help="which invented fixture files to serve.",
+    )
+    parser.add_argument(
+        "--reject-login",
+        action="store_true",
+        help="answer every login with 401 (bad-password evidence).",
+    )
     args = parser.parse_args(argv)
-    server = build_server(args.cert, args.key, args.bind, args.port)
+    server = build_server(
+        args.cert, args.key, args.bind, args.port, args.fixture_set, args.reject_login
+    )
     host, port = server.socket.getsockname()[:2]
     print(f"fake_unifi: listening on https://{host}:{port}", flush=True)
     print(f"fake_unifi: fingerprint_sha256: {leaf_fingerprint(args.cert)}", flush=True)
+    print(
+        f"fake_unifi: fixture_set: {args.fixture_set}"
+        f" reject_login: {'on' if args.reject_login else 'off'}",
+        flush=True,
+    )
     print("fake_unifi: DEV ONLY: test data from tests/fixtures/unifi_wifi/", flush=True)
     try:
         server.serve_forever()

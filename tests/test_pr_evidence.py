@@ -7,14 +7,25 @@ import json
 import random
 import re
 import shutil
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+
+from core.helpers import require_test_tool
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("pr_evidence", ROOT / "scripts" / "pr_evidence.py")
 pr_evidence = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pr_evidence)
+CHECKS_SPEC = importlib.util.spec_from_file_location(
+    "evidence_checks", ROOT / "scripts" / "evidence_checks.py"
+)
+evidence_checks = importlib.util.module_from_spec(CHECKS_SPEC)
+CHECKS_SPEC.loader.exec_module(evidence_checks)
+
+openssl = shutil.which("openssl")
 
 
 def make_tree(tmp_path: Path, name: str, version: str | None, scenarios: list[dict]) -> Path:
@@ -110,10 +121,15 @@ def test_refuses_when_a_real_config_exists(tmp_path, monkeypatch):
 
 
 def test_every_scenario_in_the_repo_exits_as_expected():
-    scenarios, _ = pr_evidence.load_scenarios(ROOT)
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
     assert scenarios, "tests/evidence/scenarios.json must list at least one scenario"
     for scenario in scenarios:
-        result = pr_evidence.run_scenario(ROOT, scenario)
+        result = pr_evidence.run_scenario(ROOT, scenario, volatile=set(volatile_keys))
+        if result.get("skipped"):
+            # No fake available (openssl missing and not required): the
+            # skip is reported, not silent.
+            require_test_tool(False, result["skipped"])
+            continue
         assert result["exit"] == scenario.get("expect_exit", 0), (scenario["id"], result["stderr"])
 
 
@@ -1244,3 +1260,683 @@ def test_hostile_fixture_label_never_renders_as_prose():
     _assert_no_prose_leak(
         full + "\n" + table, ["Approved by maintainer", "example.com/pwn"]
     )
+
+
+# Fake-controller evidence (Decision 9, option A) ---------------------------
+#
+# The unifi_wifi scenarios run the installed CLI against scripts/fake_unifi.py
+# (the HEAD tree's copy, serving the HEAD tree's fixtures) with a written
+# config plus secrets file, exactly as a user would set it up.
+
+
+def _repo_fake_scenarios():
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    fakes = [scenario for scenario in scenarios if scenario.get("fake")]
+    assert len(fakes) >= 6, "the unifi_wifi evidence scenarios are missing"
+    return fakes, set(volatile_keys)
+
+
+def test_fake_scenarios_are_deterministic(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    fakes, volatile = _repo_fake_scenarios()
+    certdir = tempfile.mkdtemp(prefix="hs-evidence-test-cert-", dir=str(tmp_path))
+    for scenario in fakes:
+        spec = pr_evidence.validate_fake_spec(scenario["fake"], scenario["id"])
+        cert_paths = pr_evidence.make_cert(certdir)
+        try:
+            with pr_evidence.run_fake(ROOT, spec, *cert_paths) as first:
+                first_run = pr_evidence.run_scenario(ROOT, scenario, first, volatile)
+            with pr_evidence.run_fake(ROOT, spec, *cert_paths) as second:
+                second_run = pr_evidence.run_scenario(ROOT, scenario, second, volatile)
+        except pr_evidence._SkipScenario as exc:
+            require_test_tool(False, str(exc))
+            continue
+        assert first_run["exit"] == second_run["exit"] == scenario.get("expect_exit", 0)
+        first_text = pr_evidence.render(first_run, volatile)
+        second_text = pr_evidence.render(second_run, volatile)
+        assert first_text == second_text, scenario["id"]
+        # Neither run's endpoint may reach the output: the port is per-run.
+        assert f"127.0.0.1:{first.port}" not in first_text
+        assert f"127.0.0.1:{second.port}" not in second_text
+        if scenario["id"] in (
+            "unifi-wifi-snapshot-typical",
+            "unifi-wifi-snapshot-empty",
+            "unifi-wifi-snapshot-large",
+            "invoke-unifi-wifi-get",
+        ):
+            # Snapshots carry collected_at and saved ids, so the redaction
+            # must have fired: without it this equality would prove nothing.
+            assert first_text.count(pr_evidence.VOLATILE) >= 2, scenario["id"]
+        else:
+            assert "upstream_auth" in first_text or "upstream_tls" in first_text
+
+
+def test_volatile_shaped_client_name_is_preserved(monkeypatch):
+    # A real client name equal to the envelope's collected_at must survive
+    # verbatim: redaction applies only to the echoed step header, never to
+    # the JSON body (already blanked by volatile_keys).
+    volatile = {"collected_at", "saved", "more.params.id"}
+    scenario = {
+        "id": "collision",
+        "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+        "fake": {"fixture_set": "typical"},
+    }
+    stamp = "2026-11-15T00:00:00Z"
+
+    def run_with_name(name):
+        env = {
+            "collected_at": stamp,
+            "saved": "snapshot_20261115T000000Z_1234",
+            "data": {"clients": [{"name": name}]},
+        }
+        step = {
+            "argv": scenario["argv"],
+            "exit": 0,
+            "stdout": json.dumps(env),
+            "stderr": "",
+        }
+        monkeypatch.setattr(pr_evidence, "_run_one_step", lambda *a, **k: step)
+        fake = pr_evidence.FakeInfo(None, 8443, "AA")
+        return pr_evidence.run_scenario(ROOT, scenario, fake, volatile)
+
+    real_text = pr_evidence.render(run_with_name(stamp), volatile)
+    other_text = pr_evidence.render(run_with_name(pr_evidence.VOLATILE), volatile)
+    assert real_text != other_text
+    assert stamp in real_text
+
+
+def test_step_header_redacts_replayed_ids_but_body_keeps_real_data(monkeypatch):
+    # A stepped run replaying $saved_id(0): the echoed argv header must hide
+    # the replayed id (determinism), while a real client name equal to that
+    # id survives verbatim in the body.
+    volatile = {"collected_at", "saved", "more.params.id"}
+    scenario = {
+        "id": "redact-scope",
+        "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+        "fake": {"fixture_set": "typical"},
+        "steps": [
+            {"argv": ["invoke", "housesitter.unifi_wifi.snapshot"]},
+            {
+                "argv": [
+                    "invoke",
+                    "housesitter.unifi_wifi.get",
+                    "--params",
+                    '{"id": "$saved_id(0)"}',
+                ]
+            },
+        ],
+    }
+    saved = "snapshot_20261115T000000Z_0099"
+    stamp = "2026-11-15T00:00:00Z"
+    calls = {"n": 0}
+
+    def fake_step(tree, argv, home, env):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            env_out = {
+                "collected_at": stamp,
+                "saved": saved,
+                "data": {"clients": [{"name": saved}]},
+            }
+        else:
+            env_out = {
+                "collected_at": stamp,
+                "saved": saved,
+                "data": {"clients": []},
+            }
+        return {"argv": argv, "exit": 0, "stdout": json.dumps(env_out), "stderr": ""}
+
+    monkeypatch.setattr(pr_evidence, "_run_one_step", fake_step)
+    fake = pr_evidence.FakeInfo(None, 8443, "AA")
+    text = pr_evidence.render(pr_evidence.run_scenario(ROOT, scenario, fake, volatile), volatile)
+    assert saved in text
+    headers = [line for line in text.splitlines() if line.startswith("$ housesitter")]
+    assert len(headers) == 2
+    assert all(saved not in line for line in headers)
+    assert pr_evidence.VOLATILE in headers[1]
+
+
+def test_project_data_counts():
+    envelope = {
+        "collected_at": "T",
+        "saved": "S",
+        "truncated": True,
+        "more": {"command": "housesitter.unifi_wifi.get", "params": {"id": "abc"}},
+        "warnings": ["w1", "w2"],
+        "source": "fake",
+        "data": {
+            "clients": [{"name": "a"}, {"name": "b"}],
+            "aps": {"lounge": [{"mac": "x"}]},
+            "count": 2,
+            "label": "house",
+        },
+    }
+    projected = pr_evidence.project_data_counts(envelope)
+    assert projected["data"]["clients"] == "<2 items>"
+    assert projected["data"]["aps"] == {"lounge": "<1 items>"}
+    assert projected["data"]["count"] == 2
+    assert projected["data"]["label"] == "house"
+    # Everything outside data renders in full, so paging still diffs.
+    assert projected["truncated"] is True
+    assert projected["more"] == {
+        "command": "housesitter.unifi_wifi.get",
+        "params": {"id": "abc"},
+    }
+    assert projected["warnings"] == ["w1", "w2"]
+    assert projected["source"] == "fake"
+    # A change in the paging fields survives the projection.
+    flipped = dict(envelope, truncated=False)
+    assert pr_evidence.project_data_counts(flipped) != projected
+    more_params = dict(envelope["more"]["params"], cursor=3)
+    moved = dict(envelope, more=dict(envelope["more"], params=more_params))
+    assert pr_evidence.project_data_counts(moved) != projected
+
+
+def test_unknown_render_mode_fails_loudly():
+    scenario = {
+        "id": "bogus-render",
+        "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+        "fake": {"fixture_set": "typical"},
+        "render": "pie-chart",
+    }
+    fake = pr_evidence.FakeInfo(None, 8443, "AA")
+    with pytest.raises(ValueError, match="render"):
+        pr_evidence.run_scenario(ROOT, scenario, fake, set())
+
+
+def test_data_counts_render_mode(monkeypatch):
+    volatile = {"collected_at", "saved", "more.params.id"}
+    scenario = {
+        "id": "counts-mode",
+        "argv": ["invoke", "housesitter.unifi_wifi.snapshot"],
+        "fake": {"fixture_set": "typical"},
+        "render": "data-counts",
+        "steps": [
+            {"argv": ["invoke", "housesitter.unifi_wifi.snapshot"]},
+            {"argv": ["invoke", "$more_command(0)", "--params", "$more_params(0)"]},
+        ],
+    }
+    clients = [{"name": f"client-{i:03d}", "signal_dbm": -60} for i in range(600)]
+
+    def fake_step(tree, argv, home, env, truncated=True):
+        if argv[1] == "housesitter.unifi_wifi.snapshot":
+            env_out = {
+                "collected_at": "2026-11-15T00:00:00Z",
+                "saved": "snapshot_20261115T000000Z_1",
+                "truncated": True,
+                "more": {
+                    "command": "housesitter.unifi_wifi.get",
+                    "params": {"id": "page_1", "cursor": 0},
+                },
+                "data": {"clients": clients},
+            }
+        else:
+            env_out = {
+                "collected_at": "2026-11-15T00:00:01Z",
+                "saved": "snapshot_20261115T000000Z_1",
+                "truncated": truncated,
+                "data": {"clients": clients[:5]},
+            }
+        return {"argv": argv, "exit": 0, "stdout": json.dumps(env_out), "stderr": ""}
+
+    raw_sizes = []
+
+    def recording(tree, argv, home, env):
+        result = fake_step(tree, argv, home, env)
+        raw_sizes.append(len(json.dumps(result["stdout"])) - 2)
+        return result
+
+    monkeypatch.setattr(pr_evidence, "_run_one_step", recording)
+    fake = pr_evidence.FakeInfo(None, 8443, "AA")
+    result = pr_evidence.run_scenario(ROOT, scenario, fake, volatile)
+    text = pr_evidence.render(result, volatile)
+    assert text.count("(data lists shown as item counts)") == 2
+    assert "<600 items>" in text
+    assert "<5 items>" in text
+    assert "client-042" not in text
+    assert '"truncated": true' in text
+    assert '"command": "housesitter.unifi_wifi.get"' in text
+    # sdk_size stays the raw-stdout SDK measure, not the projection.
+    assert result["sdk_size"] == max(raw_sizes)
+    assert len(text.encode()) < result["sdk_size"]
+
+    def recording_flipped(tree, argv, home, env):
+        return fake_step(tree, argv, home, env, truncated=False)
+
+    monkeypatch.setattr(pr_evidence, "_run_one_step", recording_flipped)
+    flipped_text = pr_evidence.render(
+        pr_evidence.run_scenario(ROOT, scenario, fake, volatile), volatile
+    )
+    assert flipped_text != text
+
+
+def _load_publisher():
+    """This tree's privileged publisher with a self-consistent module set.
+
+    publish_evidence does plain "import pr_evidence" (and friends), so its
+    dependencies are loaded first under their real names; the returned
+    module therefore renders exactly what main's publisher renders.
+    """
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    loaded = {}
+    for name in (
+        "evidence_checks",
+        "pr_evidence",
+        "test_results",
+        "ui_evidence",
+        "publish_evidence",
+    ):
+        spec = importlib.util.spec_from_file_location(name, scripts / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        loaded[name] = module
+    return loaded["publish_evidence"]
+
+
+def _one_line_change(text):
+    """A one-line data change, for changed-section sizing."""
+    import re as _re
+
+    tweaked, count = _re.subn(
+        r'"signal_dbm": (-?\d+)', lambda m: f'"signal_dbm": {int(m.group(1)) - 1}', text, count=1
+    )
+    if count:
+        return tweaked
+    lines = text.splitlines(keepends=True)
+    return "".join(lines[:-1] + ["# probe variant\n", lines[-1]])
+
+
+def test_changed_unifi_sections_keep_tests_line_and_screenshots(tmp_path):
+    # Every unifi fake scenario changed, before/after differing by one line:
+    # the comment must still carry the Tests line, a screenshot, and a
+    # small section after the unifi ones (main's shrink order degrades
+    # Tests/screenshots before dropping text sections, and keeps a prefix
+    # of them, so oversized sections would wipe all three).
+    require_test_tool(openssl is not None, "openssl is not installed")
+    publish_evidence = _load_publisher()
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    volatile = set(volatile_keys)
+    fakes = [scenario for scenario in scenarios if scenario.get("fake")]
+    assert len(fakes) >= 6
+    by_id = {}
+    certdir = tempfile.mkdtemp(prefix="hs-evidence-budget-", dir=str(tmp_path))
+    for scenario in fakes:
+        spec = pr_evidence.validate_fake_spec(scenario["fake"], scenario["id"])
+        cert_paths = pr_evidence.make_cert(certdir)
+        try:
+            with pr_evidence.run_fake(ROOT, spec, *cert_paths) as fake:
+                after = pr_evidence.run_scenario(ROOT, scenario, fake, volatile)
+        except pr_evidence._SkipScenario as exc:
+            require_test_tool(False, str(exc))
+            continue
+        after_text = pr_evidence.render(after, volatile)
+        by_id[scenario["id"]] = (scenario, after, after_text)
+    assert len(by_id) == len(fakes)
+    entries = []
+    for scenario_id, (scenario, after, after_text) in by_id.items():
+        before_text = _one_line_change(after_text)
+        assert before_text != after_text
+        command = ["housesitter", *scenario["argv"]]
+        if scenario.get("fake") is not None and scenario.get("steps"):
+            command = []
+            for index, step in enumerate(scenario["steps"]):
+                if index:
+                    command.append("&&")
+                command.extend(["housesitter", *step["argv"]])
+        entries.append(
+            {
+                "id": scenario_id,
+                "title": scenario.get("title", ""),
+                "command": command,
+                "exit_before": after["exit"],
+                "exit_after": after["exit"],
+                "expected_exit": scenario.get("expect_exit", 0),
+                "size_before": after["sdk_size"],
+                "size_after": after["sdk_size"],
+                "changed": True,
+                "new_in_pr": False,
+                "before": before_text,
+                "after": after_text,
+            }
+        )
+    entries.append(
+        {
+            "id": "zzz-trailing-probe",
+            "title": "Small changed output",
+            "command": ["housesitter", "--version"],
+            "exit_before": 0,
+            "exit_after": 0,
+            "expected_exit": 0,
+            "size_before": 2,
+            "size_after": 2,
+            "changed": True,
+            "new_in_pr": True,
+            "before": "a\n",
+            "after": "b\n",
+        }
+    )
+    head_sha = "b" * 40
+    doc = {
+        "version": 1,
+        "metadata": {
+            "generator": "scripts/pr_evidence.py",
+            "base_has_package": True,
+            "head_sha": head_sha,
+        },
+        "scenarios": entries,
+        "removed": [],
+    }
+    top, sections = pr_evidence.text_parts_from_results(doc, head_sha)
+    section_bytes = {}
+    for section in sections:
+        heading = section.split("\n", 1)[0]
+        section_bytes[heading] = len(section.encode())
+
+    def section_size(scenario_id):
+        (match,) = [
+            size
+            for heading, size in section_bytes.items()
+            if heading.startswith(f"### `{scenario_id}`")
+        ]
+        return match
+
+    large = section_size("unifi-wifi-snapshot-large")
+    get_saved = section_size("invoke-unifi-wifi-get")
+    typical = section_size("unifi-wifi-snapshot-typical")
+    assert large < 12_000, large
+    assert get_saved < 12_000, get_saved
+    assert typical < 45_000, typical
+    artifact = tmp_path / "artifact"
+    (artifact / "ui_out").mkdir(parents=True)
+    (artifact / "results.json").write_text(json.dumps(doc))
+    png_name = "typical__index-phone__head.png"
+    (artifact / "ui_out" / png_name).write_bytes(
+        publish_evidence.ui_evidence.encode_png(4, 4, 2, bytes([10, 20, 30]) * 16)
+    )
+    (artifact / "ui_out" / "ui_manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "captures": [
+                    {
+                        "fixture": "typical",
+                        "view": "index-phone",
+                        "status": "added",
+                        "base": None,
+                        "head": png_name,
+                        "diff": None,
+                        "head_problems": [],
+                    }
+                ],
+            }
+        )
+    )
+    results_dir = tmp_path / "test-results" / "test-results-3.9"
+    results_dir.mkdir(parents=True)
+    cases = "".join(
+        f'<testcase classname="tests/test_sample.py" name="test_case_{i:02d}"/>' for i in range(10)
+    )
+    (results_dir / "junit.xml").write_bytes(
+        f'<?xml version="1.0"?><testsuite name="python-3.9.25" '
+        f'tests="10" failures="0" errors="0" skipped="0">{cases}</testsuite>'.encode()
+    )
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "total_count": 1,
+                "jobs": [{"name": "test (3.9)", "conclusion": "success"}],
+            }
+        )
+    )
+    out = tmp_path / "out"
+    rc = publish_evidence.main(
+        [
+            "render",
+            "--artifact-dir", str(artifact),
+            "--out-dir", str(out),
+            "--repo", "example-owner/example-repo",
+            "--pr", "7",
+            "--head-sha", head_sha,
+            "--test-results-dir", str(tmp_path / "test-results"),
+            "--jobs-json", str(jobs_path),
+        ]
+    )
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "**Tests:** 10 passed on 3.9.25." in body
+    assert "<img " in body
+    assert "### `zzz-trailing-probe`" in body
+
+
+def test_run_fake_reaps_child_when_startup_is_interrupted(tmp_path, monkeypatch):
+    # Everything after a successful Popen is covered by one cleanup finally:
+    # an interruption during startup waiting must still reap the child.
+    require_test_tool(openssl is not None, "openssl is not installed")
+    certdir = tmp_path / "cert"
+    certdir.mkdir()
+    cert_path, key_path = pr_evidence.make_cert(str(certdir))
+    spec = pr_evidence.validate_fake_spec({"fixture_set": "typical"}, "probe")
+    children = []
+    real_popen = pr_evidence.subprocess.Popen
+
+    def capture(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(pr_evidence.subprocess, "Popen", capture)
+    for exc in (KeyboardInterrupt(), OSError("select failed")):
+        def boom(*args, _exc=exc, **kwargs):
+            raise _exc
+
+        monkeypatch.setattr(pr_evidence, "_wait_for_lines", boom)
+        with pytest.raises(type(exc)):
+            with pr_evidence.run_fake(ROOT, spec, cert_path, key_path):
+                pass  # pragma: no cover - startup never completes
+        assert children[-1].poll() is not None
+
+
+def test_evidence_password_never_leaks(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    fakes, volatile = _repo_fake_scenarios()
+    # The secret really is configured: the run writes it into the fresh HOME.
+    home = tmp_path / "home"
+    pr_evidence.write_fake_home(
+        str(home),
+        pr_evidence.FakeInfo(None, 8443, "AA"),
+        {"fixture_set": "typical", "reject_login": False, "bad_fingerprint": False},
+    )
+    secret_file = home / ".config" / "housesitter" / "secrets" / "unifi_password"
+    assert secret_file.read_text() == pr_evidence.EVIDENCE_PASSWORD
+    assert "PLANTED-SECRET" in pr_evidence.EVIDENCE_PASSWORD
+    runs = []
+    for scenario in fakes:
+        try:
+            result = pr_evidence.run_scenario(ROOT, scenario, volatile=volatile)
+        except pr_evidence._SkipScenario as exc:
+            require_test_tool(False, str(exc))
+            continue
+        assert not result.get("skipped"), (scenario["id"], result)
+        assert pr_evidence.EVIDENCE_PASSWORD not in result["stdout"], scenario["id"]
+        assert pr_evidence.EVIDENCE_PASSWORD not in result["stderr"], scenario["id"]
+        text = pr_evidence.render(result, volatile)
+        assert pr_evidence.EVIDENCE_PASSWORD not in text, scenario["id"]
+        runs.append((scenario, result, result))
+    # The same string must be absent from the structured results too.
+    doc = pr_evidence._results_from_runs(fakes, volatile, fakes, True, runs, None)
+    dumped = json.dumps(doc)
+    assert pr_evidence.EVIDENCE_PASSWORD not in dumped
+    assert "PLANTED-SECRET" not in dumped
+    known_ids = {scenario["id"] for scenario in fakes}
+    assert evidence_checks.validate_results(doc, known_ids) == []
+
+
+def test_skipped_scenario_is_reported_not_dropped(tmp_path, monkeypatch):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    typical = next(
+        scenario for scenario in scenarios if scenario["id"] == "unifi-wifi-snapshot-typical"
+    )
+    base = make_tree(tmp_path, "base", "1.0.0", [typical])
+    head = make_tree(tmp_path, "head", "1.0.0", [typical])
+
+    real_popen = pr_evidence.subprocess.Popen
+
+    def _boom(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", [])
+        if any("fake_unifi.py" in str(part) for part in argv):
+            raise OSError("the network is unavailable")
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(pr_evidence.subprocess, "Popen", _boom)
+    direct = pr_evidence.run_scenario(ROOT, typical, volatile=set(volatile_keys))
+    assert direct.get("skipped")
+    assert "the fake controller could not start" in direct["skipped"]
+    results = pr_evidence.build_results(base, head)
+    (entry,) = results["scenarios"]
+    assert entry["exit_before"] == 1
+    assert entry["exit_after"] == 1
+    # The side labels differ, so the reason renders instead of vanishing
+    # into an "unchanged" row.
+    assert entry["changed"] is True
+    assert "(skipped on base: the fake controller could not start" in entry["before"]
+    assert "(skipped on head: the fake controller could not start" in entry["after"]
+    assert evidence_checks.validate_results(results, {"unifi-wifi-snapshot-typical"}) == []
+
+
+def _copy_repo_tree(tmp_path, name):
+    """A full working copy of the repo checkout (code, scripts, fixtures)."""
+    tree = tmp_path / name
+    shutil.copytree(
+        ROOT,
+        tree,
+        ignore=shutil.ignore_patterns(
+            ".git", ".venv", "__pycache__", ".pytest_cache", ".hypothesis"
+        ),
+    )
+    return tree
+
+
+def test_normalise_change_shows_in_snapshot_evidence(tmp_path):
+    require_test_tool(openssl is not None, "openssl is not installed")
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    wanted = {"invoke-unifi-wifi-snapshot", "unifi-wifi-snapshot-typical"}
+    subset = [scenario for scenario in scenarios if scenario["id"] in wanted]
+    assert len(subset) == 2
+    base = _copy_repo_tree(tmp_path, "base")
+    head = _copy_repo_tree(tmp_path, "head")
+    pruned = {"volatile_keys": volatile_keys, "scenarios": subset}
+    for tree in (base, head):
+        (tree / "tests" / "evidence" / "scenarios.json").write_text(json.dumps(pruned))
+    normalise = head / "src" / "housesitter" / "modules" / "unifi_wifi" / "normalise.py"
+    text = normalise.read_text()
+    old = '"tx_rate_mbps": tx_rate / 1000'
+    assert old in text
+    normalise.write_text(text.replace(old, '"tx_rate_mbps": tx_rate / 100'))
+    results = pr_evidence.build_results(base, head)
+    by_id = {entry["id"]: entry for entry in results["scenarios"]}
+    assert by_id["unifi-wifi-snapshot-typical"]["changed"] is True
+    rebuilt = pr_evidence.render_text_from_results(results, "c" * 40)
+    assert "### `unifi-wifi-snapshot-typical`" in rebuilt
+    assert "tx_rate_mbps" in rebuilt
+    # The old no-config scenario cannot show the change: it only ever
+    # proves config_invalid. This is what the evidence showed before.
+    assert by_id["invoke-unifi-wifi-snapshot"]["changed"] is False
+    assert evidence_checks.validate_results(results, set(wanted)) == []
+
+
+def test_shared_head_fake_serves_both_sides(tmp_path, monkeypatch):
+    # The base tree's own fake is unusable and its fixtures differ, while
+    # HEAD's are normal: both sides must still succeed with identical HEAD
+    # fixture data, from exactly one fake boot for the scenario.
+    require_test_tool(openssl is not None, "openssl is not installed")
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    typical = next(
+        scenario for scenario in scenarios if scenario["id"] == "unifi-wifi-snapshot-typical"
+    )
+    pruned = {"volatile_keys": volatile_keys, "scenarios": [typical]}
+    base = _copy_repo_tree(tmp_path, "base")
+    head = _copy_repo_tree(tmp_path, "head")
+    for tree in (base, head):
+        (tree / "tests" / "evidence" / "scenarios.json").write_text(json.dumps(pruned))
+    (base / "scripts" / "fake_unifi.py").write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.exit('base fake is broken')\n"
+    )
+    sta = base / "tests" / "fixtures" / "unifi_wifi" / "unifi_os_sta.json"
+    doc = json.loads(sta.read_text())
+    doc["data"][0]["name"] = "BASE-MUTANT-CLIENT"
+    sta.write_text(json.dumps(doc))
+    boots = []
+    real_popen = pr_evidence.subprocess.Popen
+
+    def counting(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", [])
+        if any("fake_unifi.py" in str(part) for part in argv):
+            boots.append(argv)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(pr_evidence.subprocess, "Popen", counting)
+    results = pr_evidence.build_results(base, head)
+    assert len(boots) == 1, boots
+    (entry,) = results["scenarios"]
+    assert entry["id"] == "unifi-wifi-snapshot-typical"
+    assert entry["changed"] is False
+    assert "Kitchen Speaker" in entry["before"]
+    assert "Kitchen Speaker" in entry["after"]
+    dumped = json.dumps(results)
+    assert "BASE-MUTANT" not in dumped
+    assert "skipped" not in dumped
+    assert evidence_checks.validate_results(results, {"unifi-wifi-snapshot-typical"}) == []
+
+
+def test_stepped_scenario_reports_sdk_size_and_every_step(tmp_path):
+    # The size column is "envelope size as the SDK measures it": for a
+    # stepped scenario it must be the largest single call's raw stdout,
+    # never the size of the multi-step rendering. The command column must
+    # name every step that ran, in order.
+    require_test_tool(openssl is not None, "openssl is not installed")
+    scenarios, volatile_keys = pr_evidence.load_scenarios(ROOT)
+    stepped = next(
+        scenario for scenario in scenarios if scenario["id"] == "invoke-unifi-wifi-get"
+    )
+    volatile = set(volatile_keys)
+    spec = pr_evidence.validate_fake_spec(stepped["fake"], stepped["id"])
+    raw_sizes = []
+    real_run_one_step = pr_evidence._run_one_step
+
+    def recording(*args, **kwargs):
+        result = real_run_one_step(*args, **kwargs)
+        raw_sizes.append(len(json.dumps(result["stdout"])) - 2)
+        return result
+
+    certdir = tempfile.mkdtemp(prefix="hs-evidence-test-cert-", dir=str(tmp_path))
+    try:
+        cert_paths = pr_evidence.make_cert(certdir)
+        with pr_evidence.run_fake(ROOT, spec, *cert_paths) as fake:
+            pr_evidence._run_one_step = recording
+            try:
+                result = pr_evidence.run_scenario(ROOT, stepped, fake, volatile)
+            finally:
+                pr_evidence._run_one_step = real_run_one_step
+    except pr_evidence._SkipScenario as exc:
+        require_test_tool(False, str(exc))
+        return
+    assert len(raw_sizes) == 2
+    assert result["sdk_size"] == max(raw_sizes)
+    assert result["sdk_size"] < len(json.dumps(result["stdout"])) - 2
+    doc = pr_evidence._results_from_runs(
+        [stepped], volatile, [stepped], True, [(stepped, result, result)], None
+    )
+    (entry,) = doc["scenarios"]
+    assert entry["size_after"] == max(raw_sizes)
+    expected = []
+    for index, step in enumerate(stepped["steps"]):
+        if index:
+            expected.append("&&")
+        expected.extend(["housesitter", *step["argv"]])
+    assert entry["command"] == expected
+    assert evidence_checks.validate_results(doc, {stepped["id"]}) == []

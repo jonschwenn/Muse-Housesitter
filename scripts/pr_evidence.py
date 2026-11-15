@@ -27,9 +27,13 @@ import html
 import json
 import os
 import re
+import select
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 MARKER = "<!-- housesitter-evidence -->"
@@ -56,6 +60,51 @@ STAMPED_MARKER_MAX_BYTES = len(
 MARKER_GROWTH_RESERVE = STAMPED_MARKER_MAX_BYTES - len(MARKER.encode())
 RUN_TIMEOUT_S = 60
 VOLATILE = "<volatile>"
+
+# Fake-controller evidence (Decision 9, option A). A scenario with a "fake"
+# key runs the HEAD tree's scripts/fake_unifi.py on 127.0.0.1 with an
+# ephemeral port, serving the HEAD tree's fixtures, and points the run's
+# fresh HOME at it with a written config plus secrets file — the same files
+# a user would set up (install/config.example.json). Both the base and the
+# head run see the SAME fake, so the diff shows only code changes. The base
+# tree's fake and fixtures are never used.
+#
+#   "fake": {"fixture_set": "typical",              # typical|empty|large
+#            "reject_login": false,                 # 401 on every login
+#            "bad_fingerprint": false},             # pin a wrong fingerprint
+#   "steps": [{"argv": [...]}, ...]                 # sharing one HOME
+#   "render": "data-counts"                        # optional: project every
+#                                                 # list inside "data" to an
+#                                                 # "<N items>" count string
+#                                                 # (default "full" renders
+#                                                 # every record)
+#
+# Without "steps", one step runs scenario["argv"]. Every step's argv may
+# carry $saved_id(N), $more_command(N), or $more_params(N), replaying step
+# N's envelope (the follow-up page replays step 0's "more" call exactly).
+# Steps render with one header each, so a reviewer can tell which step
+# produced which output. "data-counts" keeps scalars, dicts, and everything
+# outside "data" (truncated, more, warnings, source, schema) in full, so
+# summary counts and paging behaviour still diff; the step header says so.
+EVIDENCE_PASSWORD = "PLANTED-SECRET-evidence-unifi-wifi-01"
+FAKE_SCRIPT = Path("scripts/fake_unifi.py")
+FAKE_BOOT_TIMEOUT_S = 30
+FIXTURE_SETS = ("typical", "empty", "large")
+
+
+class FakeError(Exception):
+    """The evidence run itself cannot proceed (missing openssl under
+    HOUSESITTER_REQUIRE_TEST_TOOLS=1). Unlike a skip, this aborts the run."""
+
+
+class _SkipScenario(Exception):
+    """A single scenario's fake could not be provided; the scenario reports
+    as skipped with this reason instead of being dropped."""
+
+
+def tools_required() -> bool:
+    """True when a missing test prerequisite must fail instead of skip."""
+    return os.environ.get("HOUSESITTER_REQUIRE_TEST_TOOLS") == "1"
 SHA_PLACEHOLDER = "__HOUSESITTER_EVIDENCE_SHA__"  # must equal ui_evidence's
 
 # A posted evidence SHA is always 40 hex; every image URL carries one
@@ -200,7 +249,30 @@ def has_package(tree: Path) -> bool:
     return (tree / "src" / "housesitter" / "__init__.py").exists()
 
 
-def run_scenario(tree: Path, scenario: dict) -> dict:
+def run_scenario(
+    tree: Path,
+    scenario: dict,
+    fake: FakeInfo | None = None,
+    volatile: set | frozenset = frozenset(),
+    side: str | None = None,
+) -> dict:
+    """Run one scenario against one tree. Scenarios without a "fake" key
+    behave exactly as before. A scenario with one needs the shared fake
+    (collect_runs passes it so base and head share one); when fake is None
+    the run starts its own from this tree's script (tests and local use —
+    never the base tree's script in collect_runs)."""
+    if scenario.get("fake") is None:
+        return _run_classic(tree, scenario)
+    if fake is None:
+        try:
+            with _self_contained_fake(tree, scenario) as own:
+                return _run_fake_scenario(tree, scenario, own, volatile, side=None)
+        except _SkipScenario as exc:
+            return _skip_result(None, str(exc))
+    return _run_fake_scenario(tree, scenario, fake, volatile, side)
+
+
+def _run_classic(tree: Path, scenario: dict) -> dict:
     with tempfile.TemporaryDirectory(prefix="hs-evidence-") as home:
         env = {
             "HOME": home,
@@ -238,6 +310,516 @@ def run_scenario(tree: Path, scenario: dict) -> dict:
     }
 
 
+def _skip_result(side: str | None, reason: str) -> dict:
+    """A visibly skipped scenario: it keeps its table row and an
+    unexpected-exit line, and the reason reaches results.json, so a skip is
+    reported, never missing. The side label ("base"/"head") makes the two
+    texts differ honestly, so the reason also renders in the comment."""
+    label = f" on {side}" if side else ""
+    stdout = f"(skipped{label}: {reason})\n"
+    return {
+        "exit": 1,
+        "stdout": stdout,
+        "stderr": "",
+        "sdk_size": len(json.dumps(stdout)) - 2,
+        "skipped": reason,
+    }
+
+
+def validate_fake_spec(spec: object, scenario_id: str) -> dict:
+    """Check a scenario's "fake" block; authoring bugs fail loudly."""
+    if not isinstance(spec, dict):
+        raise ValueError(f"scenario {scenario_id!r}: 'fake' must be an object")
+    unknown = set(spec) - {"fixture_set", "reject_login", "bad_fingerprint"}
+    if unknown:
+        raise ValueError(
+            f"scenario {scenario_id!r}: unknown 'fake' keys: {sorted(unknown)}"
+        )
+    fixture_set = spec.get("fixture_set", "typical")
+    if fixture_set not in FIXTURE_SETS:
+        raise ValueError(
+            f"scenario {scenario_id!r}: 'fixture_set' must be one of "
+            f"{list(FIXTURE_SETS)}, got {fixture_set!r}"
+        )
+    for key in ("reject_login", "bad_fingerprint"):
+        if key in spec and type(spec[key]) is not bool:
+            raise ValueError(f"scenario {scenario_id!r}: {key!r} must be a bool")
+    return {
+        "fixture_set": fixture_set,
+        "reject_login": bool(spec.get("reject_login", False)),
+        "bad_fingerprint": bool(spec.get("bad_fingerprint", False)),
+    }
+
+
+RENDER_MODES = ("full", "data-counts")
+
+
+def validate_render_mode(value: object, scenario_id: str) -> str:
+    """Check a scenario's "render" option; authoring bugs fail loudly."""
+    mode = "full" if value is None else value
+    if mode not in RENDER_MODES:
+        raise ValueError(
+            f"scenario {scenario_id!r}: 'render' must be one of "
+            f"{list(RENDER_MODES)}, got {value!r}"
+        )
+    return mode
+
+
+def _lists_to_counts(node: object) -> object:
+    if isinstance(node, list):
+        return f"<{len(node)} items>"
+    if isinstance(node, dict):
+        return {key: _lists_to_counts(value) for key, value in node.items()}
+    return node
+
+
+def project_data_counts(envelope: object) -> object:
+    """Project an envelope for "data-counts" rendering: every list inside
+    "data" (recursively) becomes an "<N items>" string. Scalars, dicts, and
+    everything outside "data" pass through untouched."""
+    if not isinstance(envelope, dict) or "data" not in envelope:
+        return envelope
+    projected = dict(envelope)
+    projected["data"] = _lists_to_counts(envelope["data"])
+    return projected
+
+
+def scenario_steps(scenario: dict) -> list:
+    """The step list a fake scenario runs; authoring bugs fail loudly."""
+    steps = scenario.get("steps")
+    if steps is None:
+        return [{"argv": scenario["argv"]}]
+    if not isinstance(steps, list) or not steps:
+        raise ValueError(f"scenario {scenario['id']!r}: 'steps' must be a non-empty list")
+    for step in steps:
+        if not isinstance(step, dict) or set(step) != {"argv"}:
+            raise ValueError(
+                f"scenario {scenario['id']!r}: each step must be exactly "
+                f"{{'argv': [...]}}, got {step!r}"
+            )
+        argv = step["argv"]
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or any(not isinstance(arg, str) for arg in argv)
+        ):
+            raise ValueError(
+                f"scenario {scenario['id']!r}: step argv must be a non-empty "
+                f"list of strings, got {argv!r}"
+            )
+    return steps
+
+
+class FakeInfo:
+    """A running fake controller: its port and the fingerprint it prints."""
+
+    def __init__(self, proc: subprocess.Popen[bytes], port: int, fingerprint: str):
+        self.proc = proc
+        self.port = port
+        self.fingerprint = fingerprint
+
+
+def make_cert(directory: str) -> tuple:
+    """Mint a throwaway self-signed cert with openssl (never committed).
+
+    Returns (cert_path, key_path). Missing openssl fails the run when
+    HOUSESITTER_REQUIRE_TEST_TOOLS=1 demands tools, else the caller turns
+    it into a per-scenario skip.
+    """
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        reason = "openssl is not installed: cannot mint a throwaway evidence cert"
+        if tools_required():
+            raise FakeError(reason)
+        raise _SkipScenario(reason)
+    cert_path = str(Path(directory) / "evidence-cert.pem")
+    key_path = str(Path(directory) / "evidence-key.pem")
+    proc = subprocess.run(
+        [
+            openssl, "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", key_path, "-out", cert_path, "-days", "1",
+            "-nodes", "-subj", "/CN=127.0.0.1",
+        ],
+        capture_output=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        tail = decode(proc.stderr)[-300:]
+        raise _SkipScenario(f"openssl could not mint an evidence cert: {tail}")
+    return cert_path, key_path
+
+
+def _wait_for_lines(proc: subprocess.Popen[bytes], needles: list, timeout: float) -> dict:
+    """Read the child's stdout until every needle has appeared (select so a
+    silent child cannot hang the evidence run past the timeout)."""
+    found: dict = {}
+    buf = ""
+    fd = proc.stdout.fileno()
+    deadline = time.monotonic() + timeout
+    while len(found) < len(needles):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            break
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break  # EOF: the child is gone
+        buf += chunk.decode("utf-8", errors="replace")
+        while "\n" in buf:
+            line, buf = buf.split("\n", 1)
+            for needle in needles:
+                if needle in line and needle not in found:
+                    found[needle] = line
+    missing = [needle for needle in needles if needle not in found]
+    if missing:
+        raise _SkipScenario(
+            "the fake controller did not start "
+            f"(never saw {missing[0]!r} on its stdout)"
+        )
+    return found
+
+
+def _stop_fake(proc: subprocess.Popen[bytes]) -> None:
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+    except OSError:
+        pass
+    finally:
+        try:
+            if proc.stdout:
+                proc.stdout.close()
+        except OSError:
+            pass
+
+
+@contextmanager
+def run_fake(head_tree: Path, spec: dict, cert_path: str, key_path: str):
+    """Boot the HEAD tree's fake for one scenario; both trees share it."""
+    argv = [
+        sys.executable,
+        str(head_tree / FAKE_SCRIPT),
+        "--cert", cert_path,
+        "--key", key_path,
+        "--bind", "127.0.0.1",
+        "--port", "0",
+        "--fixture-set", spec["fixture_set"],
+    ]
+    if spec["reject_login"]:
+        argv.append("--reject-login")
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise _SkipScenario(f"the fake controller could not start: {exc}") from exc
+    # One cleanup for everything after a successful Popen: startup-wait
+    # failures (including KeyboardInterrupt and unexpected OSError, which
+    # are not _SkipScenario), unparseable startup lines, and exceptions or
+    # interrupts during the run all reap the child.
+    try:
+        lines = _wait_for_lines(
+            proc,
+            ["listening on https://127.0.0.1:", "fingerprint_sha256:"],
+            FAKE_BOOT_TIMEOUT_S,
+        )
+        try:
+            port = int(lines["listening on https://127.0.0.1:"].rsplit(":", 1)[1].strip())
+            fingerprint = lines["fingerprint_sha256:"].split("fingerprint_sha256:", 1)[1].strip()
+            if not 1 <= port <= 65535 or not fingerprint:
+                raise ValueError("unparseable startup line")
+        except (ValueError, IndexError) as exc:
+            raise _SkipScenario(
+                f"the fake controller printed an unparseable startup line: {exc}"
+            ) from exc
+        yield FakeInfo(proc, port, fingerprint)
+    finally:
+        _stop_fake(proc)
+
+
+@contextmanager
+def _self_contained_fake(tree: Path, scenario: dict):
+    """A fake from this tree's own script, for direct run_scenario calls."""
+    spec = validate_fake_spec(scenario.get("fake"), scenario["id"])
+    with tempfile.TemporaryDirectory(prefix="hs-evidence-cert-") as certdir:
+        cert_path, key_path = make_cert(certdir)
+        with run_fake(tree, spec, cert_path, key_path) as fake:
+            yield fake
+
+
+def write_fake_home(home: str, fake: FakeInfo, spec: dict) -> None:
+    """Write config.json plus the secrets file into the run's fresh HOME —
+    the same two files a user sets up (install/config.example.json)."""
+    cfg_dir = Path(home) / ".config" / "housesitter"
+    secrets_dir = cfg_dir / "secrets"
+    secrets_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(secrets_dir, 0o700)
+    fingerprint = fake.fingerprint
+    if spec["bad_fingerprint"]:
+        first = "0" if not fingerprint.startswith("0") else "1"
+        fingerprint = first + fingerprint[1:]
+    config = {
+        "housesitter": {"identifiers": "full", "retention": 500},
+        "modules": {
+            "unifi_wifi": {
+                "enabled": True,
+                "base_url": f"https://127.0.0.1:{fake.port}",
+                "site": "default",
+                "flavor": "unifi_os",
+                "auth": {
+                    "username": "housesitter-readonly",
+                    "password_secret": "unifi_password",
+                },
+                "tls": {"fingerprint_sha256": fingerprint},
+                "request_timeout_s": 15,
+            }
+        },
+    }
+    (cfg_dir / "config.json").write_text(json.dumps(config, indent=2, sort_keys=True))
+    secret_path = secrets_dir / "unifi_password"
+    secret_path.write_text(EVIDENCE_PASSWORD)
+    os.chmod(secret_path, 0o600)
+
+
+_SAVED_REF_RE = re.compile(r"\$saved_id\((\d+)\)")
+_MORE_COMMAND_REF_RE = re.compile(r"\$more_command\((\d+)\)")
+_MORE_PARAMS_REF_RE = re.compile(r"\$more_params\((\d+)\)")
+
+
+class _BadStepReference(Exception):
+    """A step replays a value an earlier step never produced."""
+
+
+def _envelope_of(step_result: dict):
+    """The step's stdout parsed as an envelope, else None."""
+    try:
+        parsed = json.loads(step_result["stdout"])
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _replay_value(envelopes: list, step_index: int, match: re.Match, kind: str) -> str:
+    number = int(match.group(1))
+    if number >= len(envelopes):
+        raise _BadStepReference(
+            f"step {step_index} replays step {number}, which has not run yet"
+        )
+    envelope = envelopes[number]
+    if not isinstance(envelope, dict):
+        raise _BadStepReference(
+            f"step {step_index} replays step {number}, whose output is not JSON"
+        )
+    if kind == "saved":
+        value = envelope.get("saved")
+        if not isinstance(value, str) or not value:
+            raise _BadStepReference(
+                f"step {step_index} replays step {number}'s saved id, "
+                "which that step never produced"
+            )
+        return value
+    more = envelope.get("more")
+    if not isinstance(more, dict):
+        raise _BadStepReference(
+            f"step {step_index} replays step {number}'s follow-up page, "
+            "which that step has none of (not truncated)"
+        )
+    if kind == "command":
+        command = more.get("command")
+        if not isinstance(command, str) or not command:
+            raise _BadStepReference(
+                f"step {number}'s follow-up page has no command to replay"
+            )
+        return command
+    params = more.get("params")
+    if not isinstance(params, dict):
+        raise _BadStepReference(
+            f"step {number}'s follow-up page has no params to replay"
+        )
+    return json.dumps(params, sort_keys=True)
+
+
+def _resolve_step_argv(argv: list, envelopes: list, step_index: int) -> list:
+    """Substitute $saved_id(N)/$more_command(N)/$more_params(N)."""
+    resolved = []
+    for token in argv:
+        token = _SAVED_REF_RE.sub(
+            lambda match: _replay_value(envelopes, step_index, match, "saved"), token
+        )
+        token = _MORE_COMMAND_REF_RE.sub(
+            lambda match: _replay_value(envelopes, step_index, match, "command"), token
+        )
+        token = _MORE_PARAMS_REF_RE.sub(
+            lambda match: _replay_value(envelopes, step_index, match, "params"), token
+        )
+        resolved.append(token)
+    return resolved
+
+
+def _run_one_step(tree: Path, argv: list, home: str, env: dict) -> dict:
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "housesitter", *argv],
+            cwd=home,
+            env=env,
+            input=b"",
+            capture_output=True,
+            timeout=RUN_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "argv": argv,
+            "exit": "timeout",
+            "stdout": decode(exc.stdout),
+            "stderr": decode(exc.stderr),
+        }
+    return {
+        "argv": argv,
+        "exit": proc.returncode,
+        "stdout": decode(proc.stdout),
+        "stderr": decode(proc.stderr),
+    }
+
+
+def _collect_redactions(step_results: list) -> set:
+    """Volatile strings the run produced (saved ids, collection times):
+    redacting the exact strings in the echoed step headers keeps runs
+    deterministic without touching real module output."""
+    values = set()
+    for step in step_results:
+        envelope = _envelope_of(step)
+        if not isinstance(envelope, dict):
+            continue
+        for key in ("saved", "collected_at"):
+            value = envelope.get(key)
+            if isinstance(value, str) and len(value) >= 8:
+                values.add(value)
+        more = envelope.get("more")
+        if isinstance(more, dict) and isinstance(more.get("params"), dict):
+            value = more["params"].get("id")
+            if isinstance(value, str) and len(value) >= 8:
+                values.add(value)
+    return values
+
+
+def _render_step(
+    step: dict,
+    index: int,
+    count: int,
+    volatile: set,
+    redactions: set | frozenset = frozenset(),
+    data_counts: bool = False,
+) -> str:
+    out = step["stdout"]
+    try:
+        parsed = json.loads(out)
+    except ValueError:
+        pass
+    else:
+        blanked = blank_volatile(parsed, volatile)
+        if data_counts:
+            blanked = project_data_counts(blanked)
+        out = json.dumps(blanked, indent=2, sort_keys=True) + "\n"
+    # Redaction applies ONLY to the echoed argv header: the replayed saved
+    # and follow-up ids must not leak run-specific values into the diff, but
+    # the JSON body is already blanked by volatile_keys and any real module
+    # datum that happens to equal a volatile string (a client name matching
+    # collected_at, say) must survive verbatim, or a real change to that
+    # datum would compare as unchanged. Stderr renders verbatim: module logs
+    # below WARNING never reach it (only fixed info strings exist), and the
+    # determinism test pins two real runs byte-identical, which would fail
+    # if stderr carried anything volatile.
+    header_argv = " ".join(step["argv"])
+    if redactions:
+        header_argv = _redact_known_values(header_argv, redactions)
+    notice = "(data lists shown as item counts)\n" if data_counts else ""
+    text = (
+        f"--- step {index + 1}/{count} ---\n"
+        f"{notice}"
+        f"$ housesitter {header_argv}\n"
+        f"$ exit {step['exit']}\n--- stdout ---\n{out}"
+    )
+    if step["stderr"]:
+        text += f"--- stderr ---\n{step['stderr']}"
+    if not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+def _run_fake_scenario(
+    tree: Path, scenario: dict, fake: FakeInfo, volatile: set | frozenset, side: str | None
+) -> dict:
+    spec = validate_fake_spec(scenario.get("fake"), scenario["id"])
+    steps = scenario_steps(scenario)
+    data_counts = validate_render_mode(scenario.get("render"), scenario["id"]) == "data-counts"
+    with tempfile.TemporaryDirectory(prefix="hs-evidence-") as home:
+        env = {
+            "HOME": home,
+            "USER": "evidence",
+            "LOGNAME": "evidence",
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "PYTHONPATH": str((tree / "src").resolve()),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        try:
+            write_fake_home(home, fake, spec)
+        except OSError as exc:
+            return _skip_result(side, f"could not write the evidence home: {exc}")
+        step_results = []
+        envelopes: list = []
+        for index, step in enumerate(steps):
+            try:
+                argv = _resolve_step_argv(step["argv"], envelopes, index)
+            except _BadStepReference as exc:
+                step_results.append(
+                    {
+                        "argv": step["argv"],
+                        "exit": 1,
+                        "stdout": f"(bad step reference: {exc})\n",
+                        "stderr": "",
+                    }
+                )
+                envelopes.append(None)
+                continue
+            result = _run_one_step(tree, argv, home, env)
+            step_results.append(result)
+            envelopes.append(_envelope_of(result))
+    volatile_set = set(volatile)
+    redactions = _collect_redactions(step_results)
+    combined = "".join(
+        _render_step(step, index, len(step_results), volatile_set, redactions, data_counts)
+        for index, step in enumerate(step_results)
+    )
+    exit_code: object = 0
+    for step in step_results:
+        if step["exit"] != 0:
+            exit_code = step["exit"]
+            break
+    else:
+        exit_code = step_results[-1]["exit"]
+    return {
+        "exit": exit_code,
+        "stdout": combined,
+        "stderr": "",
+        # The SDK measures each call's raw stdout, not this rendering; a
+        # stepped scenario reports its largest call, the one closest to the
+        # budget.
+        "sdk_size": max(len(json.dumps(step["stdout"])) - 2 for step in step_results),
+        "stepped": True,
+    }
+
+
+def _redact_known_values(text: str, values: set) -> str:
+    for value in sorted(values, key=len, reverse=True):
+        text = text.replace(value, VOLATILE)
+    return text
+
+
 def decode(data: bytes | str | None) -> str:
     if data is None:
         return ""
@@ -246,18 +828,43 @@ def decode(data: bytes | str | None) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def blank_volatile(obj: object, keys: set[str]) -> object:
+def blank_volatile(obj: object, keys: set) -> object:
+    """Blank volatile values: a bare key matches at any depth (as before);
+    a dotted key ("more.params.id") matches that path from the envelope
+    root only, so real module output that shares a leaf name stays."""
+    names = {key for key in keys if "." not in key}
+    paths = [tuple(key.split(".")) for key in keys if "." in key]
+    return _blank_volatile(obj, names, paths, ())
+
+
+def _blank_volatile(obj: object, names: set, paths: list, prefix: tuple) -> object:
     if isinstance(obj, dict):
-        return {k: (VOLATILE if k in keys else blank_volatile(v, keys)) for k, v in obj.items()}
+        return {
+            key: (
+                VOLATILE
+                if key in names or prefix + (key,) in paths
+                else _blank_volatile(value, names, paths, prefix + (key,))
+            )
+            for key, value in obj.items()
+        }
     if isinstance(obj, list):
-        return [blank_volatile(v, keys) for v in obj]
+        return [_blank_volatile(value, names, paths, prefix) for value in obj]
     return obj
 
 
-def render(result: dict | None, volatile: set[str]) -> str:
+def render(result: dict | None, volatile: set) -> str:
     """Stable text form of one run, used for diffing and display."""
     if result is None:
         return "(not present)\n"
+    if result.get("stepped"):
+        # Multi-step runs are already rendered per step (with volatile
+        # bodies and redacted headers); emit verbatim.
+        text = result["stdout"]
+        if result["stderr"]:
+            text += f"--- stderr ---\n{result['stderr']}"
+        if not text.endswith("\n"):
+            text += "\n"
+        return text
     out = result["stdout"]
     try:
         parsed = json.loads(out)
@@ -666,16 +1273,40 @@ def collect_runs(base_tree: Path, head_tree: Path) -> tuple:
     (scenarios, volatile, base_scenarios, base_ok, runs) where runs is a list
     of (scenario, before, after); before is None when the base has no
     package. Both comment builders below share this, so the text comment
-    and the structured results describe the same runs."""
+    and the structured results describe the same runs.
+
+    Fake scenarios share one fake per scenario (booted from the HEAD tree,
+    serving the HEAD tree's fixtures) for the base and head runs, and one
+    throwaway cert for the whole collection. A fake that cannot be provided
+    becomes a visible skip on both sides, never a dropped scenario."""
     scenarios, volatile_keys = load_scenarios(head_tree)
     volatile = set(volatile_keys)
     base_scenarios = load_scenarios(base_tree)[0]
     base_ok = has_package(base_tree)
     runs = []
-    for scenario in scenarios:
-        before = run_scenario(base_tree, scenario) if base_ok else None
-        after = run_scenario(head_tree, scenario)
-        runs.append((scenario, before, after))
+    with tempfile.TemporaryDirectory(prefix="hs-evidence-cert-") as certdir:
+        cert_paths: tuple | None = None
+        for scenario in scenarios:
+            if scenario.get("fake") is None:
+                before = run_scenario(base_tree, scenario) if base_ok else None
+                after = run_scenario(head_tree, scenario)
+                runs.append((scenario, before, after))
+                continue
+            spec = validate_fake_spec(scenario.get("fake"), scenario["id"])
+            try:
+                if cert_paths is None:
+                    cert_paths = make_cert(certdir)
+                with run_fake(head_tree, spec, *cert_paths) as fake:
+                    before = (
+                        run_scenario(base_tree, scenario, fake, volatile, side="base")
+                        if base_ok
+                        else None
+                    )
+                    after = run_scenario(head_tree, scenario, fake, volatile, side="head")
+            except _SkipScenario as exc:
+                before = _skip_result("base", str(exc)) if base_ok else None
+                after = _skip_result("head", str(exc))
+            runs.append((scenario, before, after))
     return scenarios, volatile, base_scenarios, base_ok, runs
 
 
@@ -707,11 +1338,20 @@ def _results_from_runs(
         before_text = render(before, volatile) if before is not None else None
         after_text = render(after, volatile)
         new = before is None or scenario["id"] not in base_ids
+        command = ["housesitter", *scenario["argv"]]
+        if scenario.get("fake") is not None and scenario.get("steps"):
+            # Show every step in order, as authored (replay references
+            # unresolved), so the table names what actually ran.
+            command = []
+            for index, step in enumerate(scenario["steps"]):
+                if index:
+                    command.append("&&")
+                command.extend(["housesitter", *step["argv"]])
         entries.append(
             {
                 "id": scenario["id"],
                 "title": scenario.get("title", ""),
-                "command": ["housesitter", *scenario["argv"]],
+                "command": command,
                 "exit_before": before["exit"] if before is not None else None,
                 "exit_after": after["exit"],
                 "expected_exit": scenario.get("expect_exit", 0),
@@ -1025,6 +1665,14 @@ def main(argv: list[str] | None = None) -> int:
     except Refused as exc:
         print(f"pr_evidence: refused: {exc}", file=sys.stderr)
         return 2
+    try:
+        return _run_with_trees(args)
+    except FakeError as exc:
+        print(f"pr_evidence: cannot run fake-controller evidence: {exc}", file=sys.stderr)
+        return 2
+
+
+def _run_with_trees(args: argparse.Namespace) -> int:
     if args.results_out is not None:
         # One shared collection run feeds both outputs, so the text comment
         # (for the old publisher, while this rolls out) and the structured
