@@ -1080,6 +1080,67 @@ def test_manifest_claims_skip_only_with_the_reason(tmp_path):
     assert evidence_checks.manifest_claims_skip(ui_dir) is True
 
 
+def test_manifest_claims_skip_refuses_an_oversized_manifest_without_reading_it(
+    tmp_path, monkeypatch
+):
+    # F4: a hostile 2 MB manifest must be refused before it is read in full.
+    ui_dir = tmp_path / "ui_out"
+    ui_dir.mkdir()
+    manifest = ui_dir / "ui_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "base_skipped": "ui_inputs_identical",
+                "captures": [],
+                "padding": "x" * 2_000_000,
+            }
+        )
+    )
+    reads = []
+    real_read_text = Path.read_text
+
+    def record(self, *args, **kwargs):
+        if self == manifest:
+            reads.append(self.stat().st_size)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", record)
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    assert reads == []
+
+
+def test_manifest_claims_skip_ignores_a_symlink_and_bad_json(tmp_path):
+    ui_dir = tmp_path / "ui_out"
+    ui_dir.mkdir()
+    real = ui_dir / "real.json"
+    real.write_text(json.dumps({"version": 1, "base_skipped": "x", "captures": []}))
+    link = ui_dir / "ui_manifest.json"
+    link.symlink_to(real)
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    link.unlink()
+    link.write_text("{not json")
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    link.write_text(json.dumps({"version": 1, "captures": []}))
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+
+
+def _load_ui_evidence():
+    spec = importlib.util.spec_from_file_location(
+        "ui_evidence_cap_pin", ROOT / "scripts" / "ui_evidence.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_skip_preflight_cap_matches_the_manifest_cap():
+    assert (
+        evidence_checks.UI_MANIFEST_MAX_BYTES
+        == _load_ui_evidence().MANIFEST_MAX_BYTES
+    )
+
+
 def test_safe_paths_cover_the_documented_areas():
     safe = [
         "docs/anything.md",

@@ -771,17 +771,30 @@ def check_ui_skip(
         raise ValueError(f"UI inputs differ: {', '.join(forcing)}")
 
 
+# The manifest itself is a few kilobytes (see ui_evidence.MANIFEST_MAX_BYTES,
+# pinned equal by test). The skip preflight must apply the cap BEFORE it
+# reads: a hostile oversized manifest is refused without being read in full.
+UI_MANIFEST_MAX_BYTES = 1_000_000
 
 
 def manifest_claims_skip(ui_dir: Path) -> bool:
     """Whether the artifact's manifest claims the base captures were skipped.
 
-    Unreadable or corrupt manifests return False: the renderer refuses them
-    on its own, with its own reason.
+    Bounded and symlink-aware: a symlink, a missing file, an oversized
+    file, or an unreadable or corrupt manifest returns False. Oversized and
+    corrupt manifests are still refused, with a fixed reason, by the
+    renderer's own bounded validation; this preflight only decides whether
+    the skip needs verifying at all. Malformed or deeply nested JSON gets
+    the fixed refusal downstream, never an exception here.
     """
     try:
-        doc = json.loads((Path(ui_dir) / "ui_manifest.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        path = Path(ui_dir) / "ui_manifest.json"
+        if path.is_symlink() or not path.is_file():
+            return False
+        if path.stat().st_size > UI_MANIFEST_MAX_BYTES:
+            return False
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
         return False
     return isinstance(doc, dict) and "base_skipped" in doc
 
