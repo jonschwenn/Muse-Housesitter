@@ -1270,6 +1270,151 @@ def test_evidence_job_decides_the_skip_from_git_object_ids():
     assert "--git-dir" in workflow
 
 
+def _decide_step_shell():
+    """The decide step's shell, extracted from ci.yml (not retyped)."""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    marker = "- name: Decide whether base captures can be skipped"
+    start = workflow.index(marker)
+    run_at = workflow.index("run: |", start)
+    block = workflow[run_at + len("run: |"):]
+    end = block.index("\n      - ")
+    body = block[:end].splitlines()
+    # De-indent the block scalar by its least-indented non-empty line.
+    indents = [
+        len(line) - len(line.lstrip()) for line in body if line.strip()
+    ]
+    cut = min(indents)
+    shell = "\n".join(line[cut:] if len(line) >= cut else "" for line in body)
+    assert "inputs-identical" in shell
+    return shell
+
+
+def _run_decide_shell(shell, workspace, base_sha, head_sha):
+    """Run the extracted decide shell; return the SKIP_BASE it records."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    # The workflow runs on setup-python, where `python` exists: shim it.
+    bindir = workspace / "bin"
+    bindir.mkdir(exist_ok=True)
+    link = bindir / "python"
+    if not link.exists():
+        link.symlink_to(sys.executable)
+    # The decide step runs the PR checkout's own script against the same
+    # checkout's git objects: stage the real script under head/scripts, so
+    # a missing file can never masquerade as a decision (an untracked file
+    # is invisible to the base/head diff).
+    staged = workspace / "head" / "scripts"
+    staged.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(
+        ROOT / "scripts" / "evidence_checks.py",
+        staged / "evidence_checks.py",
+    )
+    env_file = workspace / "github_env"
+    env_file.write_text("")
+    env = dict(
+        os.environ,
+        BASE_SHA=base_sha,
+        HEAD_SHA=head_sha,
+        GITHUB_ENV=str(env_file),
+        PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+    )
+    script = workspace / "decide.sh"
+    script.write_text("set -euo pipefail\n" + shell + "\n")
+    subprocess.run(
+        ["bash", str(script)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(workspace),
+        env=env,
+    )
+    recorded = {}
+    for line in env_file.read_text().splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            recorded[key] = value
+    assert "SKIP_BASE" in recorded, f"decide step set no SKIP_BASE: {shell!r}"
+    return recorded["SKIP_BASE"]
+
+
+def _git_repo_with_capture_input(tmp_path, name="repo"):
+    """A git repo with a capture-affecting path, committed once."""
+    import subprocess as _subprocess
+
+    repo = tmp_path / name
+    (repo / "docs").mkdir(parents=True)
+    (repo / "docs" / "prose.md").write_text("prose\n")
+    (repo / "web").mkdir()
+    (repo / "web" / "index.html").write_text("page\n")
+
+    def git(*args):
+        _subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def commit(message):
+        git(
+            "-c", "user.email=test@example.com",
+            "-c", "user.name=evidence-test",
+            "commit", "-qm", message,
+        )
+        done = _subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return done.stdout.strip()
+
+    git("init", "-q")
+    git("add", "-A")
+    base = commit("seed")
+    (repo / "web" / "index.html").write_text("changed page\n")
+    git("add", "-A")
+    head = commit("change capture input")
+    return repo, base, head
+
+
+def test_decide_step_skips_only_when_nothing_capture_affecting_changed(tmp_path):
+    # F5: run the workflow's actual decide shell against a temp repo whose
+    # base and head differ on a capture-affecting path. It must NOT choose
+    # the skip.
+    import shutil
+
+    shell = _decide_step_shell()
+    assert '--base-sha "$BASE_SHA"' in shell
+    assert '--head-sha "$HEAD_SHA"' in shell
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    repo, base, head = _git_repo_with_capture_input(tmp_path)
+    assert base != head
+    shutil.copytree(repo, workspace / "head")
+    assert _run_decide_shell(shell, workspace, base, head) == "false"
+
+
+def test_decide_step_mutated_to_head_vs_head_selects_the_skip(tmp_path):
+    # F5 sensitivity proof: comparing the head against itself must select
+    # the skip, so the test above is not vacuous. Run with the mutation the
+    # reviewer tried (both SHAs are the head); the test fails if it ever
+    # reports anything but the skip.
+    import shutil
+
+    shell = _decide_step_shell().replace(
+        '--base-sha "$BASE_SHA"', '--base-sha "$HEAD_SHA"'
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    repo, base, head = _git_repo_with_capture_input(tmp_path)
+    shutil.copytree(repo, workspace / "head")
+    assert _run_decide_shell(shell, workspace, base, head) == "true"
+
+
 def test_section_names_the_capturing_browser():
     manifest = make_manifest()
     manifest["browser"] = {"channel": "chrome", "version": "131.0.6778"}
