@@ -155,11 +155,11 @@ jobs:
         run: |
           python -m pip install -e "./head[ui]"
           google-chrome --version
-      # Decision 6: when every UI input is identical between the base and
-      # head commits, the base captures are skipped (the head is still
-      # captured and every UI check still runs on it). The comparison uses
-      # git object ids from the two commits above, never file contents or
-      # PR claims; the publisher re-verifies the claim with main's list.
+      # Decision 6: when no capture-affecting path differs between the
+      # base and head commits, the base captures are skipped (the head is
+      # still captured and every UI check still runs on it). The
+      # comparison diffs the two commits above, never file contents or PR
+      # claims; the publisher re-verifies the claim with main's safe list.
       - name: Decide whether base captures can be skipped
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

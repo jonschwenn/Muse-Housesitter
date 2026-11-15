@@ -701,35 +701,29 @@ def test_trailing_zlib_data_is_rejected():
     assert evidence_checks.validate_png(_png_idat(4, 4, 6, payload)) != []
 
 
-# Decision 6 (skip the base captures when every UI input is identical). ------
+# Decision 6 (skip the base captures when nothing capture-affecting changed).
 #
-# One fixed list of UI-input paths lives in evidence_checks (trusted,
-# ci-guard-protected code shared by the PR-side check and main's
-# publisher). Skip decisions compare git object ids, never file contents or
-# PR claims.
+# Inverted rule: the skip is allowed ONLY when every path that differs
+# between the base and head commits is on the fixed safe list in
+# evidence_checks (trusted, ci-guard-protected code shared by the PR-side
+# check and main's publisher). Anything else — a new helper under
+# scripts/, a top-level sys.path file, a mode change, a symlink — forces a
+# full capture. Skip decisions compare the differing set, never file
+# contents or PR claims.
 
 
-def test_ui_inputs_cover_every_capture_input():
-    # Loosening this list silently widens what counts as "identical", so the
+def test_safe_skip_list_is_pinned():
+    # Narrowing this list forces more full captures (safe); widening it
+    # silently skips captures over changed inputs (unsafe). Either way the
     # values are pinned here: changing them is a visible change to this
     # protected test file.
-    assert set(evidence_checks.UI_INPUTS) == {
-        "web/",
-        "tests/fixtures/dashboard/",
-        "scripts/dev_dashboard.py",
-        "scripts/ui_evidence.py",
-        "scripts/make_dashboard_fixtures.py",
-        "scripts/evidence_checks.py",
-        "pyproject.toml",
-        ".github/workflows/ci.yml",
-    }
-    # Directories carry a trailing slash; everything else is a file.
-    for path in evidence_checks.UI_INPUTS:
-        assert path == path.strip() and ".." not in path.split("/")
-        if path.endswith("/"):
-            assert (ROOT / path).is_dir(), path
-        else:
-            assert (ROOT / path).is_file(), path
+    assert evidence_checks.UI_SKIP_SAFE_DIRS == (
+        "docs/",
+        "install/",
+        "tests/",
+        "src/housesitter/",
+        ".github/",
+    )
     assert evidence_checks.UI_SKIP_REASON == "ui_inputs_identical"
     assert (
         evidence_checks.UI_SKIP_NOTE
@@ -762,61 +756,131 @@ def _git_commit(repo, message):
     return done.stdout.strip()
 
 
-def _git_repo_with_inputs(tmp_path, name="repo"):
-    """A git repo holding every UI input path, committed once."""
+def _git_repo_with_paths(tmp_path, name="repo"):
+    """A git repo holding one file under each safe and unsafe area."""
     repo = tmp_path / name
-    for path in evidence_checks.UI_INPUTS:
-        target = repo / path
-        if path.endswith("/"):
-            (target / "placeholder.txt").parent.mkdir(parents=True)
-            (target / "placeholder.txt").write_text("fixture\n")
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(f"# {path}\n")
+    seed = {
+        "docs/prose.md": "prose\n",
+        "README.md": "readme\n",
+        "LICENSE": "license\n",
+        "install/setup.sh": "setup\n",
+        "tests/test_pins.py": "pins\n",
+        "tests/fixtures/dashboard/typical.json": "{}\n",
+        "src/housesitter/pkg.py": "pkg\n",
+        ".github/workflows/ci.yml": "ci\n",
+        ".github/other.yml": "other\n",
+        "scripts/dev_dashboard.py": "serve\n",
+        "web/index.html": "page\n",
+        "pyproject.toml": "build\n",
+    }
+    for rel, text in seed.items():
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
-    return repo, _git_commit(repo, "inputs")
+    return repo, _git_commit(repo, "seed")
 
 
-def test_identical_inputs_compare_equal(tmp_path):
-    repo, sha = _git_repo_with_inputs(tmp_path)
-    assert evidence_checks.ui_inputs_differ_git(repo, sha, sha) == []
-
-
-def test_one_changed_input_is_reported(tmp_path):
-    repo, base = _git_repo_with_inputs(tmp_path)
-    (repo / "web" / "placeholder.txt").write_text("changed\n")
+def _change_and_commit(repo, rel, text="changed\n"):
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
     _git(repo, "add", "-A")
-    head = _git_commit(repo, "change web")
-    assert evidence_checks.ui_inputs_differ_git(repo, base, head) == ["web/"]
+    return _git_commit(repo, f"change {rel}")
 
 
-def test_input_missing_on_one_side_counts_as_different(tmp_path):
-    repo, base = _git_repo_with_inputs(tmp_path)
-    (repo / "web" / "placeholder.txt").unlink()
+def test_no_changes_allow_the_skip(tmp_path):
+    repo, sha = _git_repo_with_paths(tmp_path)
+    assert evidence_checks.ui_forcing_changes_git(repo, sha, sha) == []
+
+
+def test_docs_only_change_skips(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "docs/prose.md")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == []
+    repo2, base2 = _git_repo_with_paths(tmp_path, name="repo2")
+    head2 = _change_and_commit(repo2, "README.md")
+    assert evidence_checks.ui_forcing_changes_git(repo2, base2, head2) == []
+
+
+def test_unlisted_scripts_helper_forces_a_full_capture(tmp_path):
+    # The reviewer's case: scripts/mimetypes.py shadows the stdlib module
+    # when dev_dashboard.py runs, changing pixels with no listed input
+    # differing. Under the inverted rule any scripts/** addition forces a
+    # full capture.
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "scripts/mimetypes.py")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "scripts/mimetypes.py"
+    ]
+
+
+def test_src_sitecustomize_forces_a_full_capture(tmp_path):
+    # An editable install puts src/ on sys.path, where Python auto-imports
+    # a top-level src/sitecustomize.py at startup. Only paths inside
+    # src/housesitter/ are safe.
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "src/sitecustomize.py")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "src/sitecustomize.py"
+    ]
+
+
+def test_dashboard_fixture_change_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "tests/fixtures/dashboard/typical.json")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "tests/fixtures/dashboard/typical.json"
+    ]
+
+
+def test_mode_only_change_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    target = repo / "docs" / "prose.md"
+    target.chmod(0o755)
     _git(repo, "add", "-A")
-    head = _git_commit(repo, "drop web")
-    assert "web/" in evidence_checks.ui_inputs_differ_git(repo, base, head)
+    head = _git_commit(repo, "mode only")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "docs/prose.md"
+    ]
 
 
-def test_input_missing_on_both_sides_is_identical(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    (repo / "notes.txt").write_text("docs only\n")
+def test_symlink_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    (repo / "scripts" / "helper.py").symlink_to("dev_dashboard.py")
     _git(repo, "add", "-A")
-    base = _git_commit(repo, "one")
-    (repo / "notes.txt").write_text("docs only, revised\n")
-    _git(repo, "add", "-A")
-    head = _git_commit(repo, "two")
-    assert (
-        evidence_checks.ui_inputs_differ_git(repo, base, head, inputs=["web/"])
-        == []
-    )
+    head = _git_commit(repo, "add symlink")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "scripts/helper.py"
+    ]
+
+
+def test_gitlink_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    blob = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD:README.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{blob},vendor/lib")
+    head = _git_commit(repo, "add gitlink")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "vendor/lib"
+    ]
+
+
+def test_new_top_level_file_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "sitecustomize.py")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "sitecustomize.py"
+    ]
 
 
 def test_inputs_identical_command_reports_the_decision(tmp_path, capsys):
-    repo, sha = _git_repo_with_inputs(tmp_path)
+    repo, sha = _git_repo_with_paths(tmp_path)
     assert (
         evidence_checks.main(
             [
@@ -828,14 +892,12 @@ def test_inputs_identical_command_reports_the_decision(tmp_path, capsys):
         )
         == 0
     )
-    assert "identical" in capsys.readouterr().out
+    assert "no capture-affecting change" in capsys.readouterr().out
 
 
 def test_inputs_identical_command_reports_differences(tmp_path, capsys):
-    repo, base = _git_repo_with_inputs(tmp_path)
-    (repo / "scripts" / "ui_evidence.py").write_text("# changed\n")
-    _git(repo, "add", "-A")
-    head = _git_commit(repo, "change capture")
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "scripts/mimetypes.py")
     assert (
         evidence_checks.main(
             [
@@ -847,11 +909,11 @@ def test_inputs_identical_command_reports_differences(tmp_path, capsys):
         )
         == 1
     )
-    assert "scripts/ui_evidence.py" in capsys.readouterr().out
+    assert "scripts/mimetypes.py" in capsys.readouterr().out
 
 
 def test_inputs_identical_command_rejects_bad_shas(tmp_path, capsys):
-    repo, _ = _git_repo_with_inputs(tmp_path)
+    repo, _ = _git_repo_with_paths(tmp_path)
     assert (
         evidence_checks.main(
             [
@@ -884,50 +946,111 @@ def _tree_doc(sha, entries):
     }
 
 
-def test_parse_tree_json_keeps_listed_paths():
+def test_parse_tree_entries_keeps_blobs_and_skips_trees():
     sha = "a" * 40
     doc = _tree_doc(sha, ["web", "scripts/ui_evidence.py", "README.md"])
-    mapping = evidence_checks.parse_tree_json(doc, sha)
-    assert mapping["web"] == "e" * 40
-    assert mapping["scripts/ui_evidence.py"] == "b" * 40
+    mapping = evidence_checks.parse_tree_entries(doc, sha)
+    assert "web" not in mapping  # a tree rollup, not a capture input
+    assert mapping["scripts/ui_evidence.py"] == ("100644", "blob", "b" * 40)
+    assert mapping["README.md"] == ("100644", "blob", "b" * 40)
 
 
-def test_parse_tree_json_refuses_a_truncated_listing():
+def test_parse_tree_entries_refuses_a_truncated_listing():
     sha = "a" * 40
     doc = _tree_doc(sha, ["web"])
     doc["truncated"] = True
     with pytest.raises(ValueError):
-        evidence_checks.parse_tree_json(doc, sha)
+        evidence_checks.parse_tree_entries(doc, sha)
 
 
-def test_parse_tree_json_refuses_a_mismatched_sha():
+def test_parse_tree_entries_refuses_a_mismatched_sha():
     doc = _tree_doc("a" * 40, ["web"])
     with pytest.raises(ValueError):
-        evidence_checks.parse_tree_json(doc, "b" * 40)
+        evidence_checks.parse_tree_entries(doc, "b" * 40)
 
 
-def test_parse_tree_json_refuses_bad_shapes():
+def test_parse_tree_entries_refuses_bad_shapes():
     with pytest.raises(ValueError):
-        evidence_checks.parse_tree_json({"tree": []}, "a" * 40)
+        evidence_checks.parse_tree_entries({"tree": []}, "a" * 40)
     with pytest.raises(ValueError):
-        evidence_checks.parse_tree_json(
+        evidence_checks.parse_tree_entries(
             {"sha": "a" * 40, "tree": [{"path": "web"}]}, "a" * 40
+        )
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_entries(
+            {
+                "sha": "a" * 40,
+                "tree": [
+                    {
+                        "path": "web/index.html",
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": "xyz",
+                    }
+                ],
+            },
+            "a" * 40,
         )
 
 
+def _entries(*paths, sha="b" * 40, mode="100644", typ="blob"):
+    return {path: (mode, typ, sha) for path in paths}
+
+
 def test_check_ui_skip_accepts_identical_trees():
-    base = {"web": "e" * 40, "scripts/ui_evidence.py": "b" * 40}
+    base = _entries("web/index.html", "scripts/ui_evidence.py")
     assert (
         evidence_checks.check_ui_skip("a" * 40, "c" * 40, dict(base), dict(base))
         is None
     )
 
 
-def test_check_ui_skip_refuses_a_differing_input():
-    base = {"web": "e" * 40}
-    head = {"web": "d" * 40}
-    with pytest.raises(ValueError, match="web/"):
+def test_check_ui_skip_accepts_safe_only_differences():
+    base = _entries("docs/prose.md", "web/index.html")
+    head = _entries("docs/prose.md", "web/index.html", sha="d" * 40)
+    head["web/index.html"] = ("100644", "blob", "b" * 40)
+    assert (
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, dict(base), dict(head))
+        is None
+    )
+
+
+def test_check_ui_skip_refuses_an_unsafe_difference():
+    base = _entries("scripts/mimetypes.py")
+    head = _entries("scripts/mimetypes.py", sha="d" * 40)
+    with pytest.raises(ValueError, match="scripts/mimetypes.py"):
         evidence_checks.check_ui_skip("a" * 40, "c" * 40, base, head)
+
+
+def test_check_ui_skip_refuses_a_mode_only_change():
+    base = {"docs/prose.md": ("100644", "blob", "b" * 40)}
+    head = {"docs/prose.md": ("100755", "blob", "b" * 40)}
+    with pytest.raises(ValueError, match="docs/prose.md"):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, base, head)
+
+
+def test_check_ui_skip_refuses_a_symlink():
+    base = {}
+    head = {"scripts/helper.py": ("120000", "blob", "b" * 40)}
+    with pytest.raises(ValueError, match="scripts/helper.py"):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, base, head)
+
+
+def test_check_ui_skip_refuses_a_gitlink():
+    base = {}
+    head = {"vendor/lib": ("160000", "commit", "b" * 40)}
+    with pytest.raises(ValueError, match="vendor/lib"):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, base, head)
+
+
+def test_check_ui_skip_refuses_a_new_top_level_file():
+    with pytest.raises(ValueError, match="sitecustomize.py"):
+        evidence_checks.check_ui_skip(
+            "a" * 40,
+            "c" * 40,
+            {},
+            {"sitecustomize.py": ("100644", "blob", "b" * 40)},
+        )
 
 
 def test_check_ui_skip_refuses_unverifiable_maps():
@@ -957,92 +1080,55 @@ def test_manifest_claims_skip_only_with_the_reason(tmp_path):
     assert evidence_checks.manifest_claims_skip(ui_dir) is True
 
 
-def _covered_by_inputs(path):
-    """Whether a repo-relative path is a listed input or under a listed dir."""
-    text = path.as_posix()
-    for entry in evidence_checks.UI_INPUTS:
-        if entry.endswith("/"):
-            if text == entry.rstrip("/") or text.startswith(entry):
-                return True
-        elif text == entry:
-            return True
-    return False
+def test_safe_paths_cover_the_documented_areas():
+    safe = [
+        "docs/anything.md",
+        "docs/nested/page.md",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        "LICENSE.md",
+        "install/setup.sh",
+        "install/nested/script.sh",
+        "tests/test_pins.py",
+        "tests/conformance/demo.py",
+        "src/housesitter/pkg.py",
+        "src/housesitter/nested/mod.py",
+        ".github/workflows/other.yml",
+        ".github/ISSUE_TEMPLATE/bug.md",
+    ]
+    for path in safe:
+        assert evidence_checks.skip_safe_path(path), path
 
 
-def _transitive_repo_imports(start):
-    """Repo-local files reachable from ``start`` through imports.
-
-    Stdlib names resolve outside the repo (stdlib dir, built in); anything
-    else must resolve to a file under the repo root. Unresolvable names fail
-    closed: an import the test cannot see is an import the list cannot cover.
-    """
-    import ast
-    import importlib.util
-
-    stdlib_marker = ("site-packages", "dist-packages")
-    seen = set()
-    queue = [start]
-    while queue:
-        path = queue.pop()
-        if path in seen:
-            continue
-        seen.add(path)
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        names = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names.update(part.name.split(".")[0] for part in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                if node.level:
-                    raise AssertionError(
-                        f"{path}: relative imports are not covered by UI_INPUTS"
-                    )
-                if node.module is not None:
-                    names.add(node.module.split(".")[0])
-        for name in names:
-            if name == "__future__":
-                continue
-            try:
-                spec = importlib.util.find_spec(name)
-            except ImportError:
-                spec = None
-            if spec is None:
-                raise AssertionError(f"{path}: unresolvable import {name!r}")
-            origin = spec.origin
-            if origin in (None, "built-in", "frozen"):
-                continue
-            resolved = Path(origin).resolve()
-            if resolved == ROOT or ROOT in resolved.parents:
-                if resolved.suffix == ".py" and resolved.is_file():
-                    queue.append(resolved)
-                elif not _covered_by_inputs(resolved.relative_to(ROOT)):
-                    raise AssertionError(
-                        f"{path}: repo-local import {name!r} "
-                        f"({resolved.relative_to(ROOT).as_posix()}) "
-                        "is not covered by UI_INPUTS"
-                    )
-            elif any(marker in resolved.parts for marker in stdlib_marker):
-                raise AssertionError(
-                    f"{path}: third-party import {name!r} is not covered "
-                    "by UI_INPUTS"
-                )
-            # Anything else is a stdlib location outside site packages.
-    return seen
+def test_unsafe_paths_force_a_full_capture():
+    unsafe = [
+        # Served or executed by the capture path.
+        "web/index.html",
+        "scripts/dev_dashboard.py",
+        "scripts/ui_evidence.py",
+        "scripts/mimetypes.py",
+        "scripts/evidence_checks.py",
+        "pyproject.toml",
+        ".github/workflows/ci.yml",
+        # The captures render these fixtures.
+        "tests/fixtures/dashboard/typical.json",
+        "tests/fixtures/dashboard",
+        # src/ sits on sys.path for the editable install; only the
+        # package directory itself is safe.
+        "src/sitecustomize.py",
+        "src/conftest.py",
+        # New top-level files and directories, and anything unsure.
+        "sitecustomize.py",
+        "newdir/file.py",
+        "src",
+        "tests",
+    ]
+    for path in unsafe:
+        assert not evidence_checks.skip_safe_path(path), path
 
 
-def test_ui_inputs_cover_dev_dashboard_imports():
-    """dev_dashboard (and everything it imports) stays within the input list.
-
-    The capture serves web/ and the fixtures through dev_dashboard only, so
-    a repo-local import outside UI_INPUTS could change captures without
-    breaking the skip. This fails until the new file is listed.
-    """
-    start = ROOT / "scripts" / "dev_dashboard.py"
-    assert _covered_by_inputs(start.relative_to(ROOT))
-    assert _transitive_repo_imports(start) == {start}
-
-
-def _skip_gate_artifact(tmp_path, repo, head):
+def _skip_gate_artifact(tmp_path, repo, base, head):
     """An artifact whose manifest claims the base captures were skipped."""
     artifact = _gate_artifact(tmp_path)
     doc = json.loads((artifact / "results.json").read_text())
@@ -1061,6 +1147,8 @@ def _skip_gate_artifact(tmp_path, repo, head):
         }
     ]
     manifest["base_skipped"] = "ui_inputs_identical"
+    manifest["base_sha"] = base
+    manifest["head_sha"] = head
     (artifact / "ui_out" / "ui_manifest.json").write_text(json.dumps(manifest))
     for png in (artifact / "ui_out").glob("*.png"):
         png.unlink()
@@ -1082,22 +1170,22 @@ def _check_skip(artifact, repo, base, head):
 
 
 def test_check_accepts_a_verified_skip(tmp_path, capsys):
-    repo, sha = _git_repo_with_inputs(tmp_path)
-    assert _check_skip(_skip_gate_artifact(tmp_path, repo, sha), repo, sha, sha) == 0
+    repo, sha = _git_repo_with_paths(tmp_path)
+    artifact = _skip_gate_artifact(tmp_path, repo, sha, sha)
+    assert _check_skip(artifact, repo, sha, sha) == 0
 
 
 def test_check_refuses_a_skip_with_differing_inputs(tmp_path, capsys):
-    repo, base = _git_repo_with_inputs(tmp_path)
-    (repo / "web" / "placeholder.txt").write_text("changed\n")
-    _git(repo, "add", "-A")
-    head = _git_commit(repo, "change web")
-    assert _check_skip(_skip_gate_artifact(tmp_path, repo, head), repo, base, head) == 1
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "scripts/added.py")
+    artifact = _skip_gate_artifact(tmp_path, repo, base, head)
+    assert _check_skip(artifact, repo, base, head) == 1
     assert "bad_skip" in capsys.readouterr().out
 
 
 def test_check_refuses_a_skip_it_cannot_verify(tmp_path, capsys):
-    repo, sha = _git_repo_with_inputs(tmp_path)
-    artifact = _skip_gate_artifact(tmp_path, repo, sha)
+    repo, sha = _git_repo_with_paths(tmp_path)
+    artifact = _skip_gate_artifact(tmp_path, repo, sha, sha)
     assert (
         evidence_checks.main(
             [

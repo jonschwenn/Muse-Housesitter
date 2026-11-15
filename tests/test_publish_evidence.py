@@ -2783,10 +2783,14 @@ def test_final_size_check_pins_the_budget_fencepost():
 # responses. Anything unverifiable or differing refuses with bad_skip.
 
 
-def _skip_manifest():
+def _skip_manifest(base_sha=None, head_sha=None):
     return {
         "version": 1,
         "base_skipped": "ui_inputs_identical",
+        # F2: the skip is bound to the compared revisions; the publisher
+        # refuses unless these match the resolved base and head SHAs.
+        "base_sha": BASE_SHA if base_sha is None else base_sha,
+        "head_sha": HEAD_SHA if head_sha is None else head_sha,
         "captures": [
             {
                 "fixture": "typical",
@@ -2802,11 +2806,20 @@ def _skip_manifest():
 
 
 def _skip_tree_doc(sha, web_sha="e" * 40):
+    # The file entry carries the difference: directory (tree) entries are
+    # rollups the skip check skips, so a test that differs only a tree SHA
+    # would accept. web_sha drives both, keeping them consistent.
     return {
         "sha": sha,
         "url": "https://api.github.com/repos/o/n/git/trees/" + sha,
         "tree": [
             {"path": "web", "mode": "040000", "type": "tree", "sha": web_sha},
+            {
+                "path": "web/index.html",
+                "mode": "100644",
+                "type": "blob",
+                "sha": web_sha,
+            },
             {
                 "path": "scripts/ui_evidence.py",
                 "mode": "100644",

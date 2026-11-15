@@ -462,52 +462,56 @@ def validate_png(data: bytes) -> list[str]:
 
 # UI inputs for Decision 6 (skip the base captures) --------------------------
 #
-# ONE fixed list of every repo path that can change a screenshot capture.
-# The ``ci.yml`` evidence job compares the PR's base and head commits on
-# these paths through git object ids; when every input is identical it
-# skips the base captures (but still captures the head and runs every UI
-# check on it) and records the skip in the manifest. The privileged
-# publisher re-verifies the claim with MAIN's copy of this list through the
-# GitHub API before it publishes anything.
+# Inverted rule: the base captures are skipped ONLY when every path that
+# differs between the base and head commits is on the fixed safe list
+# below. Everything else forces a full capture: scripts/**, web/**,
+# pyproject.toml, any new top-level file or directory, anything unsure.
+# The ``ci.yml`` evidence job computes the differing set from the two
+# fetched commits with ``git diff-tree -r --no-renames``; when nothing in
+# it forces a capture, the job skips the base captures (but still captures
+# the head and runs every UI check on it) and records the skip plus the
+# compared SHAs in the manifest. The privileged publisher re-computes the
+# set from the two recursive git-trees API listings with MAIN's copy of
+# this list (which ci-guard protects) before it publishes anything.
 #
-# A path missing on one side counts as different, unless it is missing on
-# both. Directories (trailing slash) compare by tree id, files by blob id.
+# "Differs" means added, removed, or modified in either direction, with
+# renames counted as both the old and the new path (the PR side asks git
+# for --no-renames, so a rename arrives as a delete plus an add) and with
+# ANY mode change counting — even on a safe path, because a file becoming
+# executable or a symlink changes how that path behaves. Any symlink or
+# submodule (gitlink) entry on either side of a differing path forces a
+# full capture too: links can resolve outside the listed bytes.
 #
-# What each entry covers, and why it is here:
-# - web/: the served pages, stylesheets, and scripts. Every captured pixel
-#   comes from these files.
-# - tests/fixtures/dashboard/: the fixture data every capture renders.
-# - scripts/dev_dashboard.py: serves web/ and the fixtures in the capture
-#   job. It imports only the stdlib (pinned by test), so it needs no
-#   wider entry; if it ever gains a repo-local import, the import test
-#   fails until that file is listed here.
-# - scripts/ui_evidence.py: the capture, the UI checks, and the manifest
-#   builder.
-# - scripts/make_dashboard_fixtures.py: generates the fixture files above.
-# - scripts/evidence_checks.py: this file, the list itself. Any edit to the
-#   list changes this blob, so a PR that weakens the list can never claim
-#   a skip; the publisher (with main's list) would refuse it anyway.
-# - pyproject.toml: pins Playwright (the ``ui`` extra), whose browser
-#   binary renders the pixels.
-# - .github/workflows/ci.yml: the capture step (browser channel, views).
-#
-# Left out on purpose:
-# - src/housesitter/**: the dashboard server. Captures use
-#   scripts/dev_dashboard.py, never the real server.
-# - scripts/pr_evidence.py and scripts/publish_evidence.py: they render the
-#   comment from the manifest but never serve or screenshot a page.
-# - tests/** (except the fixtures above): pins, not pixels.
-# - docs/**, README.md, web/DESIGN.md prose: words, not captures.
-#   (web/ itself is listed because the capture serves it as bytes.)
-UI_INPUTS = (
-    "web/",
-    "tests/fixtures/dashboard/",
-    "scripts/dev_dashboard.py",
-    "scripts/ui_evidence.py",
-    "scripts/make_dashboard_fixtures.py",
-    "scripts/evidence_checks.py",
-    "pyproject.toml",
-    ".github/workflows/ci.yml",
+# What each safe entry covers, and why it cannot change a capture. The
+# question asked of each entry is whether anything the evidence job runs
+# before or during capture — ``pip install -e ./head[ui]``, Playwright,
+# Chrome, scripts/dev_dashboard.py, scripts/ui_evidence.py — reads that
+# path:
+# - docs/**: prose. Nothing in the install, serve, or capture path reads
+#   it; pages come from web/ and fixture data from
+#   tests/fixtures/dashboard/.
+# - top-level *.md and LICENSE*: the same prose at the repo root (README,
+#   CHANGELOG, ...). Not served (only web/ is), not imported, not installed
+#   from (pip reads pyproject.toml, which is NOT safe).
+# - install/**: Pi setup scripts. The evidence job never runs them.
+# - tests/** except tests/fixtures/dashboard/**: test pins, not pixels.
+#   The captures render only the dashboard fixtures, so that one directory
+#   is excluded from the safe set: any change under it forces a capture.
+# - src/housesitter/**: the real dashboard server package. The captures
+#   serve a fixture shim (scripts/dev_dashboard.py) and never import this
+#   package. Only paths INSIDE the package directory are safe: an editable
+#   install puts src/ itself on sys.path, where Python auto-imports a
+#   top-level src/sitecustomize.py at startup — so any other src/ path
+#   forces a capture.
+# - .github/** except .github/workflows/ci.yml: issue templates and other
+#   workflow prose. ci.yml itself drives the capture (browser channel,
+#   views, the skip wiring), so it forces a capture.
+UI_SKIP_SAFE_DIRS = (
+    "docs/",
+    "install/",
+    "tests/",
+    "src/housesitter/",
+    ".github/",
 )
 
 # The manifest's ``base_skipped`` value when the base captures were
@@ -528,66 +532,180 @@ def _checked_sha(sha: str, name: str) -> str:
     return sha
 
 
-def git_object_id(repo: Path, sha: str, path: str) -> str | None:
-    """The blob or tree id of ``path`` at commit ``sha``, or None if missing.
+def skip_safe_path(path: str) -> bool:
+    """Whether a differing ``path`` still allows the base-capture skip.
 
-    Directories compare by tree id, files by blob id; both come from one
-    ``git rev-parse <sha>:<path>`` call. Only the two commits' objects are
-    read, never history, so a shallow checkout holding both commits is
-    enough. Raises ValueError for a malformed SHA, OSError when git fails.
+    Only the fixed safe list counts: the dashboard fixtures are excluded
+    from ``tests/``, ``.github/workflows/ci.yml`` from ``.github/``, and
+    ``src/`` outside the package directory is never safe (an editable
+    install puts ``src/`` on ``sys.path``). Bare directory names are not
+    safe either: neither diff-tree nor the trees API reports bare
+    directories for a real change, so failing closed costs nothing.
+    """
+    if path == "tests/fixtures/dashboard" or path.startswith(
+        "tests/fixtures/dashboard/"
+    ):
+        return False
+    if path == ".github/workflows/ci.yml":
+        return False
+    for prefix in UI_SKIP_SAFE_DIRS:
+        if path.startswith(prefix):
+            return True
+    if "/" not in path and (
+        path.endswith(".md") or path.startswith("LICENSE")
+    ):
+        return True
+    return False
+
+
+def _change_forces_capture(base: tuple | None, head: tuple | None, path: str) -> bool:
+    """Whether one differing path forces a full capture.
+
+    ``base``/``head`` are ``(mode, type, sha)`` entries, or None when the
+    path is missing on that side. Identical entries never force; any mode
+    change, any symlink or gitlink on either side, and any path outside
+    the safe list forces a full capture.
+    """
+    if base == head:
+        return False
+    for entry in (base, head):
+        if entry is None:
+            continue
+        mode, typ, _ = entry
+        if mode.startswith("12") or mode == "160000" or typ == "commit":
+            return True
+    if base is not None and head is not None and base[0] != head[0]:
+        return True
+    return not skip_safe_path(path)
+
+
+def _type_from_mode(mode: str) -> str:
+    if mode == "160000":
+        return "commit"
+    if mode.startswith("04"):
+        return "tree"
+    return "blob"
+
+
+def ls_tree_entries(repo: Path, sha: str) -> dict:
+    """``{path: (mode, type, sha)}`` for every blob and commit entry at ``sha``.
+
+    The local-git twin of ``parse_tree_entries`` (which reads the same
+    recursive listing shape from the GitHub API): the ``check`` gate
+    verifies a skip claim against the checkout's own objects with it.
+    Raises ValueError for a malformed SHA, OSError when git fails (fail
+    closed: the caller captures both sides).
     """
     _checked_sha(sha, "commit")
-    if not path or ".." in path.split("/"):
-        raise ValueError(f"bad input path: {path!r}")
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", f"{sha}:{path}"],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.strip()
-
-
-def _input_lookup_key(path: str) -> str:
-    return path[:-1] if path.endswith("/") else path
-
-
-def ui_inputs_differ_git(
-    repo: Path, base_sha: str, head_sha: str, inputs: tuple = UI_INPUTS
-) -> list[str]:
-    """Listed inputs whose git object ids differ between two commits."""
-    _checked_sha(base_sha, "base")
-    _checked_sha(head_sha, "head")
     try:
-        base_exists = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{base_sha}^{{commit}}"],
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "ls-tree", "-r", "-z", sha],
             capture_output=True,
-        ).returncode == 0
-        head_exists = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{head_sha}^{{commit}}"],
+            text=True,
+        )
+    except OSError as exc:
+        raise OSError(f"cannot run git in {repo}: {exc}") from exc
+    if proc.returncode != 0:
+        raise OSError(f"cannot list the tree of {sha} in {repo}")
+    mapping: dict = {}
+    try:
+        records = proc.stdout.split("\0")
+    except (UnicodeError, ValueError) as exc:
+        raise OSError(f"cannot parse git ls-tree in {repo}: {exc}") from exc
+    for record in records:
+        if not record:
+            continue
+        try:
+            meta, path = record.split("\t", 1)
+            mode, typ, obj = meta.split(" ")
+        except ValueError as exc:
+            raise OSError(f"cannot parse git ls-tree in {repo}") from exc
+        if typ == "tree":
+            continue
+        if typ not in ("blob", "commit"):
+            raise OSError(f"cannot parse git ls-tree in {repo}: {typ}")
+        mapping[path] = (mode, typ, obj)
+    return mapping
+
+
+def _resolve_commit(repo: Path, sha: str, name: str) -> None:
+    _checked_sha(sha, name)
+    try:
+        exists = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
             capture_output=True,
         ).returncode == 0
     except OSError as exc:
         raise OSError(f"cannot run git in {repo}: {exc}") from exc
-    if not base_exists or not head_exists:
-        raise OSError(f"cannot resolve base or head commit in {repo}")
-    differ = []
-    for path in inputs:
-        base_id = git_object_id(repo, base_sha, _input_lookup_key(path))
-        head_id = git_object_id(repo, head_sha, _input_lookup_key(path))
-        if base_id != head_id and (base_id is not None or head_id is not None):
-            differ.append(path)
-    return differ
+    if not exists:
+        raise OSError(f"cannot resolve {name} commit in {repo}")
 
 
-def parse_tree_json(doc: object, expected_sha: str) -> dict:
-    """Map a git-trees API response to ``{path: object id}``.
+def ui_forcing_changes_git(repo: Path, base_sha: str, head_sha: str) -> list[str]:
+    """Differing paths that force a full capture (empty: the skip is allowed).
 
-    The response lists blobs and trees flat with ``recursive=1``; directory
-    paths carry no trailing slash. Refuses a truncated listing, a response
-    for another commit, and malformed shapes: the publisher cannot verify
-    its claim from any of those, so all of them fail closed.
+    Compares the two fetched commits with ``git diff-tree -r --no-renames``
+    over the shallow objects: a rename arrives as a delete plus an add, so
+    both paths are judged. Only the two commits' objects are read, never
+    history. Raises ValueError for a malformed SHA, OSError when git fails
+    or a commit is missing (fail closed: the caller captures both sides).
+    """
+    _resolve_commit(repo, base_sha, "base")
+    _resolve_commit(repo, head_sha, "head")
+    try:
+        proc = subprocess.run(
+            [
+                "git", "-C", str(repo), "diff-tree", "-r", "--no-renames",
+                "-z", base_sha, head_sha,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise OSError(f"cannot run git in {repo}: {exc}") from exc
+    if proc.returncode != 0:
+        raise OSError(f"cannot diff base and head commits in {repo}")
+    try:
+        parts = proc.stdout.split("\0")
+    except (UnicodeError, ValueError) as exc:
+        raise OSError(f"cannot parse git diff in {repo}: {exc}") from exc
+    forcing = []
+    index = 0
+    while index + 1 < len(parts):
+        info, path = parts[index], parts[index + 1]
+        index += 2
+        if not info.startswith(":"):
+            if info or path:
+                raise OSError(f"cannot parse git diff in {repo}")
+            continue
+        fields = info[1:].split(" ")
+        if len(fields) != 5:
+            raise OSError(f"cannot parse git diff in {repo}")
+        old_mode, new_mode, old_sha, new_sha = fields[0], fields[1], fields[2], fields[3]
+        base = (
+            (old_mode, _type_from_mode(old_mode), old_sha)
+            if old_mode != "000000"
+            else None
+        )
+        head = (
+            (new_mode, _type_from_mode(new_mode), new_sha)
+            if new_mode != "000000"
+            else None
+        )
+        if _change_forces_capture(base, head, path):
+            forcing.append(path)
+    return sorted(forcing)
+
+
+def parse_tree_entries(doc: object, expected_sha: str) -> dict:
+    """Map a git-trees API response to ``{path: (mode, type, sha)}``.
+
+    Only file, symlink (blob), and submodule-commit entries are kept;
+    directory (tree) entries are rollups — a change under one always shows
+    up as a changed, added, or removed file entry. Refuses a truncated
+    listing, a response for another commit, and malformed shapes: the
+    publisher cannot verify its claim from any of those, so all of them
+    fail closed.
     """
     _checked_sha(expected_sha, "expected")
     if not isinstance(doc, dict) or not isinstance(doc.get("tree"), list):
@@ -601,11 +719,16 @@ def parse_tree_json(doc: object, expected_sha: str) -> dict:
         if (
             not isinstance(entry, dict)
             or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("mode"), str)
+            or not isinstance(entry.get("type"), str)
             or not isinstance(entry.get("sha"), str)
             or not SHA_RE.fullmatch(entry["sha"])
+            or entry["type"] not in ("blob", "commit")
         ):
+            if isinstance(entry, dict) and entry.get("type") == "tree":
+                continue
             raise ValueError("tree has a malformed entry")
-        mapping[entry["path"]] = entry["sha"]
+        mapping[entry["path"]] = (entry["mode"], entry["type"], entry["sha"])
     return mapping
 
 
@@ -614,30 +737,40 @@ def check_ui_skip(
 ) -> None:
     """Accept a base skip, or raise ValueError when it cannot be honored.
 
-    Both maps are ``{path: object id}`` for the listed inputs (missing
-    paths are simply absent). Keys may carry the input's trailing slash or
-    the API's bare form; both normalize the same way. Anything differing,
-    or anything missing from the maps that is not missing on both sides,
-    refuses: a skipped capture is reported, never silently missing, and
-    never trusted on a claim.
+    Both maps are ``{path: (mode, type, sha)}`` for every blob, symlink,
+    and submodule-commit entry of the recursive tree listing (missing
+    paths are simply absent on both sides). Paths are judged by the same
+    fixed safe list the PR-side check uses: any mode change, any symlink
+    or gitlink, and any path outside the safe list refuses. A skipped
+    capture is reported, never silently missing, and never trusted on a
+    claim.
     """
     _checked_sha(base_sha, "base")
     _checked_sha(head_sha, "head")
     if not isinstance(base_map, dict) or not isinstance(head_map, dict):
         raise ValueError("UI tree data is missing or unreadable")
-    base_ids = {_input_lookup_key(str(key)): value for key, value in base_map.items()}
-    head_ids = {_input_lookup_key(str(key)): value for key, value in head_map.items()}
-    differ = []
-    for path in UI_INPUTS:
-        key = _input_lookup_key(path)
-        base_id = base_ids.get(key)
-        head_id = head_ids.get(key)
-        if base_id != head_id and (base_id is not None or head_id is not None):
-            differ.append(path)
-    if differ:
-        # The paths are this module's own allow-listed constants, so they
-        # are safe to log; the posted notice stays fixed text.
-        raise ValueError(f"UI inputs differ: {', '.join(differ)}")
+    forcing = []
+    for path in sorted(set(base_map) | set(head_map)):
+        base = base_map.get(path)
+        head = head_map.get(path)
+        if not isinstance(base, (tuple, list)) and base is not None:
+            raise ValueError("UI tree data is missing or unreadable")
+        if not isinstance(head, (tuple, list)) and head is not None:
+            raise ValueError("UI tree data is missing or unreadable")
+        base_entry = tuple(base) if base is not None else None
+        head_entry = tuple(head) if head is not None else None
+        if base_entry is not None and len(base_entry) != 3:
+            raise ValueError("UI tree data is missing or unreadable")
+        if head_entry is not None and len(head_entry) != 3:
+            raise ValueError("UI tree data is missing or unreadable")
+        if _change_forces_capture(base_entry, head_entry, str(path)):
+            forcing.append(str(path))
+    if forcing:
+        # The paths come from the trusted tree listing, so they are safe
+        # to log; the posted notice stays fixed text.
+        raise ValueError(f"UI inputs differ: {', '.join(forcing)}")
+
+
 
 
 def manifest_claims_skip(ui_dir: Path) -> bool:
@@ -661,7 +794,7 @@ def cmd_check(args) -> int:
     runs the PR's own copy of every script, so it catches honest mistakes
     only; the publisher's notice (main's code) covers hostile artifacts.
     A manifest that claims the base captures were skipped is re-verified
-    here against the local git objects with this copy's input list — never
+    here against the local git objects with the inverted rule — never
     against a scenario list — so the check agrees with the publisher
     except when the PR weakened its own list, which the publisher catches.
     Exit codes mirror the publisher: 0 the publisher would publish, 1 it
@@ -685,18 +818,10 @@ def cmd_check(args) -> int:
             )
             return 1
         try:
-            base_map = {
-                _input_lookup_key(path): git_object_id(
-                    Path(git_dir), base_sha, _input_lookup_key(path)
-                )
-                for path in UI_INPUTS
-            }
-            head_map = {
-                _input_lookup_key(path): git_object_id(
-                    Path(git_dir), args.head_sha, _input_lookup_key(path)
-                )
-                for path in UI_INPUTS
-            }
+            # Full recursive listings, like the publisher's tree maps:
+            # the render below judges them with the same safe list.
+            base_map = ls_tree_entries(Path(git_dir), base_sha)
+            head_map = ls_tree_entries(Path(git_dir), args.head_sha)
         except ValueError as exc:
             print(f"evidence_checks: bad argument: {exc}", file=sys.stderr)
             return 2
@@ -731,15 +856,16 @@ def cmd_inputs_identical(args) -> int:
     """Decide whether the base captures can be skipped (exit 0) or not (1).
 
     Used by the ``ci.yml`` evidence job before capturing: exit 0 records
-    that every UI input is identical between the base and head commits, so
-    the job may pass ``--skip-base`` to ``ui_evidence.py``. Exit 1 means an
-    input differs (named on stdout) or cannot be compared; the job then
-    captures both sides, exactly as today. Exit 2 is a bad caller argument.
-    Nothing here reads a scenario list, so this decision agrees with the
-    publisher's re-verification for every honest run.
+    that no capture-affecting path differs between the base and head
+    commits, so the job may pass ``--skip-base`` to ``ui_evidence.py``.
+    Exit 1 means a forcing path differs (named on stdout) or the two
+    commits cannot be compared; the job then captures both sides, exactly
+    as today. Exit 2 is a bad caller argument. Nothing here reads a
+    scenario list, so this decision agrees with the publisher's
+    re-verification for every honest run.
     """
     try:
-        differ = ui_inputs_differ_git(
+        forcing = ui_forcing_changes_git(
             Path(args.git_dir), args.base_sha, args.head_sha
         )
     except ValueError as exc:
@@ -748,12 +874,10 @@ def cmd_inputs_identical(args) -> int:
     except OSError as exc:
         print(f"evidence_checks: cannot compare UI inputs: {exc}")
         return 1
-    if differ:
-        print(f"evidence_checks: UI inputs differ: {', '.join(differ)}")
+    if forcing:
+        print(f"evidence_checks: UI inputs differ: {', '.join(forcing)}")
         return 1
-    print(
-        f"evidence_checks: UI inputs identical ({len(UI_INPUTS)} paths)"
-    )
+    print("evidence_checks: no capture-affecting change between base and head")
     return 0
 
 

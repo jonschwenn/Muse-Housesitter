@@ -604,7 +604,7 @@ def _write_refusal(out: Path, reason: str) -> None:
 
 
 def _tree_map(tree_json: str | None, what: str, sha: str) -> dict | None:
-    """Parse a fetched git-trees file to a ``{path: object id}`` map.
+    """Parse a fetched git-trees file to a ``{path: (mode, type, sha)}`` map.
 
     Returns None when no file was handed over (no skip to verify, or the
     fetch failed). Anything unreadable fails closed with bad_skip: the
@@ -614,7 +614,7 @@ def _tree_map(tree_json: str | None, what: str, sha: str) -> dict | None:
         return None
     doc = _read_tree_doc(tree_json, what)
     try:
-        return evidence_checks.parse_tree_json(doc, sha)
+        return evidence_checks.parse_tree_entries(doc, sha)
     except ValueError as exc:
         raise PublishError(f"{what} is unusable: {exc}", "bad_skip") from exc
 
