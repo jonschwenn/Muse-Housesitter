@@ -818,10 +818,10 @@ handoff's "license not chosen; don't publish."
   a standard-library module); full history (unneeded work); a moving branch
   tip (changes the base).
 - **Known limit:** nothing trusted records which base a CI run compared,
-  so the publisher can bind a skip only to the current base. A
-  same-repository writer could claim the current base after main moved;
-  the skip is then still true against the base the PR merges into, and
-  writers are trusted (D16). A moved base refuses the skip even if the new trees
+  so the publisher can bind a skip only to the base it resolves when it
+  publishes. A same-repository writer could claim that base after main
+  moved; the skip is then true against that resolved base (main may move
+  again before merge), and writers are trusted (D16). A moved base refuses the skip even if the new trees
   would allow it. Update the branch before merging; the next run evidences
   the new base. The safe list depends on the capture setup described in
   REVIEW.md and must be reviewed when that setup changes.
