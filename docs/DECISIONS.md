@@ -786,3 +786,49 @@ handoff's "license not chosen; don't publish."
   sections. The typical changed section is about 32 KB; other large changes
   such as `describe` (about 16 KB of output) can still squeeze Tests.
   Changing the publisher's shrink order is a separate follow-up.
+
+### D39. Refuse paging calls that replay themselves (2026-11-15, Jon)
+- **Decision:** when `Result.save` is unset, the runner refuses a truncated
+  result whose `more` would replay the current call exactly: the same command
+  and equal params after converting `more.params` to the JSON a client would
+  receive and validating that wire form against the paging command, filling
+  in defaults, using exact JSON equality. The comparison uses the params as
+  validated before the handler runs, so changes the handler
+  makes to its params dict do not affect it. It fails with
+  `upstream_unexpected`: if zero items of the section were kept,
+  "one item in <section> is larger than the output limit"; if one or more
+  were kept, "the module's paging would repeat the same page".
+  The start-entry rule stays; paging commands must still set `Paging.start`
+  correctly to prevent longer cycles.
+- **Why:** the deep red-team review of #34 found this case (#35). A paging
+  command omitted `Paging.start`, and its first remaining item alone
+  exceeded the limit. It returned a `more` equal to its own call, so a
+  client following `more` looped forever. The conformance suite's
+  50-follow-up cap catches this only in fixture cases that exercise it.
+- **Rejected:** keeping the docs-only rule; comparing raw, unvalidated
+  params (misses calls that differ only by filled-in defaults); one message
+  for both cases (the oversized-item message is wrong when items were
+  kept); detecting longer cycles (needs state across calls, which the
+  runner does not keep).
+- **Status:** in effect from PR #64.
+
+### D40. Retention never prunes the file a save just wrote (2026-11-15, Jon)
+- **Decision:** after each save, the store computes the same deletion set
+  as before: the oldest files beyond `retention` by filename timestamp,
+  with id as a tie-breaker. It removes only the id that save just wrote
+  from that set, without selecting a replacement. The directory can hold
+  `retention` + 1 files until a later save prunes again. Any other save,
+  concurrent or later, can still prune that file under the normal retention
+  rule, even before this save returns when the two overlap, as before this
+  change.
+- **Why:** the deep red-team review of #34 found this case (#36). Two saves
+  in the same second ordered by random suffix, or a clock stepping back,
+  could let retention delete the file just saved. The command returned a
+  deleted id, and a truncated result's `more` then failed with `not_found`.
+- **Rejected:** skipping the file just written and deleting the next-oldest
+  instead (with retention 1 and two concurrent saves, each can delete the
+  other's file, leaving the directory empty); a cross-process lock
+  (`flock`) around link and prune (exact retention even under concurrency,
+  but a new mechanism for a rare case); ordering by a monotonic sequence
+  (changes the id format).
+- **Status:** in effect from PR #64.

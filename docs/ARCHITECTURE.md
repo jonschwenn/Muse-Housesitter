@@ -181,16 +181,26 @@ file, flushes it to disk, then hard-links it to the final name and removes
 the temporary file. Name collisions retry with another suffix, up to 16
 attempts; an existing result is never overwritten. Ids have the form
 `<kind>_<YYYYMMDDTHHMMSSZ>_<4 lowercase hex>`, without `.json`.
-The timestamp is the save time in UTC. The object itself supplies the
-`collected_at` and `label` metadata used by listing; the separate `label`
-argument does not add metadata. After linking the final file, the store
-fsyncs the module directory on a best-effort basis.
+The timestamp is the save time in UTC, always zero-padded to 16 characters.
+The object itself supplies the `collected_at` and `label` metadata used by
+listing; the separate `label` argument does not add metadata. After linking
+the final file, opening, fsyncing, and closing the module directory are all
+best effort. A failure in any of these steps does not fail a save whose
+file is already linked.
 
 Retention counts saved files across all kinds within each module. After
-each save it prunes the oldest by filename timestamp, with id as a
-tie-breaker. Only store-shaped `*.json` names are candidates; other files
-are left alone. Deletion is best effort. The default is 500, overridden by
-`modules.<id>.retention`; 0 keeps everything (D6).
+each save, the store selects the oldest files beyond `retention` by filename
+timestamp, with id as a tie-breaker, but skips the file it just wrote without
+selecting a replacement. A save's own prune therefore never deletes the file
+it just wrote, even if another file has the same second or a later timestamp,
+as when the clock steps back. This can leave `retention` + 1 files until a
+later save prunes again. Any other save, concurrent or later, can still prune
+that file under the normal retention rule, even before this save returns
+when the two overlap. With retention 1 and overlapping saves, one of the
+returned ids may therefore not load. Only store-shaped
+`*.json` names are candidates; other files are left alone. Deletion is best
+effort. The default is 500, overridden by `modules.<id>.retention`; 0 keeps
+everything (D6).
 After a save, cleanup also removes regular `.tmp-*.json` leftovers whose
 modification time is more than one hour before the save time. This is best
 effort and skips symlinks and non-regular files.
@@ -513,11 +523,33 @@ Stable error codes: `config_invalid`, `secret_unreadable`, `upstream_auth`,
   would equal the start offset, replaying the same page forever. A page
   without a start entry for that section counts as a first page and may
   keep zero items, as when a snapshot's `more` is
-  `get section=clients offset=0`. The runner recognises a continuation
-  only by its start entry, so a paging command that continues a list must
-  set `Paging.start` for it; without one, a repeat is not detected. Empty
-  lists are never the truncated section: `section` names the first list
-  that lost items.
+  `get section=clients offset=0`. The runner also refuses a truncated result
+  whose `more` would replay the current call exactly: the same command and
+  equal params. The runner first converts `more.params` to the JSON a client
+  would receive (a tuple becomes an array and a non-string key becomes a
+  string), then validates that wire form against the paging command, filling
+  in defaults, then compares it with the current call's validated params by
+  exact JSON equality (`true` and `1` are not equal). The comparison uses the
+  current params as validated before the handler ran; changes the handler
+  makes to its params dict do not affect it.
+  Omitting an optional param and passing its default value therefore count
+  as the same call (for example, `offset` with default 0).
+  This fails with `upstream_unexpected`: if zero items of the section were
+  kept, "one item in <section> is larger than the output limit"; if one or
+  more were kept, "the module's paging would repeat the same page". For
+  example, a call with `offset=4` that omits `start` and keeps four items
+  would repeat `offset=4`. If the replay params in wire form fail the paging
+  command's validation, this guard does not apply; beyond the fetchability
+  check above, replay params are not checked. This catches only an exact
+  self-replay. This guard applies only when paging without saving, carrying
+  the id in `Paging.params`; when `Result.save` is set, `more` names a new
+  saved id because the store never overwrites an existing file, so the
+  follow-up is a different call checked when it runs, while the start-entry
+  check still applies in both cases.
+  A wrong start value can still produce a longer cycle, so a paging command
+  that continues a list must still set `Paging.start` correctly. Empty lists
+  are never the truncated section: `section` names the first list that lost
+  items.
 - When `Result.save` is set, the file is written only after projection and
   fitting checks pass. It keeps the sanitised full result from before
   projection, including identifiers and undeclared keys, even when output
