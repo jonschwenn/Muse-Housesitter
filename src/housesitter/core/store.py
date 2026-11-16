@@ -159,7 +159,12 @@ class FileStore:
             raise ValueError("clock must return a datetime")
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("clock must return a timezone-aware datetime")
-        return now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        moment = now.astimezone(timezone.utc)
+        # Fixed-width by hand: strftime does not zero-pad years < 1000.
+        return (
+            f"{moment.year:04d}{moment.month:02d}{moment.day:02d}"
+            f"T{moment.hour:02d}{moment.minute:02d}{moment.second:02d}Z"
+        )
 
     def _new_suffix(self) -> str:
         value = self._suffix()
@@ -228,7 +233,12 @@ class FileStore:
                         # save itself already succeeded.
                         pass
                     finally:
-                        os.close(dir_fd)
+                        try:
+                            os.close(dir_fd)
+                        except OSError:
+                            # Best effort, like the fsync above: the save
+                            # itself already succeeded.
+                            pass
                 break
             finally:
                 if fd != -1:
@@ -239,7 +249,7 @@ class FileStore:
                     pass
         else:
             raise StoreError("config_invalid", _DATA_DIR_REASON)
-        self._prune()
+        self._prune(saved_id)
         self._clean_stale_tmps(stamp)
         return saved_id
 
@@ -279,8 +289,15 @@ class FileStore:
             except OSError:
                 continue
 
-    def _prune(self) -> None:
-        """Keep at most ``retention`` files; ``0`` keeps everything."""
+    def _prune(self, keep: str | None = None) -> None:
+        """Keep at most ``retention`` files; ``0`` keeps everything.
+
+        Every save computes the same deletion set — the oldest
+        ``len(owned) - retention`` store-shaped files by (timestamp, id)
+        — then removes only its own id (``keep``) from that set. A save
+        that lands out of order therefore survives its own prune, and the
+        directory may hold ``retention + 1`` files until the next save.
+        """
         if self._retention == 0:
             return
         try:
@@ -300,7 +317,10 @@ class FileStore:
             return (stem.split("_")[-2], stem)
 
         owned.sort(key=key)
-        for stale in owned[: len(owned) - self._retention]:
+        victims = owned[: len(owned) - self._retention]
+        if keep is not None:
+            victims = [name for name in victims if name != keep + ".json"]
+        for stale in victims:
             try:
                 os.unlink(self._dir / stale)
             except FileNotFoundError:

@@ -443,6 +443,14 @@ class _NoProgress(Exception):
         self.section = section
 
 
+class _RepeatPage(Exception):
+    """A page whose ``more`` replays the call that produced it."""
+
+    def __init__(self, section: str) -> None:
+        super().__init__(section)
+        self.section = section
+
+
 class _TooBig(Exception):
     """A result that fits no envelope: no paging covers the rest."""
 
@@ -458,6 +466,26 @@ class _TooBigPaging(Exception):
 # Why truncation may still fail after it is applied: the paging command
 # must exist and accept the replay, and ``more.params`` must carry an id.
 _PAGING_REASON = "the module's paging cannot fetch the rest of this result"
+_REPEAT_REASON = "the module's paging would repeat the same page"
+
+
+def _paging_command(
+    paging: sdk.Paging, *, registry: Any, is_core: bool, module_id: str
+) -> Any | None:
+    """The paging command's declaration, or None when not registered.
+
+    Core commands resolve against the core command table, module
+    commands against the registry, exactly as the fetchability check.
+    """
+    if is_core:
+        return _builtins.CORE_COMMANDS.get(paging.command)
+    try:
+        registered = registry.get_command(
+            f"housesitter.{module_id}.{paging.command}"
+        )
+    except KeyError:
+        return None
+    return registered.command
 
 
 def _check_paging_fetchable(
@@ -477,19 +505,11 @@ def _check_paging_fetchable(
     a paging command paging its own output). Core commands validate
     against the core command table, not the module registry.
     """
-    if is_core:
-        try:
-            command = _builtins.CORE_COMMANDS[paging.command]
-        except KeyError:
-            raise _PagingNotFetchable from None
-    else:
-        try:
-            registered = registry.get_command(
-                f"housesitter.{module_id}.{paging.command}"
-            )
-        except KeyError:
-            raise _PagingNotFetchable from None
-        command = registered.command
+    command = _paging_command(
+        paging, registry=registry, is_core=is_core, module_id=module_id
+    )
+    if command is None:
+        raise _PagingNotFetchable from None
     for name, want in (
         ("section", "string"),
         ("offset", "integer"),
@@ -502,6 +522,99 @@ def _check_paging_fetchable(
         raise _PagingNotFetchable
 
 
+def _normalise_json_keys(value: Any) -> Any:
+    """Round one side through its JSON representation.
+
+    Dumping without ``sort_keys`` coerces non-string dict keys to
+    strings first, so sorting afterwards compares the coerced string
+    keys exactly as a JSON client parsing the envelope sees them (where
+    ``1`` and ``"1"`` are the same key, keeping the last one when both
+    appear in one dict). Raises :class:`TypeError` or
+    :class:`ValueError` when the side does not serialise.
+    """
+    return json.loads(
+        json.dumps(
+            value, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        )
+    )
+
+
+def _params_equal_as_json(first: dict, second: dict) -> bool:
+    """Whether two validated param dicts are the same JSON call.
+
+    Python equality is the wrong comparison: a tuple ``(1,)`` in
+    ``Paging.params`` serialises as the array ``[1]``, so it replays an
+    invocation carrying ``[1]``; and ``True == 1`` in Python, although
+    ``true`` and ``1`` are different JSON values (as are ``1`` and
+    ``1.0``). Both sides use the envelope's serialisation settings,
+    plus sorted keys since dict insertion order can differ between the
+    two sides. Each side is normalised through its JSON representation
+    first, so non-string dict keys (for example an integer key in
+    ``Paging.params``) compare by their coerced string form: sorting
+    the raw Python keys would raise :class:`TypeError` on mixed key
+    types, or order integer keys numerically instead of as strings. A
+    side that does not serialise is never equal (the envelope fit
+    already rejects non-JSON values earlier).
+    """
+    try:
+        left = json.dumps(
+            _normalise_json_keys(first), sort_keys=True,
+            separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+        )
+        right = json.dumps(
+            _normalise_json_keys(second), sort_keys=True,
+            separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return False
+    return left == right
+
+
+def _is_self_replay(
+    paging: sdk.Paging,
+    more: dict,
+    *,
+    current_command: str | None,
+    current_params: dict | None,
+    registry: Any,
+    is_core: bool,
+    module_id: str,
+) -> bool:
+    """Whether ``more`` replays the call that produced it.
+
+    The replay params are first normalised through their wire JSON
+    (the envelope serialiser coerces non-string dict keys to strings
+    and tuples to arrays), then validated (defaults filled in on both),
+    so an omitted optional reads the same as its default and a value
+    the wire turns into an identical call still replays; the comparison
+    itself is canonical JSON, not Python equality. A replay side that
+    does not serialise, or does not validate after normalisation, is
+    not equal: replay validity stays unchecked beyond that, as
+    documented.
+    """
+    if current_command is None or current_params is None:
+        return False
+    if more["command"] != current_command:
+        return False
+    command = _paging_command(
+        paging, registry=registry, is_core=is_core, module_id=module_id
+    )
+    if command is None:
+        return False
+    try:
+        wire_params = _normalise_json_keys(more["params"])
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(wire_params, dict):
+        return False
+    try:
+        replayed = validate_params(command, wire_params)
+    except sdk.CommandError:
+        return False
+    return _params_equal_as_json(replayed, current_params)
+
+
 def _truncate(
     working: Mapping[str, Any],
     paging: sdk.Paging,
@@ -511,6 +624,8 @@ def _truncate(
     *,
     registry: Any = None,
     is_core: bool = False,
+    current_command: str | None = None,
+    current_params: dict | None = None,
 ) -> tuple | None:
     """Shrink paging lists from the end until the envelope fits.
 
@@ -520,8 +635,15 @@ def _truncate(
     it reaches 0 and the envelope is still too big does the next list
     shrink. Raises :class:`_NoProgress` when the chosen section is a
     continuation start that would keep zero items while items remain,
-    and :class:`_TooBigPaging` (carrying the smallest page's size) when
-    even the envelope with every list emptied does not fit.
+    or when ``more`` would replay the current call while keeping zero
+    items (replay params normalised through wire JSON, defaults filled
+    in on both sides); :class:`_RepeatPage` when ``more`` would replay
+    the current call while keeping one or more items; and
+    :class:`_TooBigPaging` (carrying the smallest page's size) when
+    even the envelope with every list emptied does not fit. The replay
+    checks are skipped when no current call is passed (saved results
+    name a new id, so the follow-up is a different call); the
+    start-entry check always applies.
     """
     original: dict[str, list] = {}
     for name in paging.lists:
@@ -606,9 +728,18 @@ def _truncate(
             and len(original[first_section]) > 0
         ):
             raise _NoProgress(first_section)
-        # Truncation is actually applied here: the paging command must
-        # be able to fetch the rest, or the result fails instead.
+        # Truncation is actually applied here: a ``more`` that replays
+        # the current call would loop forever, so the run fails instead;
+        # otherwise the paging command must be able to fetch the rest.
         more = build_more(first_section)
+        if _is_self_replay(
+            paging, more, current_command=current_command,
+            current_params=current_params, registry=registry,
+            is_core=is_core, module_id=module_id,
+        ):
+            if kept[first_section] > 0:
+                raise _RepeatPage(first_section)
+            raise _NoProgress(first_section)
         _check_paging_fetchable(
             paging, more["params"], registry=registry, is_core=is_core,
             module_id=module_id,
@@ -883,6 +1014,12 @@ def run_command(
         params = validate_params(command, parse_raw_params(raw))
     except sdk.CommandError as exc:
         return _fail(module_id, exc.code, exc.reason)
+    # The handler receives the live dict and may mutate it (or values
+    # nested inside it). The self-replay guard compares against this deep
+    # copy, taken before the call, so handler mutations cannot hide a
+    # replay. Validated params are JSON values, which ``_copy_json``
+    # copies fully.
+    params_before_handler = _copy_json(params)
 
     try:
         data_store = FileStore(module_id, env=env_map, retention=retention)
@@ -1035,8 +1172,8 @@ def run_command(
 
         Returns ``(data, truncated, more)``. Raises
         :class:`_PagingNotFetchable`, :class:`_NoProgress`,
-        :class:`_TooBigPaging`, :class:`_TooBig`, or
-        :class:`_EnvelopeNotJson`.
+        :class:`_RepeatPage`, :class:`_TooBigPaging`, :class:`_TooBig`,
+        or :class:`_EnvelopeNotJson`.
         """
         candidate = envelope.build_ok(
             data=out_data, truncated=False, more=None, **active
@@ -1054,9 +1191,20 @@ def run_command(
             working = out_data
         if result.paging is None:
             raise _TooBig
+        # The self-replay guard does not apply when the result is
+        # saved: ``more`` names the newly saved id, which cannot equal
+        # the id of any existing file (the link never overwrites), so
+        # the follow-up is a different call and is itself checked when
+        # it runs. The start-entry zero-progress check still applies.
+        guard_command = None if result.save is not None else full_name
+        guard_params = (
+            None if result.save is not None else params_before_handler
+        )
         truncated = _truncate(
             working, result.paging, active["saved"], module_id, active,
             registry=registry, is_core=is_core,
+            current_command=guard_command,
+            current_params=guard_params,
         )
         if truncated is None:
             # No declared paging list is present as a list.
@@ -1073,6 +1221,8 @@ def run_command(
         """Map a fitting failure to its stable error (ARCHITECTURE §5)."""
         if isinstance(exc, _PagingNotFetchable):
             reason = _PAGING_REASON
+        elif isinstance(exc, _RepeatPage):
+            reason = _REPEAT_REASON
         elif isinstance(exc, _NoProgress):
             reason = (
                 f"one item in {exc.section} is larger than the output limit"
@@ -1089,7 +1239,10 @@ def run_command(
 
     try:
         final_data, is_truncated, more = fit_once(fixed)
-    except (_PagingNotFetchable, _NoProgress, _TooBigPaging, _TooBig) as exc:
+    except (
+        _PagingNotFetchable, _NoProgress, _RepeatPage, _TooBigPaging,
+        _TooBig,
+    ) as exc:
         return fit_failure(exc)
     except _EnvelopeNotJson:
         return _fail(
@@ -1124,7 +1277,8 @@ def run_command(
         try:
             final_data, is_truncated, more = fit_once(fixed)
         except (
-            _PagingNotFetchable, _NoProgress, _TooBigPaging, _TooBig
+            _PagingNotFetchable, _NoProgress, _RepeatPage, _TooBigPaging,
+            _TooBig
         ) as exc:  # pragma: no cover - same sizes decide the same fit
             return fit_failure(exc)
         except _EnvelopeNotJson:
