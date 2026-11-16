@@ -216,13 +216,14 @@ jobs:
           PR: ${{ needs.resolve.outputs.pr }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+          HEAD_REPO: ${{ needs.resolve.outputs.head_repo }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           python scripts/publish_evidence.py render \
             --artifact-dir artifact --out-dir rendered \
             --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
-            --base-sha "$BASE_SHA" \
+            --base-sha "$BASE_SHA" --head-repo "$HEAD_REPO" \
             --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
             --test-results-dir test-results --jobs-json jobs.json \
             --base-tree-json base-tree.json --head-tree-json head-tree.json

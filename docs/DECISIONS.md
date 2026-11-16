@@ -801,8 +801,9 @@ handoff's "license not chosen; don't publish."
   size tier says "Before not captured: UI inputs identical."
   Main's publisher independently checks GitHub API tree listings with its
   own safe list and requires the recorded SHAs to match the API-resolved
-  base and current PR head. An unsafe change, SHA mismatch, failed fetch or
-  truncated listing refuses with `bad_skip`. See REVIEW.md, "Evidence,"
+  base and current PR head. Only same-repository PRs may skip; fork PRs
+  always capture both sides. An unsafe change, SHA mismatch, fork head,
+  failed fetch or truncated listing refuses with `bad_skip`. See REVIEW.md, "Evidence,"
   for the safe paths. Token permissions are unchanged.
   For R9, the evidence job checks out at depth 1, fetches only the exact
   base and head commits by SHA at depth 1, and adds the base worktree.
@@ -816,7 +817,11 @@ handoff's "license not chosen; don't publish."
   an allow-list of UI inputs (can't be made complete: a new file can shadow
   a standard-library module); full history (unneeded work); a moving branch
   tip (changes the base).
-- **Known limit:** a moved base refuses the skip even if the new trees
+- **Known limit:** nothing trusted records which base a CI run compared,
+  so the publisher can bind a skip only to the current base. A
+  same-repository writer could claim the current base after main moved;
+  the skip is then still true against the base the PR merges into, and
+  writers are trusted (D16). A moved base refuses the skip even if the new trees
   would allow it. Update the branch before merging; the next run evidences
   the new base. The safe list depends on the capture setup described in
   REVIEW.md and must be reviewed when that setup changes.

@@ -873,6 +873,9 @@ def cmd_check(args) -> int:
             base_sha=getattr(args, "base_sha", None),
             base_map=base_map,
             head_map=head_map,
+            # Direct callers without --head-repo are checking a same-repo
+            # artifact; the workflow always passes the event's head repo.
+            head_repo=getattr(args, "head_repo", None) or args.repo,
         )
     except publish_evidence.PublishError as exc:
         # The message goes to the job log (PR-visible anyway) so an honest
@@ -934,6 +937,11 @@ def main(argv: list[str] | None = None) -> int:
         "--git-dir",
         default=None,
         help="checkout holding the base and head commits (with --base-sha)",
+    )
+    check.add_argument(
+        "--head-repo",
+        default=None,
+        help="PR head repository, owner/name (default: --repo)",
     )
     check.set_defaults(func=cmd_check)
     identical = sub.add_parser(

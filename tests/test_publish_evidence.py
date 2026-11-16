@@ -2834,7 +2834,10 @@ def _skip_tree_doc(sha, web_sha="e" * 40):
 BASE_SHA = "c" * 40
 
 
-def _render_skip(tmp_path, artifact, base_sha=BASE_SHA, base_doc=None, head_doc=None):
+def _render_skip(
+    tmp_path, artifact, base_sha=BASE_SHA, base_doc=None, head_doc=None,
+    head_repo=REPO,
+):
     """Run the render through the real CLI, with stubbed tree-API files."""
     out = tmp_path / "out"
     argv = [
@@ -2845,6 +2848,8 @@ def _render_skip(tmp_path, artifact, base_sha=BASE_SHA, base_doc=None, head_doc=
         "--pr", str(PR),
         "--head-sha", HEAD_SHA,
     ]
+    if head_repo is not None:
+        argv += ["--head-repo", head_repo]
     if base_sha is not None:
         argv += ["--base-sha", base_sha]
     for name, doc in (("base", base_doc), ("head", head_doc)):
@@ -2872,6 +2877,45 @@ def test_render_accepts_a_verified_skip(tmp_path):
     assert sorted(p.name for p in (out / "files").iterdir()) == [
         "ui_manifest.json"
     ]
+
+
+@pytest.mark.parametrize(
+    "head_repo", ["someone-else/" + REPO.split("/")[1], None], ids=["fork", "unknown"]
+)
+def test_render_refuses_a_skip_from_a_fork_or_unknown_head_repo(tmp_path, head_repo):
+    # Nothing trusted records which base a CI run compared, so a manifest
+    # can name the current base after main moved (the re-review's forged
+    # case: run base B with different UI, main moved to B2 matching the
+    # head). Only a same-repository head (a trusted writer, D16) may skip;
+    # a fork's or an unknown head's claim is refused even when the trees
+    # would allow it. The same trees from a same-repo head are accepted
+    # (test_render_accepts_a_verified_skip), so this is not vacuous.
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    rc, out = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+        head_repo=head_repo,
+    )
+    assert rc == 1
+    assert json.loads((out / "refusal.json").read_text()) == {
+        "reason": "bad_skip"
+    }
+
+
+def test_render_accepts_a_same_repo_head_in_any_case(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    rc, _ = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+        head_repo=REPO.upper(),
+    )
+    assert rc == 0
 
 
 def test_render_refuses_a_skip_with_differing_inputs(tmp_path):

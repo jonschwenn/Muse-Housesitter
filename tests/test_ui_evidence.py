@@ -1289,7 +1289,10 @@ def _decide_step_shell():
     return shell
 
 
-def _run_decide_shell(shell, workspace, base_sha, head_sha):
+def _run_decide_shell(
+    shell, workspace, base_sha, head_sha,
+    repo="example-owner/example-repo", head_repo="example-owner/example-repo",
+):
     """Run the extracted decide shell; return the SKIP_BASE it records."""
     import os
     import shutil
@@ -1318,6 +1321,8 @@ def _run_decide_shell(shell, workspace, base_sha, head_sha):
         os.environ,
         BASE_SHA=base_sha,
         HEAD_SHA=head_sha,
+        REPO=repo,
+        HEAD_REPO=head_repo,
         GITHUB_ENV=str(env_file),
         PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""),
     )
@@ -1413,6 +1418,36 @@ def test_decide_step_mutated_to_head_vs_head_selects_the_skip(tmp_path):
     repo, base, head = _git_repo_with_capture_input(tmp_path)
     shutil.copytree(repo, workspace / "head")
     assert _run_decide_shell(shell, workspace, base, head) == "true"
+
+
+def test_decide_step_never_skips_for_a_fork_pr(tmp_path):
+    # A fork PR always captures both sides, even when nothing differs:
+    # main's publisher cannot authenticate the base a run compared, so it
+    # accepts a skip only from a same-repository head. The same-repo run
+    # with the same (identical) commits selects the skip, so this isn't
+    # vacuous; the comparison ignores case, as GitHub names do.
+    import shutil
+
+    shell = _decide_step_shell()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    repo, base, head = _git_repo_with_capture_input(tmp_path)
+    shutil.copytree(repo, workspace / "head")
+    assert _run_decide_shell(shell, workspace, head, head) == "true"
+    assert (
+        _run_decide_shell(
+            shell, workspace, head, head,
+            repo="Example-Owner/Example-Repo",
+            head_repo="example-owner/example-repo",
+        )
+        == "true"
+    )
+    assert (
+        _run_decide_shell(
+            shell, workspace, head, head, head_repo="someone-else/example-repo"
+        )
+        == "false"
+    )
 
 
 def test_section_names_the_capturing_browser():

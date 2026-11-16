@@ -349,6 +349,7 @@ def render_comment(
     base_sha: str | None = None,
     base_map: dict | None = None,
     head_map: dict | None = None,
+    head_repo: str | None = None,
 ) -> str:
     """Validate the artifact and build the final comment text.
 
@@ -452,6 +453,16 @@ def render_comment(
                 # time (trusted), so a claim for another base — because
                 # main has moved on, or because the artifact lies — is
                 # refused even when its trees would allow the skip.
+                # Nothing trusted records which base the CI run compared:
+                # the equality below only binds the claim to the CURRENT
+                # base. A same-repository head is written by a trusted
+                # writer (D16, D32); a fork PR (the outsider threat) never
+                # gets a skip, so a forged base SHA can't come from one.
+                if not head_repo or head_repo.lower() != repo.lower():
+                    raise PublishError(
+                        "base skip refused: only same-repository PRs may skip",
+                        "bad_skip",
+                    )
                 if base_sha is None:
                     raise PublishError(
                         "base skip unverified: base SHA was not provided",
@@ -662,6 +673,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             base_sha=args.base_sha,
             base_map=base_map,
             head_map=head_map,
+            head_repo=args.head_repo,
         )
     except PublishError as exc:
         print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
@@ -1169,6 +1181,11 @@ def main(argv: list[str] | None = None) -> int:
         "--base-sha",
         default=None,
         help="PR base commit SHA, 40 hex (to verify a base skip claim)",
+    )
+    render.add_argument(
+        "--head-repo",
+        default=None,
+        help="PR head repository, owner/name (a base skip needs a same-repo head)",
     )
     render.add_argument(
         "--base-tree-json",

@@ -136,7 +136,8 @@ PR #1 predates the tooling and has no evidence.
   artifact head, a render failure, or a publishing failure, respectively.
   `bad_skip` covers a changed path outside the safe list, a mode change,
   a changed symlink or submodule entry, mismatched compared SHAs (including
-  a moved base), or a failed or truncated tree fetch.
+  a moved base), a skip claimed by a fork PR, or a failed or truncated
+  tree fetch.
   `publish_failed` covers a
   failed image push or any failure to read or validate the rendered comment
   or refusal file, including an unknown refusal reason. These failures fall
@@ -309,6 +310,11 @@ PR #1 predates the tooling and has no evidence.
   `base_skipped: "ui_inputs_identical"` and the compared `base_sha` and
   `head_sha`. Every comment size tier, including the smallest pointer-only
   tier, states "Before not captured: UI inputs identical."
+  Fork PRs never skip: the decide step captures both sides, and main's
+  publisher refuses a skip claim unless the PR's head repository is this
+  repository. Nothing trusted records which base a CI run compared, so the
+  base check below binds a claim only to the current base; limiting skips
+  to same-repository heads keeps that gap away from outsiders (D16).
   Main's publisher checks the manifest's size and file type before reading
   it. It requires the recorded SHAs to match the PR's current head and the
   base it resolves from the API. If main has moved, publication refuses
