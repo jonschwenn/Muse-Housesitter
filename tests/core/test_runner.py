@@ -1149,6 +1149,210 @@ class TestPagingReplay:
         assert first_b + rest == lines_b
 
 
+class TestSelfReplayJsonEquality:
+    """The self-replay guard compares JSON calls, not Python values.
+
+    Tuples serialise as JSON arrays, so ``(1,)`` replays ``[1]``; ``True``
+    and ``1`` are equal in Python but serialise differently, so they are
+    different calls. Dict key order never matters on either side.
+    """
+
+    COMMAND = sdk.Command(
+        name="get",
+        handler="get",
+        description="Page demo readings.",
+        required={
+            "section": sdk.Param("string", "Which list to continue."),
+            "offset": sdk.Param("integer", "Where to continue."),
+            "id": sdk.Param("string", "Saved result id."),
+        },
+        optional={"opts": sdk.Param("object", "Options.")},
+        fields=(sdk.Field("data.items[]", "string"),),
+    )
+
+    BIG = "a" * 95000
+
+    def make_module(self, paging_params):
+        big = self.BIG
+
+        def handler(self, ctx, params):
+            return sdk.Result(
+                data={"items": [big]},
+                paging=sdk.Paging(
+                    command="get", lists=("items",), params=paging_params,
+                ),
+                save=None,
+            )
+
+        return type(
+            "SelfReplayModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (), "commands": (self.COMMAND,),
+                "get": handler,
+            },
+        )
+
+    def run_get(self, module_cls, opts, tmp_path):
+        return run(
+            module_cls, "housesitter.demo_sensor.get",
+            {"id": "probe-id-example", "section": "items",
+             "offset": 0, "opts": opts},
+            tmp_path,
+        )
+
+    def test_tuple_param_replays_list_param(self, tmp_path):
+        # Paging.params carries a tuple where the invocation carries the
+        # same JSON array: the replayed call is identical, so the single
+        # oversized item fails instead of paging forever.
+        module_cls = self.make_module(
+            {"id": "probe-id-example", "opts": {"values": (1,)}}
+        )
+        outcome, _ = self.run_get(module_cls, {"values": [1]}, tmp_path)
+        line = failed(outcome, "upstream_unexpected")
+        assert "one item in items is larger than the output limit" in line
+
+    def test_bool_param_is_not_number_param(self, tmp_path):
+        # True and 1 are equal in Python but different JSON calls, so the
+        # replay is a different call and truncation succeeds.
+        module_cls = self.make_module(
+            {"id": "probe-id-example", "opts": {"mode": 1}}
+        )
+        outcome, _ = self.run_get(module_cls, {"mode": True}, tmp_path)
+        assert outcome.exit_code == 0
+        assert outcome.envelope["truncated"] is True
+        assert outcome.envelope["data"] == {"items": []}
+        more = outcome.envelope["more"]
+        assert more["command"] == "housesitter.demo_sensor.get"
+        assert more["params"]["section"] == "items"
+        assert more["params"]["offset"] == 0
+        assert more["params"]["opts"] == {"mode": 1}
+
+    def test_key_order_alone_is_still_the_same_call(self, tmp_path):
+        # Insertion order differs between the paging params and the
+        # validated invocation params, but the JSON call is identical.
+        module_cls = self.make_module(
+            {"opts": {"values": [1]}, "id": "probe-id-example"}
+        )
+        outcome, _ = self.run_get(module_cls, {"values": [1]}, tmp_path)
+        line = failed(outcome, "upstream_unexpected")
+        assert "one item in items is larger than the output limit" in line
+
+    def test_mixed_key_types_replay_string_keys(self, tmp_path):
+        # The envelope serialises integer keys as strings, so paging
+        # params with an int key replay an invocation with the same
+        # string key; sorting the raw Python keys would raise
+        # TypeError and miss the replay.
+        module_cls = self.make_module(
+            {"id": "probe-id-example", "opts": {1: "a", "x": "b"}}
+        )
+        outcome, _ = self.run_get(module_cls, {"1": "a", "x": "b"}, tmp_path)
+        line = failed(outcome, "upstream_unexpected")
+        assert "one item in items is larger than the output limit" in line
+
+    def test_integer_keys_sort_as_strings(self, tmp_path):
+        # Numeric key order differs from string key order (2 > 10
+        # numerically, but "10" < "2" as strings); the replay must
+        # compare the coerced string order the envelope carries.
+        module_cls = self.make_module(
+            {"id": "probe-id-example", "opts": {2: "b", 10: "a"}}
+        )
+        outcome, _ = self.run_get(module_cls, {"2": "b", "10": "a"}, tmp_path)
+        line = failed(outcome, "upstream_unexpected")
+        assert "one item in items is larger than the output limit" in line
+
+
+class TestSelfReplayWireNormalisation:
+    """Replay params are normalised through wire JSON before validation.
+
+    Values the envelope serialiser turns into an identical call (a
+    non-string dict key, a tuple where the invocation carries an array)
+    must still count as a replay: validating the raw Python values
+    first would reject them and let the guard step aside.
+    """
+
+    BIG = "a" * 95000
+
+    def make_module(self, command, paging_params):
+        big = self.BIG
+
+        def handler(self, ctx, params):
+            return sdk.Result(
+                data={"items": [big]},
+                paging=sdk.Paging(
+                    command="get", lists=("items",),
+                    params=paging_params,
+                ),
+                save=None,
+            )
+
+        return type(
+            "WireReplayModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (), "commands": (command,),
+                "get": handler,
+            },
+        )
+
+    def test_bool_key_replays_string_key(self, tmp_path):
+        # Paging.params carries a bool key where the invocation carries
+        # the same wire string key: on the wire both are "true", so the
+        # single oversized item fails instead of paging forever.
+        command = sdk.Command(
+            name="get",
+            handler="get",
+            description="Page demo readings.",
+            required={
+                "section": sdk.Param("string", "Which list to continue."),
+                "offset": sdk.Param("integer", "Where to continue."),
+                "id": sdk.Param("string", "Saved result id."),
+            },
+            optional={"true": sdk.Param("string", "An option named true.")},
+            fields=(sdk.Field("data.items[]", "string"),),
+        )
+        module_cls = self.make_module(
+            command, {"id": "probe-id-example", True: "on"}
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get",
+            {"id": "probe-id-example", "section": "items",
+             "offset": 0, "true": "on"},
+            tmp_path,
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert "one item in items is larger than the output limit" in line
+
+    def test_tuple_value_replays_array_enum(self, tmp_path):
+        # Paging.params carries a tuple where the invocation carries the
+        # same JSON array, and the array param's enum holds that array:
+        # the replay validates after wire normalisation, so the single
+        # oversized item fails instead of paging forever.
+        command = sdk.Command(
+            name="get",
+            handler="get",
+            description="Page demo readings.",
+            required={
+                "section": sdk.Param("string", "Which list to continue."),
+                "offset": sdk.Param("integer", "Where to continue."),
+                "id": sdk.Param("string", "Saved result id."),
+            },
+            optional={"opts": sdk.Param("array", "Options.", enum=([1],))},
+            fields=(sdk.Field("data.items[]", "string"),),
+        )
+        module_cls = self.make_module(
+            command, {"id": "probe-id-example", "opts": (1,)}
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get",
+            {"id": "probe-id-example", "section": "items",
+             "offset": 0, "opts": [1]},
+            tmp_path,
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert "one item in items is larger than the output limit" in line
+
+
 class TestOpaqueArrays:
     """Opaque leaves exist only as arrays of plain scalars and nested arrays."""
 
@@ -1969,3 +2173,370 @@ class TestFitBeforeSave:
             "the result is too large for the output limit"
         )
         assert stored_files(tmp_path) == []
+
+
+class TestSelfReplayingMore:
+    """A ``more`` equal to the call that produced it must fail, not loop.
+
+    A paging command that omits ``start`` and whose first remaining item
+    alone exceeds the budget keeps zero items and returns a ``more``
+    identical to the current call; replaying it would loop forever, so
+    the run fails with the no-progress error instead.
+    """
+
+    SELF_COMMAND = sdk.Command(
+        name="get",
+        handler="get",
+        description="Page demo readings.",
+        optional={
+            "id": sdk.Param("string", "Saved result id."),
+            "section": sdk.Param("string", "Which list to continue."),
+            "offset": sdk.Param("integer", "Where to continue.", default=0),
+        },
+        fields=(sdk.Field("data.items[]", "string"),),
+    )
+
+    def make_module(self):
+        big = "s" * 95000
+
+        def handler(self, ctx, params):
+            return sdk.Result(
+                data={"items": [big]},
+                paging=sdk.Paging(
+                    command="get", lists=("items",),
+                    params={"id": params["id"]},
+                ),
+            )
+
+        return type(
+            "SelfPagingModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (), "commands": (self.SELF_COMMAND,),
+                "get": handler,
+            },
+        )
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            {
+                "id": "snapshot_20261104T151500Z_ab12",
+                "section": "items", "offset": 0,
+            },
+            {"id": "snapshot_20261104T151500Z_ab12", "section": "items"},
+        ],
+    )
+    def test_self_replaying_more_fails(self, tmp_path, raw):
+        outcome, _ = run(
+            self.make_module(), "housesitter.demo_sensor.get", raw, tmp_path
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "one item in items is larger than the output limit"
+        )
+        assert line.endswith("one item in items is larger than the output limit")
+
+    def make_mutating_module(self, mutate):
+        command = self.SELF_COMMAND
+
+        def handler(self, ctx, params):
+            mutate(params)
+            return sdk.Result(
+                data={"items": ["s" * 95000]},
+                paging=sdk.Paging(
+                    command="get", lists=("items",),
+                    params={"id": params["id"]},
+                ),
+            )
+
+        return type(
+            "MutatingPagingModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (), "commands": (command,),
+                "get": handler,
+            },
+        )
+
+    def test_handler_popping_section_still_fails(self, tmp_path):
+        # The handler removes ``section`` from the params dict it was
+        # given. The guard must compare against a copy taken before the
+        # call, so the replay is still detected.
+        module = self.make_mutating_module(lambda p: p.pop("section", None))
+        outcome, _ = run(
+            module, "housesitter.demo_sensor.get",
+            {
+                "id": "snapshot_20261104T151500Z_ab12",
+                "section": "items", "offset": 0,
+            },
+            tmp_path,
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "one item in items is larger than the output limit"
+        )
+        assert line.endswith("one item in items is larger than the output limit")
+
+    def test_handler_adding_key_still_fails(self, tmp_path):
+        # The handler adds a key the call never carried. The guard must
+        # compare against a copy taken before the call, so the replay is
+        # still detected.
+        def mutate(params):
+            params["zzz"] = "injected"
+
+        module = self.make_mutating_module(mutate)
+        outcome, _ = run(
+            module, "housesitter.demo_sensor.get",
+            {
+                "id": "snapshot_20261104T151500Z_ab12",
+                "section": "items", "offset": 0,
+            },
+            tmp_path,
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "one item in items is larger than the output limit"
+        )
+        assert line.endswith("one item in items is larger than the output limit")
+
+    NESTED_COMMAND = sdk.Command(
+        name="get",
+        handler="get",
+        description="Page demo readings.",
+        optional={
+            "id": sdk.Param("string", "Saved result id."),
+            "section": sdk.Param("string", "Which list to continue."),
+            "offset": sdk.Param("integer", "Where to continue.", default=0),
+            "opts": sdk.Param("object", "Options."),
+        },
+        fields=(sdk.Field("data.items[]", "string"),),
+    )
+
+    def test_handler_mutating_nested_value_still_fails(self, tmp_path):
+        # The handler mutates a nested value in place. A shallow copy
+        # would share that object and miss the replay; only a deep copy
+        # taken before the call keeps the guard working.
+        def handler(self, ctx, params):
+            params["opts"]["level"] = 999
+            return sdk.Result(
+                data={"items": ["s" * 95000]},
+                paging=sdk.Paging(
+                    command="get", lists=("items",),
+                    params={"id": params["id"], "opts": {"level": 0}},
+                ),
+            )
+
+        module = type(
+            "NestedMutatingPagingModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (),
+                "commands": (self.NESTED_COMMAND,),
+                "get": handler,
+            },
+        )
+        outcome, _ = run(
+            module, "housesitter.demo_sensor.get",
+            {
+                "id": "snapshot_20261104T151500Z_ab12",
+                "section": "items", "offset": 0,
+                "opts": {"level": 0},
+            },
+            tmp_path,
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "one item in items is larger than the output limit"
+        )
+        assert line.endswith("one item in items is larger than the output limit")
+
+    def test_first_page_without_section_still_pages(self, tmp_path):
+        # The current call carries no ``section`` (it has no default), so
+        # the returned ``more`` differs from the call: truncation succeeds.
+        outcome, _ = run(
+            self.make_module(), "housesitter.demo_sensor.get",
+            {"id": "snapshot_20261104T151500Z_ab12"}, tmp_path,
+        )
+        assert outcome.exit_code == 0
+        assert outcome.envelope["truncated"] is True
+        assert outcome.envelope["data"] == {"items": []}
+        more = outcome.envelope["more"]
+        assert more["command"] == "housesitter.demo_sensor.get"
+        assert more["params"]["section"] == "items"
+        assert more["params"]["offset"] == 0
+        assert more["remaining"] == {"items": 1}
+
+
+class TestRepeatPageReason:
+    """When the self-replay page kept items, the failure says so.
+
+    Zero kept items means the first remaining item alone exceeds the
+    budget (``one item in <section> is larger than the output limit``).
+    One or more kept items means truncation found a page whose ``more``
+    replays the call that produced it, so replaying would fetch the same
+    page forever: ``upstream_unexpected`` with exactly
+    "the module's paging would repeat the same page".
+    """
+
+    ITEM = "x" * 20000
+
+    COMMAND = sdk.Command(
+        name="get",
+        handler="get",
+        description="Page demo readings.",
+        optional={
+            "id": sdk.Param("string", "Saved result id."),
+            "section": sdk.Param("string", "Which list to continue."),
+            "offset": sdk.Param("integer", "Where to continue.", default=0),
+        },
+        fields=(sdk.Field("data.items[]", "string"),),
+    )
+
+    def make_module(self, save=None):
+        items = [self.ITEM] * 10
+
+        def handler(self, ctx, params):
+            return sdk.Result(
+                data={"items": list(items)},
+                paging=sdk.Paging(
+                    command="get", lists=("items",),
+                    params={"id": params["id"]},
+                ),
+                save=save,
+            )
+
+        return type(
+            "RepeatPagingModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (),
+                "commands": (self.COMMAND,),
+                "get": handler,
+            },
+        )
+
+    def test_repeat_page_reason(self, tmp_path):
+        module = self.make_module()
+        first, _ = run(
+            module, "housesitter.demo_sensor.get",
+            {"id": "snapshot_20261104T151500Z_ab12"}, tmp_path,
+        )
+        assert first.exit_code == 0
+        kept = len(first.envelope["data"]["items"])
+        assert kept == 4
+        outcome, _ = run(
+            module, "housesitter.demo_sensor.get",
+            {
+                "id": "snapshot_20261104T151500Z_ab12",
+                "section": "items", "offset": kept,
+            },
+            tmp_path,
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "the module's paging would repeat the same page"
+        )
+        assert line.endswith("the module's paging would repeat the same page")
+
+    def test_save_disables_self_replay_guard(self, tmp_path):
+        # With Result.save set the self-replay guard does not apply:
+        # ``more`` names the newly saved id, which cannot equal the id
+        # of any existing file (the link never overwrites), so the
+        # follow-up is a different call. Even when the invocation id has
+        # the stand-in shape, the run succeeds and ``more`` names the
+        # real saved id, which loads.
+        from housesitter.core.store import FileStore
+
+        module = self.make_module(save="snapshot")
+        standin = "snapshot_00000000T000000Z_0000"
+        outcome, _ = run(
+            module, "housesitter.demo_sensor.get",
+            {"id": standin, "section": "items", "offset": 4},
+            tmp_path,
+        )
+        assert outcome.exit_code == 0
+        assert outcome.envelope["truncated"] is True
+        saved_id = outcome.envelope["saved"]
+        assert outcome.envelope["more"]["params"]["id"] == saved_id
+        assert saved_id != standin
+        store = FileStore("demo_sensor", env={"HOME": str(tmp_path)})
+        assert store.load(saved_id)["data"]["items"] == [self.ITEM] * 10
+
+    def test_save_still_fails_before_saving_on_zero_progress(self, tmp_path):
+        # The start-entry zero-progress check is unchanged: with save
+        # set, a continuation that keeps zero items of its start section
+        # fails before anything is saved, so no file is left behind.
+        big = "s" * 95000
+
+        def handler(self, ctx, params):
+            return sdk.Result(
+                data={"items": [big]},
+                paging=sdk.Paging(
+                    command="get", lists=("items",),
+                    params={"id": params["id"]},
+                    start={"items": 0},
+                ),
+                save="snapshot",
+            )
+
+        module_cls = type(
+            "ZeroProgressSaveModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (), "commands": (self.COMMAND,),
+                "get": handler,
+            },
+        )
+        outcome, _ = run(
+            module_cls, "housesitter.demo_sensor.get",
+            {"id": "snapshot_20261104T151500Z_ab12"}, tmp_path,
+        )
+        line = failed(outcome, "upstream_unexpected")
+        assert outcome.error_reason == (
+            "one item in items is larger than the output limit"
+        )
+        assert line.endswith("one item in items is larger than the output limit")
+        assert stored_files(tmp_path) == []
+
+    def test_invalid_replay_params_guard_does_not_apply(self, tmp_path):
+        # The paging ``params`` carry a key the paging command does not
+        # declare, so the replay params do not validate and the guard
+        # does not apply (replay validity stays unchecked, as documented).
+        # The outcome is whatever it was before the guard: the looser
+        # fetchability check passes, so the empty first page succeeds.
+        def handler(self, ctx, params):
+            return sdk.Result(
+                data={"items": ["s" * 95000]},
+                paging=sdk.Paging(
+                    command="get", lists=("items",),
+                    params={"id": params["id"], "bogus": "x"},
+                ),
+            )
+
+        module = type(
+            "BogusPagingModule", (sdk.Module,),
+            {
+                "id": "demo_sensor", "title": "Demo", "version": "0.1.0",
+                "config": {}, "http_allow": (),
+                "commands": (self.COMMAND,),
+                "get": handler,
+            },
+        )
+        outcome, _ = run(
+            module, "housesitter.demo_sensor.get",
+            {
+                "id": "snapshot_20261104T151500Z_ab12",
+                "section": "items", "offset": 0,
+            },
+            tmp_path,
+        )
+        assert outcome.exit_code == 0
+        assert outcome.envelope["truncated"] is True
+        assert outcome.envelope["data"] == {"items": []}
+        more = outcome.envelope["more"]
+        assert more["command"] == "housesitter.demo_sensor.get"
+        assert more["params"]["section"] == "items"
+        assert more["params"]["offset"] == 0
+        assert more["params"]["bogus"] == "x"
+        assert more["remaining"] == {"items": 1}

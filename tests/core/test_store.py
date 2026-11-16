@@ -140,6 +140,17 @@ class TestSave:
         )
         assert store.load(saved_id) == {"a": 1}
 
+    def test_year_below_1000_uses_zero_padded_stamp(self, tmp_path):
+        ancient = datetime(999, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        store = make_store(
+            tmp_path, clock=lambda: ancient, suffix=suffixes("0a1b")
+        )
+        saved_id = store.save("snapshot", {"a": 1})
+        assert saved_id == "snapshot_09990102T030405Z_0a1b"
+        assert sdk._STORE_ID_RE.fullmatch(saved_id)
+        assert store.load(saved_id) == {"a": 1}
+        assert [item.id for item in store.list("snapshot").items] == [saved_id]
+
     def test_file_mode_600_and_compact(self, tmp_path):
         store = make_store(tmp_path, clock=clock_over(0), suffix=suffixes("0001"))
         saved_id = store.save("snapshot", {"a": 1, "b": [1, 2]})
@@ -196,6 +207,25 @@ class TestSave:
         saved_id = store.save("snapshot", {"n": 1})
         assert store.load(saved_id) == {"n": 1}
         assert dir_calls, "the module dir fsync must still be attempted"
+
+    def test_dir_close_failure_still_saves(self, tmp_path, monkeypatch):
+        import housesitter.core.store as store_mod
+
+        real_close = os.close
+
+        def flaky_close(fd):
+            try:
+                is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+            except OSError:
+                is_dir = False
+            if is_dir:
+                raise OSError("cannot close directory")
+            return real_close(fd)
+
+        monkeypatch.setattr(store_mod.os, "close", flaky_close)
+        store = make_store(tmp_path)
+        saved_id = store.save("snapshot", {"n": 1})
+        assert store.load(saved_id) == {"n": 1}
 
     def test_stale_tmp_files_cleaned_after_save(self, tmp_path):
         fixed = datetime(2026, 11, 4, 15, 15, 0, tzinfo=timezone.utc)
@@ -290,6 +320,93 @@ class TestSave:
         (store.module_dir / "notes.txt").write_text("keep me")
         store.save("snapshot", {"n": 2})
         assert (store.module_dir / "notes.txt").read_text() == "keep me"
+
+    def test_prune_never_removes_current_save(self, tmp_path):
+        # Same-second saves sort by random suffix: the second save sorts
+        # first, so the shared deletion set names it oldest. Each save
+        # removes only its own id from that set, so the out-of-order new
+        # save survives and the directory holds retention + 1 files until
+        # the next save.
+        store = make_store(
+            tmp_path, retention=1, clock=clock_over(0, 0),
+            suffix=suffixes("ffff", "0000"),
+        )
+        first = store.save("snapshot", {"n": 1})
+        second = store.save("snapshot", {"n": 2})
+        assert store.load(second) == {"n": 2}
+        assert sorted(os.listdir(store.module_dir)) == sorted(
+            [first + ".json", second + ".json"]
+        )
+
+    def test_prune_keeps_current_save_when_clock_steps_back(self, tmp_path):
+        # The second save carries an earlier timestamp, so by age it
+        # looks oldest and the shared deletion set names it. It removes
+        # only its own id from that set, so it survives and the directory
+        # holds retention + 1 files until the next save.
+        store = make_store(
+            tmp_path, retention=1, clock=clock_over(5, 2),
+            suffix=suffixes("0001", "0002"),
+        )
+        first = store.save("snapshot", {"n": 1})
+        second = store.save("snapshot", {"n": 2})
+        assert store.load(second) == {"n": 2}
+        assert sorted(os.listdir(store.module_dir)) == sorted(
+            [first + ".json", second + ".json"]
+        )
+
+    def test_prune_sequential_newest_leaves_retention(self, tmp_path):
+        # Unchanged behaviour: when the new save is newest, its own id is
+        # not in the shared deletion set, so pruning leaves exactly
+        # ``retention`` files.
+        store = make_store(
+            tmp_path, retention=1, clock=clock_over(0, 1),
+            suffix=suffixes("0001", "0002"),
+        )
+        store.save("snapshot", {"n": 1})
+        second = store.save("snapshot", {"n": 2})
+        assert store.load(second) == {"n": 2}
+        assert sorted(os.listdir(store.module_dir)) == [second + ".json"]
+
+    def test_interleaved_saves_never_empty_directory(
+        self, tmp_path, monkeypatch
+    ):
+        # A saves, then B's whole save runs before A's prune: with the old
+        # per-save exclusion A deletes B and B deletes A, emptying the
+        # directory. Each save must compute the same deletion set and skip
+        # only its own id, so at least one returned id still loads.
+        import housesitter.core.store as store_mod
+
+        fixed = datetime(2026, 11, 4, 15, 15, 0, tzinfo=timezone.utc)
+        store_a = make_store(
+            tmp_path, retention=1, clock=lambda: fixed,
+            suffix=suffixes("0001"),
+        )
+        store_b = make_store(
+            tmp_path, retention=1, clock=lambda: fixed,
+            suffix=suffixes("0002"),
+        )
+        real_link = os.link
+        moved_in = {"done": False}
+        saved: dict[str, str] = {}
+
+        def hooked_link(src, dst):
+            real_link(src, dst)
+            if not moved_in["done"]:
+                moved_in["done"] = True
+                saved["b"] = store_b.save("snapshot", {"n": "b"})
+
+        monkeypatch.setattr(store_mod.os, "link", hooked_link)
+        saved["a"] = store_a.save("snapshot", {"n": "a"})
+        assert sorted(os.listdir(store_a.module_dir)) != []
+        loaded = []
+        for key in ("a", "b"):
+            try:
+                store_a.load(saved[key])
+            except StoreError:
+                pass
+            else:
+                loaded.append(key)
+        assert loaded != []
 
     def test_concurrent_saves_produce_distinct_files(self, tmp_path):
         store = make_store(tmp_path)
