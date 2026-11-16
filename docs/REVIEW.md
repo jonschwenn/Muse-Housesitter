@@ -24,7 +24,7 @@ what changed:
 | Component | Evidence |
 |-----------|----------|
 | Command-line output (envelopes, `describe`, `doctor`, errors) | **Text diffs.** CI posts one PR comment. For each changed scenario it shows a colored ```` ```diff ```` block from before to after, with the full before and after outputs in collapsible sections below. |
-| Web UI (any page Housesitter serves, if one ever exists) | **Rendered screenshots.** A headless browser captures each page before and after, plus a highlighted visual diff. The images are hosted on the `pr-evidence` branch (D12) and embedded in the same comment. |
+| Web UI (any page Housesitter serves, if one ever exists) | **Rendered screenshots.** A headless browser captures each page before and after, plus a highlighted visual diff, with before captures skipped only when no capture-affecting path differs (D38, below). The images are hosted on the `pr-evidence` branch (D12) and embedded in the same comment. |
 
 Every PR gets the Web UI section below when the artifact has
 `ui_manifest.json`, even when neither side has `web/`. The comment is
@@ -103,11 +103,15 @@ PR #1 predates the tooling and has no evidence.
   `tests/test_pr_evidence.py` fails on it.
 - In `.github/workflows/ci.yml`, the `evidence` job runs the capture and
   comment scripts on every PR with a read-only token: all jobs in that
-  workflow have `contents: read` and nothing else. It writes the text
+  workflow have `contents: read` and nothing else. It checks out shallowly
+  (`fetch-depth: 1`), then fetches exactly the event's base and head commits
+  by SHA at depth 1 and adds the base worktree. It needs no full history
+  and never substitutes a moving branch tip. It writes the text
   comment body to the job summary and uploads the evidence artifact
   (`results.json`, `evidence.md`, plus the UI PNGs and `ui_manifest.json`,
   if any). Before uploading, it runs `scripts/evidence_checks.py check` on
-  that file set, using the publisher's refusal checks. A refusal fails
+  that file set, using the publisher's refusal checks. A claimed base skip
+  is re-verified against local git objects before upload. A refusal fails
   `evidence` and turns `ci-ok` red. This catches honest mistakes only: a
   PR controls its own copy of the checks. The job never pushes or comments.
   The `ci-ok` job passes only when `test` and `evidence` both passed or
@@ -126,10 +130,15 @@ PR #1 predates the tooling and has no evidence.
   write token belongs to this workflow, not to the PR. When the artifact is
   invalid, it pushes no images and posts a fixed refusal notice containing
   only main's text and a reason code: `missing`, `too_large`, `bad_png`,
-  `bad_schema`, `stale_head`, `render_error`, or `publish_failed`.
+  `bad_schema`, `bad_skip`, `stale_head`, `render_error`, or `publish_failed`.
   These mean missing or unreadable input, a size-limit breach, an invalid
-  screenshot, invalid evidence data, a mismatched artifact head, a render
-  failure, or a publishing failure, respectively. `publish_failed` covers a
+  screenshot, invalid evidence data, an unverified base skip, a mismatched
+  artifact head, a render failure, or a publishing failure, respectively.
+  `bad_skip` covers a changed path outside the safe list, a mode change,
+  a changed symlink or submodule entry, mismatched compared SHAs (including
+  a moved base), a skip claimed by a fork PR, or a failed or truncated
+  tree fetch.
+  `publish_failed` covers a
   failed image push or any failure to read or validate the rendered comment
   or refusal file, including an unknown refusal reason. These failures fall
   back to the fixed notice under the same publishing checks. A stale or
@@ -275,6 +284,46 @@ PR #1 predates the tooling and has no evidence.
   and older readers ignore the extra key. The comment names that browser
   and version only when it lists captures. Playwright is a dev/CI-only
   extra (`ui` in `pyproject.toml`), never a runtime dependency.
+- Base dashboard captures are skipped only when no capture-affecting path
+  differs between the PR's base and head trees (D38). Every differing path
+  must be on the fixed safe list defined by `UI_SKIP_SAFE_DIRS` and
+  `skip_safe_path` in `scripts/evidence_checks.py`:
+
+  - `docs/`, top-level `*.md` and `LICENSE*`: prose that is neither served
+    nor read by installation or capture.
+  - `install/`: Pi setup scripts that the evidence job never runs.
+  - `tests/`, except `tests/fixtures/dashboard/`: tests do not supply pixels;
+    dashboard fixtures do, so their changes force full captures.
+  - `src/housesitter/`: captures use the fixture server and never import
+    this package. Other `src/` paths are unsafe: an editable install puts
+    `src/` on Python's import path, where a new file can affect startup.
+  - `.github/`, except `.github/workflows/ci.yml`: other workflows and
+    templates do not drive capture; `ci.yml` sets its browser and views.
+
+  Everything else forces full captures, including `scripts/`, `web/`,
+  `pyproject.toml` and new top-level paths. A mode change or a changed
+  symlink or submodule entry also forces full captures, even on a safe
+  path. The PR decides with `git diff-tree`; a test runs the actual
+  `ci.yml` decision step against a temporary git repository.
+
+  Head captures and every UI check still run. The manifest records
+  `base_skipped: "ui_inputs_identical"` and the compared `base_sha` and
+  `head_sha`. Every comment size tier, including the smallest pointer-only
+  tier, states "Before not captured: UI inputs identical."
+  Fork PRs never skip: the decide step captures both sides, and main's
+  publisher refuses a skip claim unless the PR's head repository is this
+  repository. Nothing trusted records which base a CI run compared, so the
+  base check below binds a claim only to the current base; limiting skips
+  to same-repository heads keeps that gap away from outsiders (D16).
+  Main's publisher checks the manifest's size and file type before reading
+  it. It requires the recorded SHAs to match the PR's current head and the
+  base it resolves from the API. If main has moved, publication refuses
+  with `bad_skip`; update the branch so the next run evidences the new base.
+  The publisher independently applies main's safe list to GitHub API tree
+  listings, comparing path, mode, type and object id. It fetches the head
+  tree from the head repository, including for fork PRs. An unsafe change,
+  SHA mismatch, failed tree fetch or truncated listing refuses with
+  `bad_skip`. Token permissions are unchanged.
 - Capture file names are `<fixture>__<view>__<side>.png`, parsed from the
   right (the view and side are fixed words). Fixture stems are lowercase
   alphanumerics plus `-` and single `_`, at most 48 chars, with no `__`
@@ -307,8 +356,8 @@ PR #1 predates the tooling and has no evidence.
   `success` and `failure` conclusions, the Checks column shows the failures,
   and a top-line notice says the checks failed. `ci-ok` still fails, because
   `evidence` did.
-- Capture pairs are classified as added, removed, changed, or unchanged by
-  decoded pixel equality, not file bytes: a stdlib `zlib` PNG decoder keeps
+- When the base is captured, capture pairs are classified as added, removed,
+  changed, or unchanged by decoded pixel equality, not file bytes: a stdlib `zlib` PNG decoder keeps
   the comparison a unit-testable pure function with no new dependency
   (byte-identical files short-circuit, which is sound, and anything else is
   decoded and compared pixel by pixel). In the comment, added captures get

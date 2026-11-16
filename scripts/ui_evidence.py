@@ -82,6 +82,10 @@ CAPTURE_RE = re.compile(
 REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 
+
+def _is_hex_sha(value: object) -> bool:
+    return isinstance(value, str) and SHA_RE.fullmatch(value) is not None
+
 # Full-page desktop shots of the 600-client fixture compress to ~6 MB, so the
 # caps fit those with headroom rather than pretending screenshots are small.
 MAX_FILE_BYTES = 8_000_000  # per-PNG cap for the evidence branch
@@ -707,6 +711,12 @@ UI_BROWSER_NAMES = {
 }
 UI_BROWSER_VERSION_RE = re.compile(r"[0-9]+(\.[0-9]+){0,3}")
 UI_BROWSER_VERSION_MAX_LEN = 32
+# The manifest's ``base_skipped`` value when the base captures were skipped
+# (every UI input identical), and the sentence the comment then states.
+# scripts/pr_evidence.py and scripts/evidence_checks.py keep their own
+# copies; a test pins all three identical.
+UI_SKIP_REASON = "ui_inputs_identical"
+UI_SKIP_NOTE = "Before not captured: UI inputs identical."
 
 
 def browser_info(channel: str | None, version: str) -> dict:
@@ -748,8 +758,19 @@ def build_manifest(
     out_dir: Path,
     head_records: dict,
     browser: dict | None = None,
+    base_skipped: bool = False,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
 ) -> dict:
-    """Classify every fixture x view pair, writing diff images for changes."""
+    """Classify every fixture x view pair, writing diff images for changes.
+
+    With ``base_skipped`` (Decision 6: nothing capture-affecting changed,
+    so the base side was never captured), every pair with a head shot is
+    recorded unchanged and its PNGs are dropped as usual; pairs with no
+    head shot fall through to the normal classification. The manifest
+    records the skip reason plus the compared base and head SHAs on top,
+    so the publisher can bind the claim to the run's own revisions (F2).
+    """
     base_fixtures = set(fixtures_in(base_tree)) if has_web(base_tree) else set()
     head_fixtures = set(fixtures_in(head_tree)) if has_web(head_tree) else set()
     captures = []
@@ -767,11 +788,19 @@ def build_manifest(
             # note, instead of crashing before the manifest is written.
             diff_error = None
             diff = None
-            try:
-                status, diff = classify_and_diff(base_png, head_png)
-            except ValueError as exc:
-                status = "changed"
-                diff_error = f"diff unavailable: {exc}"
+            if base_skipped and head_png is not None:
+                # The skip was decided from identical inputs, so the base
+                # shot would match: record unchanged without comparing.
+                # A missing head shot falls through below (a direct
+                # --skip-base misuse with differing sides classifies
+                # normally, and validation then refuses the contradiction).
+                status = "unchanged"
+            else:
+                try:
+                    status, diff = classify_and_diff(base_png, head_png)
+                except ValueError as exc:
+                    status = "changed"
+                    diff_error = f"diff unavailable: {exc}"
             diff_file = None
             if status == "changed" and diff_error is None:
                 # The diff comes from the classification's single decode.
@@ -781,9 +810,11 @@ def build_manifest(
             if status == "unchanged":
                 # Unchanged pairs are listed in the table only. Drop their
                 # PNGs so they are never uploaded or pushed: pr-evidence only
-                # grows, and most pushes change few or no captures.
-                base_path.unlink()
-                head_path.unlink()
+                # grows, and most pushes change few or no captures. The
+                # base shot may not exist at all on the skip path, which
+                # never captures it.
+                base_path.unlink(missing_ok=True)
+                head_path.unlink(missing_ok=True)
                 base_png = head_png = None
             problems = head_records.get(
                 capture_name(fixture, view_id, "head"), {}
@@ -800,7 +831,15 @@ def build_manifest(
                     "head_problems": problems,
                 }
             )
-    return {"version": 1, "browser": browser, "captures": captures}
+    manifest: dict = {"version": 1, "browser": browser, "captures": captures}
+    if base_skipped:
+        for name, sha in (("base", base_sha), ("head", head_sha)):
+            if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+                raise ValueError(f"base skip needs a 40-hex {name} SHA, got {sha!r}")
+        manifest["base_skipped"] = UI_SKIP_REASON
+        manifest["base_sha"] = base_sha
+        manifest["head_sha"] = head_sha
+    return manifest
 
 
 def img_tag(src: str, width: int, alt: str) -> str:
@@ -869,6 +908,8 @@ def build_ui_section(
             lines += [UI_BROWSER_UNKNOWN + " " + UI_IMAGES_NOTE, ""]
         else:
             lines += ["Captured headless with " + display + ". " + UI_IMAGES_NOTE, ""]
+    if manifest.get("base_skipped") == UI_SKIP_REASON:
+        lines += [UI_SKIP_NOTE, ""]
     if not base_has_web:
         lines += [
             "The base has no `web/` directory, so every capture is new "
@@ -1065,6 +1106,23 @@ def validate_artifact(directory: Path) -> list:
                 manifest.get("captures"), list
             ):
                 errors.append("manifest must be an object with a captures list")
+            elif "base_skipped" in manifest:
+                # The skip claim is core to the artifact's honesty, so its
+                # shape is validated here; the publisher re-verifies the
+                # claim itself. Anything but the fixed reason, any
+                # non-unchanged capture beside it, or a missing or
+                # malformed compared-revision binding fails closed.
+                if manifest["base_skipped"] != UI_SKIP_REASON:
+                    errors.append("manifest has an invalid base_skipped value")
+                elif any(
+                    not isinstance(cap, dict) or cap.get("status") != "unchanged"
+                    for cap in manifest.get("captures", [])
+                ):
+                    errors.append("manifest claims a skip with changed captures")
+                elif not _is_hex_sha(manifest.get("base_sha")) or not _is_hex_sha(
+                    manifest.get("head_sha")
+                ):
+                    errors.append("manifest skip is missing its compared SHAs")
             else:
                 try:
                     names = {
@@ -1099,9 +1157,22 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--pr", type=int, required=True, help="pull request number")
     parser.add_argument("--head-sha", required=True, help="head commit SHA (40 hex)")
     parser.add_argument(
+        "--base-sha",
+        default=None,
+        help="base commit SHA (40 hex): recorded in the manifest with "
+        "--skip-base so the publisher can bind the claim to this run",
+    )
+    parser.add_argument(
         "--browser-channel",
         default=None,
         help="use an installed browser (e.g. chrome) instead of Playwright's bundled Chromium",
+    )
+    parser.add_argument(
+        "--skip-base",
+        action="store_true",
+        help="skip the base captures: every UI input is identical, so the "
+        "base shots would match. Still captures the head and runs every UI "
+        "check on it, and records the skip in the manifest.",
     )
     args = parser.parse_args(argv)
     try:
@@ -1119,7 +1190,9 @@ def main(argv: list | None = None) -> int:
     head_web = has_web(args.head_tree)
     head_records: dict = {}
     base_browser = head_browser = None
-    if base_web:
+    if args.skip_base:
+        print("ui_evidence: skipping base captures (UI inputs identical)")
+    elif base_web:
         _, base_browser = capture_side(
             args.base_tree, args.out_dir, "base", check=False, channel=args.browser_channel
         )
@@ -1130,8 +1203,18 @@ def main(argv: list | None = None) -> int:
     # Both sides capture with the same browser in one run; the head side's
     # record wins when it exists, else the base's, else null.
     browser = head_browser if head_browser is not None else base_browser
+    if args.skip_base and args.base_sha is None:
+        print("ui_evidence: --skip-base needs --base-sha", file=sys.stderr)
+        return 2
     manifest = build_manifest(
-        args.base_tree, args.head_tree, args.out_dir, head_records, browser=browser
+        args.base_tree,
+        args.head_tree,
+        args.out_dir,
+        head_records,
+        browser=browser,
+        base_skipped=args.skip_base,
+        base_sha=args.base_sha,
+        head_sha=args.head_sha,
     )
     # Crop full-page shots shorter when the push cap would refuse them all
     # (Decision 5). The manifest records each cropped height, and the

@@ -125,16 +125,27 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Shallow: the evidence job only ever needs the head commit and
+          # the base commit (R9). The base comes from the fetch below.
           path: head
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x"
-      - name: Check out the base
+      # R9: fetch only the two commits the evidence needs, by SHA. GitHub
+      # serves any reachable commit by id (actions/checkout fetches the
+      # same way), so the base is the event's exact base commit even after
+      # main has moved on, and the head is the PR's exact head commit
+      # (the checkout above is the merge commit).
+      - name: Fetch the base and head commits
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: git -C head worktree add "$GITHUB_WORKSPACE/base" "$BASE_SHA"
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git -C head fetch --depth 1 --no-tags origin "$BASE_SHA" "$HEAD_SHA"
+          git -C head worktree add "$GITHUB_WORKSPACE/base" "$BASE_SHA"
       # Screenshots use the Google Chrome that GitHub's runner image ships
       # (updated weekly, like real users' Chrome), not a Playwright-bundled
       # browser, so the job doesn't depend on Playwright supporting the
@@ -144,17 +155,45 @@ jobs:
         run: |
           python -m pip install -e "./head[ui]"
           google-chrome --version
+      # Decision 6: when no capture-affecting path differs between the
+      # base and head commits, the base captures are skipped (the head is
+      # still captured and every UI check still runs on it). The
+      # comparison diffs the two commits above, never file contents or PR
+      # claims; the publisher re-verifies the claim with main's safe list.
+      - name: Decide whether base captures can be skipped
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          # Fork PRs always capture both sides: main's publisher cannot
+          # authenticate which base a run compared, so it accepts a skip
+          # only from a same-repository head (writers are trusted, D16).
+          if [ "${HEAD_REPO,,}" != "${REPO,,}" ]; then
+            echo "fork PR: capturing both sides"
+            echo "SKIP_BASE=false" >> "$GITHUB_ENV"
+          elif python head/scripts/evidence_checks.py inputs-identical \
+            --git-dir head --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA"; then
+            echo "SKIP_BASE=true" >> "$GITHUB_ENV"
+          else
+            echo "SKIP_BASE=false" >> "$GITHUB_ENV"
+          fi
       - name: Capture the web UI
         env:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           ui_exit=0
+          skip_args=()
+          if [ "${SKIP_BASE:-false}" = "true" ]; then skip_args+=(--skip-base); fi
           python head/scripts/ui_evidence.py \
             --base-tree base --head-tree head --out-dir ui_out \
             --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
-            --browser-channel chrome || ui_exit=$?
+            --base-sha "$BASE_SHA" \
+            --browser-channel chrome "${skip_args[@]}" || ui_exit=$?
           echo "UI_EXIT=$ui_exit" >> "$GITHUB_ENV"
       # Text plus structured results: the privileged publisher
       # (evidence-publish.yml, running from main) rebuilds both the text
@@ -184,7 +223,9 @@ jobs:
         env:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
           rm -rf staged && mkdir -p staged
@@ -198,8 +239,11 @@ jobs:
             pngs=(ui_out/*.png)
             if (( ${#pngs[@]} > 0 )); then cp "${pngs[@]}" staged/ui_out/; fi
           fi
+          # A base skip claim is re-verified here against the local git
+          # objects, so an honest mistake fails the job before upload.
           python head/scripts/evidence_checks.py check \
-            --artifact-dir staged --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA"
+            --artifact-dir staged --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --base-sha "$BASE_SHA" --git-dir head --head-repo "$HEAD_REPO"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evidence

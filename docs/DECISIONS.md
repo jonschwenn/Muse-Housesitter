@@ -106,6 +106,10 @@ handoff's "license not chosen; don't publish."
   D33–D35 record the trust, refusal and crop decisions in PR #57.
 - **Amended (2026-11-15, Jon):** module-output evidence now runs the real
   CLI against a shared fake controller and invented fixtures. See D37.
+- **Amended (2026-11-15, Jon):** base dashboard screenshots may be skipped
+  when no capture-affecting path differs, with an explicit notice and
+  independent verification bound to the compared base and head commits
+  by main's publisher. See D38.
 
 ### D12. Minimal GitHub-only CI, with `main` locked by a ruleset (2026-11-04, Jon)
 - **CI:** one workflow, `.github/workflows/ci.yml`, with three jobs
@@ -786,6 +790,41 @@ handoff's "license not chosen; don't publish."
   sections. The typical changed section is about 32 KB; other large changes
   such as `describe` (about 16 KB of output) can still squeeze Tests.
   Changing the publisher's shrink order is a separate follow-up.
+
+### D38. Skip base screenshots when no capture-affecting path differs; fetch only two commits (2026-11-15, Jon)
+- **Decision:** option A of evidence Decision 6: skip base dashboard
+  captures when no capture-affecting path differs between base and head.
+  Every differing path must be on `scripts/evidence_checks.py`'s fixed safe
+  list; mode changes and changed symlink or submodule entries force full
+  captures. Head captures and every UI check still run. The manifest records
+  `base_skipped: "ui_inputs_identical"` and both compared SHAs. Every comment
+  size tier says "Before not captured: UI inputs identical."
+  Main's publisher independently checks GitHub API tree listings with its
+  own safe list and requires the recorded SHAs to match the API-resolved
+  base and current PR head. Only same-repository PRs may skip; fork PRs
+  always capture both sides. An unsafe change, SHA mismatch, fork head,
+  failed fetch or truncated listing refuses with `bad_skip`. See REVIEW.md, "Evidence,"
+  for the safe paths. Token permissions are unchanged.
+  For R9, the evidence job checks out at depth 1, fetches only the exact
+  base and head commits by SHA at depth 1, and adds the base worktree.
+  It never needs full history or uses a moving branch tip.
+- **Why:** in the supplied local measurement of a docs-only change with
+  seven fixtures and four views, full capture took about 62 s; skipping
+  base captures took about 31 s. A fixed safe list makes unknown paths
+  force captures. Binding the skip to both SHAs prevents reuse after main
+  moves. Only two commits' objects are needed to compare and run evidence.
+- **Rejected:** always capturing both sides (roughly 30–50 s extra per PR);
+  an allow-list of UI inputs (can't be made complete: a new file can shadow
+  a standard-library module); full history (unneeded work); a moving branch
+  tip (changes the base).
+- **Known limit:** nothing trusted records which base a CI run compared,
+  so the publisher can bind a skip only to the base it resolves when it
+  publishes. A same-repository writer could claim that base after main
+  moved; the skip is then true against that resolved base (main may move
+  again before merge), and writers are trusted (D16). A moved base refuses the skip even if the new trees
+  would allow it. Update the branch before merging; the next run evidences
+  the new base. The safe list depends on the capture setup described in
+  REVIEW.md and must be reviewed when that setup changes.
 
 ### D39. Refuse paging calls that replay themselves (2026-11-15, Jon)
 - **Decision:** when `Result.save` is unset, the runner refuses a truncated

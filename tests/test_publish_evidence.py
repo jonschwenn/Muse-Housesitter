@@ -2774,3 +2774,310 @@ def test_final_size_check_pins_the_budget_fencepost():
         assert exc.reason == "too_large"
     else:
         raise AssertionError("one byte over the budget must refuse")
+
+
+# Decision 6 (skip the base captures when every UI input is identical). ------
+#
+# A manifest that claims the skip is re-verified with MAIN's input list
+# against the PR's base and head SHAs through stubbed git-trees API
+# responses. Anything unverifiable or differing refuses with bad_skip.
+
+
+def _skip_manifest(base_sha=None, head_sha=None):
+    return {
+        "version": 1,
+        "base_skipped": "ui_inputs_identical",
+        # F2: the skip is bound to the compared revisions; the publisher
+        # refuses unless these match the resolved base and head SHAs.
+        "base_sha": BASE_SHA if base_sha is None else base_sha,
+        "head_sha": HEAD_SHA if head_sha is None else head_sha,
+        "captures": [
+            {
+                "fixture": "typical",
+                "view": "index-phone",
+                "status": "unchanged",
+                "base": None,
+                "head": None,
+                "diff": None,
+                "head_problems": [],
+            }
+        ],
+    }
+
+
+def _skip_tree_doc(sha, web_sha="e" * 40):
+    # The file entry carries the difference: directory (tree) entries are
+    # rollups the skip check skips, so a test that differs only a tree SHA
+    # would accept. web_sha drives both, keeping them consistent.
+    return {
+        "sha": sha,
+        "url": "https://api.github.com/repos/o/n/git/trees/" + sha,
+        "tree": [
+            {"path": "web", "mode": "040000", "type": "tree", "sha": web_sha},
+            {
+                "path": "web/index.html",
+                "mode": "100644",
+                "type": "blob",
+                "sha": web_sha,
+            },
+            {
+                "path": "scripts/ui_evidence.py",
+                "mode": "100644",
+                "type": "blob",
+                "sha": "b" * 40,
+            },
+        ],
+        "truncated": False,
+    }
+
+
+BASE_SHA = "c" * 40
+
+
+def _render_skip(
+    tmp_path, artifact, base_sha=BASE_SHA, base_doc=None, head_doc=None,
+    head_repo=REPO,
+):
+    """Run the render through the real CLI, with stubbed tree-API files."""
+    out = tmp_path / "out"
+    argv = [
+        "render",
+        "--artifact-dir", str(artifact),
+        "--out-dir", str(out),
+        "--repo", REPO,
+        "--pr", str(PR),
+        "--head-sha", HEAD_SHA,
+    ]
+    if head_repo is not None:
+        argv += ["--head-repo", head_repo]
+    if base_sha is not None:
+        argv += ["--base-sha", base_sha]
+    for name, doc in (("base", base_doc), ("head", head_doc)):
+        if doc is not None:
+            path = tmp_path / f"{name}-tree.json"
+            path.write_text(json.dumps(doc))
+            argv += [f"--{name}-tree-json", str(path)]
+    rc = publish_evidence.main(argv)
+    return rc, out
+
+
+def test_render_accepts_a_verified_skip(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    rc, out = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+    )
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "Before not captured: UI inputs identical." in body
+    # No PNGs to push: only the manifest is copied.
+    assert sorted(p.name for p in (out / "files").iterdir()) == [
+        "ui_manifest.json"
+    ]
+
+
+@pytest.mark.parametrize(
+    "head_repo", ["someone-else/" + REPO.split("/")[1], None], ids=["fork", "unknown"]
+)
+def test_render_refuses_a_skip_from_a_fork_or_unknown_head_repo(tmp_path, head_repo):
+    # Nothing trusted records which base a CI run compared, so a manifest
+    # can name the current base after main moved (the re-review's forged
+    # case: run base B with different UI, main moved to B2 matching the
+    # head). Only a same-repository head (a trusted writer, D16) may skip;
+    # a fork's or an unknown head's claim is refused even when the trees
+    # would allow it. The same trees from a same-repo head are accepted
+    # (test_render_accepts_a_verified_skip), so this is not vacuous.
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    rc, out = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+        head_repo=head_repo,
+    )
+    assert rc == 1
+    assert json.loads((out / "refusal.json").read_text()) == {
+        "reason": "bad_skip"
+    }
+
+
+def test_render_accepts_a_same_repo_head_in_any_case(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    rc, _ = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+        head_repo=REPO.upper(),
+    )
+    assert rc == 0
+
+
+def test_render_refuses_a_skip_with_differing_inputs(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    rc, out = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA, web_sha="e" * 40),
+        _skip_tree_doc(HEAD_SHA, web_sha="d" * 40),
+    )
+    assert rc == 1
+    assert json.loads((out / "refusal.json").read_text()) == {
+        "reason": "bad_skip"
+    }
+
+
+def test_render_refuses_a_skip_it_cannot_verify(tmp_path):
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    assert _render_skip(tmp_path, artifact)[0] == 1
+    truncated = _skip_tree_doc(BASE_SHA)
+    truncated["truncated"] = True
+    rc, out = _render_skip(
+        tmp_path, artifact, BASE_SHA, truncated, _skip_tree_doc(HEAD_SHA)
+    )
+    assert rc == 1
+    assert json.loads((out / "refusal.json").read_text()) == {
+        "reason": "bad_skip"
+    }
+
+
+def test_render_refuses_a_skip_with_a_bad_reason(tmp_path):
+    manifest = _skip_manifest()
+    manifest["base_skipped"] = "trust me"
+    artifact = _artifact(tmp_path, pngs=(), manifest=manifest)
+    rc, out = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+    )
+    assert rc == 1
+    assert json.loads((out / "refusal.json").read_text())["reason"] in (
+        "bad_skip",
+        "bad_schema",
+    )
+
+
+def test_render_refuses_a_skip_when_the_base_has_moved(tmp_path):
+    # F2: the manifest honestly records (BASE_SHA, HEAD_SHA) with identical
+    # trees, but main has moved on: the trusted base no longer matches the
+    # recorded one, so the skip is refused and the PR must update.
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    moved = _skip_tree_doc("d" * 40)
+    rc, out = _render_skip(
+        tmp_path, artifact, "d" * 40, moved, _skip_tree_doc(HEAD_SHA)
+    )
+    assert rc == 1
+    assert json.loads((out / "refusal.json").read_text()) == {
+        "reason": "bad_skip"
+    }
+
+
+def test_render_refuses_a_skip_with_a_lying_base_sha(tmp_path):
+    # F2: a lying artifact can at most claim the current trusted base, and
+    # only the recorded SHAs are compared. Here the manifest names a base
+    # the run never compared, so the identical trees do not save it.
+    artifact = _artifact(
+        tmp_path, pngs=(), manifest=_skip_manifest(base_sha="d" * 40)
+    )
+    rc, out = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+    )
+    assert rc == 1
+    assert json.loads((out / "refusal.json").read_text()) == {
+        "reason": "bad_skip"
+    }
+
+
+def test_render_accepts_a_skip_with_matching_bases(tmp_path):
+    # F2: when the manifest's recorded SHAs match the resolved base and
+    # head, and the trusted trees agree, the skip publishes.
+    artifact = _artifact(tmp_path, pngs=(), manifest=_skip_manifest())
+    rc, out = _render_skip(
+        tmp_path,
+        artifact,
+        BASE_SHA,
+        _skip_tree_doc(BASE_SHA),
+        _skip_tree_doc(HEAD_SHA),
+    )
+    assert rc == 0
+    body = (out / "comment.md").read_text()
+    assert "Before not captured: UI inputs identical." in body
+
+
+def test_smallest_tier_keeps_the_skip_notice(tmp_path):
+    # F3: a large text diff plus a verified skipped manifest, fitted through
+    # the real 60,000-byte budget, must still state the skip in the
+    # smallest (pointer-only) tier. Sizes sweep the range where the fitter
+    # drops to the pointer tier; no limits are monkeypatched.
+    seen_pointer = False
+    for n in range(14000, 16000, 500):
+        results = _results()
+        scenario = results["scenarios"][0]
+        scenario["changed"] = True
+        scenario["before"] = "a" * n + "\n"
+        scenario["after"] = "b" * n + "\n"
+        case = tmp_path / f"case{n}"
+        case.mkdir()
+        artifact = _artifact(case, pngs=(), manifest=_skip_manifest(), results=results)
+        rc, out = _render_skip(
+            case,
+            artifact,
+            BASE_SHA,
+            _skip_tree_doc(BASE_SHA),
+            _skip_tree_doc(HEAD_SHA),
+        )
+        assert rc == 0
+        body = (out / "comment.md").read_text()
+        assert len(body.encode()) <= pr_evidence.MAX_COMMENT_BYTES
+        if "Web UI evidence omitted" in body:
+            seen_pointer = True
+            assert "Before not captured: UI inputs identical." in body
+    assert seen_pointer, "sweep never reached the pointer-only tier"
+
+
+def test_every_ui_tier_states_the_skip():
+    # F3: the fixed sentence survives every tier the publisher can choose,
+    # including the smallest pointer-only one.
+    manifest = _skip_manifest()
+    suffixes, _ = pr_evidence.ui_tiers(manifest, REPO, PR, HEAD_SHA)
+    assert len(suffixes) == 3
+    for suffix in suffixes:
+        assert "Before not captured: UI inputs identical." in suffix
+
+
+def test_bad_skip_notice_is_fixed_text():
+    notice = evidence_checks.refusal_notice("bad_skip")
+    assert notice.startswith("<!-- housesitter-evidence -->\n")
+    assert "`bad_skip`" in notice
+    assert "PWNED" not in evidence_checks.refusal_notice("bad_skip")
+
+
+def test_publisher_reverifies_the_skip_through_git_trees():
+    workflow = (ROOT / ".github" / "workflows" / "evidence-publish.yml").read_text()
+    # The base SHA and the head repository come from the trusted pulls-API
+    # lookup, exactly like the head SHA does today.
+    assert "base_sha" in workflow
+    assert "head_repo" in workflow
+    assert ".base.sha" in workflow
+    assert ".head.repo.full_name" in workflow
+    # Both trees are fetched through the GitHub API and handed to the
+    # render as files, like jobs.json already is.
+    assert "git/trees" in workflow
+    assert "recursive=1" in workflow
+    assert "base-tree.json" in workflow
+    assert "head-tree.json" in workflow
+    assert "--base-sha" in workflow
+    assert "--base-tree-json" in workflow
+    assert "--head-tree-json" in workflow

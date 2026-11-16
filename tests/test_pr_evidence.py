@@ -456,6 +456,33 @@ def test_ui_section_without_a_browser_key_is_neutral():
     assert "typical__index-phone__head.png" in full
 
 
+def test_ui_section_states_a_skipped_base_capture():
+    # A manifest that skipped the base captures (Decision 6: every UI input
+    # identical) states so plainly, in both the full section and the table.
+    manifest = _ui_manifest(
+        _ui_capture(status="unchanged", head=None),
+    )
+    manifest["base_skipped"] = "ui_inputs_identical"
+    full, table, failures = pr_evidence.render_ui_section(
+        manifest, UI_REPO, UI_PR, UI_SHA
+    )
+    assert failures == 0
+    assert "Before not captured: UI inputs identical." in full
+    assert "Before not captured: UI inputs identical." in table
+    assert "| `typical / index-phone` | unchanged |" in full
+
+
+def test_ui_section_without_a_skip_claim_has_no_skip_sentence():
+    # The skip sentence appears ONLY when skipping: a full-capture manifest
+    # (and an old manifest without the key) renders exactly as before, so
+    # the current publisher, which knows nothing about the key, accepts it.
+    full, table, _ = pr_evidence.render_ui_section(
+        _ui_manifest(_ui_capture()), UI_REPO, UI_PR, UI_SHA
+    )
+    assert "Before not captured" not in full
+    assert "Before not captured" not in table
+
+
 HOSTILE_BROWSERS = [
     {"channel": "chrome<script>", "version": "131.0.6778"},
     {"channel": "chrome", "version": "1.2.3.4.5"},
@@ -530,6 +557,10 @@ def test_ui_intro_wording_matches_ui_evidence():
     assert pr_evidence.UI_IMAGES_NOTE == ui_evidence.UI_IMAGES_NOTE
     assert pr_evidence.UI_BROWSER_UNKNOWN == ui_evidence.UI_BROWSER_UNKNOWN
     assert pr_evidence.UI_BROWSER_NAMES == ui_evidence.UI_BROWSER_NAMES
+    assert pr_evidence.UI_SKIP_REASON == ui_evidence.UI_SKIP_REASON
+    assert pr_evidence.UI_SKIP_NOTE == ui_evidence.UI_SKIP_NOTE
+    assert pr_evidence.UI_SKIP_REASON == evidence_checks.UI_SKIP_REASON
+    assert pr_evidence.UI_SKIP_NOTE == evidence_checks.UI_SKIP_NOTE
     assert (
         pr_evidence.UI_BROWSER_VERSION_RE.pattern
         == ui_evidence.UI_BROWSER_VERSION_RE.pattern

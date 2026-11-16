@@ -67,6 +67,8 @@ jobs:
       found: ${{ steps.lookup.outputs.found }}
       pr: ${{ steps.lookup.outputs.pr }}
       head_sha: ${{ steps.lookup.outputs.head_sha }}
+      base_sha: ${{ steps.lookup.outputs.base_sha }}
+      head_repo: ${{ steps.lookup.outputs.head_repo }}
     steps:
       - name: Find the PR for this run
         id: lookup
@@ -83,6 +85,8 @@ jobs:
           set -euo pipefail
           found=false
           pr=""
+          base_sha=""
+          head_repo=""
           if [ "$EVENT" != "pull_request" ]; then
             echo "workflow_run event is $EVENT, not pull_request; nothing to publish"
           elif [ "$WORKFLOW_PATH" != ".github/workflows/ci.yml" ]; then
@@ -97,12 +101,22 @@ jobs:
             # (create a PR), which this read-only token refuses.
             matches=$(gh api --method GET "repos/$REPO/pulls" \
               -f "head=$HEAD_OWNER:$HEAD_BRANCH" -f state=open \
-              --jq "[.[] | select(.head.sha == \"$HEAD_SHA\") | .number]")
+              --jq "[.[] | select(.head.sha == \"$HEAD_SHA\") | {number, base: .base.sha, head_repo: .head.repo.full_name}]")
             count=$(echo "$matches" | jq 'length')
             if [ "$count" = "1" ]; then
-              pr=$(echo "$matches" | jq -r '.[0]')
-              found=true
-              echo "publishing evidence for PR #$pr at $HEAD_SHA"
+              pr=$(echo "$matches" | jq -r '.[0].number')
+              base_candidate=$(echo "$matches" | jq -r '.[0].base')
+              repo_candidate=$(echo "$matches" | jq -r '.[0].head_repo')
+              if ! [[ "$base_candidate" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "bad base SHA from the API; ignoring"
+              elif ! [[ "$repo_candidate" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+                echo "bad head repository from the API; ignoring"
+              else
+                base_sha="$base_candidate"
+                head_repo="$repo_candidate"
+                found=true
+                echo "publishing evidence for PR #$pr at $HEAD_SHA"
+              fi
             else
               echo "found $count open PRs for that head; need exactly one (stale or ambiguous run)"
             fi
@@ -110,6 +124,8 @@ jobs:
           echo "found=$found" >> "$GITHUB_OUTPUT"
           echo "pr=$pr" >> "$GITHUB_OUTPUT"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "head_repo=$head_repo" >> "$GITHUB_OUTPUT"
 
   build:
     # Download the untrusted artifact, validate it with main's code, and
@@ -165,6 +181,32 @@ jobs:
             echo "could not fetch job conclusions; continuing without them"
             rm -f jobs.json
           fi
+      # Decision 6: the base and head trees for skip verification. Like
+      # jobs.json above, the render only needs these files when the
+      # manifest claims the base captures were skipped; a failed fetch
+      # then refuses the publish instead of trusting the claim. The head
+      # tree comes from the head repository, so fork PRs keep working.
+      - name: Fetch base and head trees for skip verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ needs.resolve.outputs.head_repo }}
+          BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$REPO/git/trees/$BASE_SHA?recursive=1" > base-tree.json; then
+            echo "fetched base tree"
+          else
+            echo "could not fetch base tree; continuing without it"
+            rm -f base-tree.json
+          fi
+          if gh api "repos/$HEAD_REPO/git/trees/$HEAD_SHA?recursive=1" > head-tree.json; then
+            echo "fetched head tree"
+          else
+            echo "could not fetch head tree; continuing without it"
+            rm -f head-tree.json
+          fi
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x"
@@ -173,14 +215,18 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ needs.resolve.outputs.pr }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+          HEAD_REPO: ${{ needs.resolve.outputs.head_repo }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           python scripts/publish_evidence.py render \
             --artifact-dir artifact --out-dir rendered \
             --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --base-sha "$BASE_SHA" --head-repo "$HEAD_REPO" \
             --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
-            --test-results-dir test-results --jobs-json jobs.json
+            --test-results-dir test-results --jobs-json jobs.json \
+            --base-tree-json base-tree.json --head-tree-json head-tree.json
       # Always upload: on refusal the render step fails after writing
       # refusal.json, and the comment job below needs that file to post
       # the fixed notice. (Render always writes comment.md plus the pushable

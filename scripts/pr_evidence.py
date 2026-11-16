@@ -216,6 +216,12 @@ UI_BROWSER_NAMES = {
 }
 UI_BROWSER_VERSION_RE = re.compile(r"[0-9]+(\.[0-9]+){0,3}")
 UI_BROWSER_VERSION_MAX_LEN = 32
+# The manifest's ``base_skipped`` value when the base captures were skipped
+# (Decision 6), and the sentence the section then states. Must equal
+# scripts/ui_evidence.py's and scripts/evidence_checks.py's (pinned by
+# test); this module never imports either, so it keeps its own copies.
+UI_SKIP_REASON = "ui_inputs_identical"
+UI_SKIP_NOTE = "Before not captured: UI inputs identical."
 # Valid ``crop_px`` heights a manifest may record (Decision 5): ui_evidence
 # crops full-page shots down these steps when the push cap would refuse
 # them. Must equal ui_evidence.CROP_STEPS[1:] (pinned by test); this module
@@ -1118,6 +1124,11 @@ def render_ui_section(manifest: dict, repo: str, pr: int, head_sha: str) -> tupl
             "",
         ]
     failures = 0
+    if manifest.get("base_skipped") == UI_SKIP_REASON:
+        # The base side was never captured (every UI input identical), so
+        # the table below lists unchanged head-only captures. Stated
+        # plainly, never silently missing.
+        lines += [UI_SKIP_NOTE, ""]
     if kept:
         lines += [
             "| Capture | Status | Checks |",
@@ -1234,11 +1245,16 @@ def ui_tiers(
     Returns (suffixes, check-failure count). The publisher walks the
     suffixes in order against one final-form budget, so screenshots survive
     everything except a comment that cannot fit them after the Tests line
-    has already degraded away (review round 4, finding 2).
+    has already degraded away (review round 4, finding 2). Every tier
+    states the base-capture skip (F3): a comment that fits only the
+    pointer must still say the before side was never captured.
     """
     full, table, failures = render_ui_section(manifest, repo, pr, head_sha)
+    pointer = UI_SECTION_OMITTED_SUFFIX
+    if manifest.get("base_skipped") == UI_SKIP_REASON:
+        pointer = "\n" + UI_SKIP_NOTE + pointer
     return (
-        ["\n" + full, "\n" + table + UI_DETAILS_OMITTED_SUFFIX, UI_SECTION_OMITTED_SUFFIX],
+        ["\n" + full, "\n" + table + UI_DETAILS_OMITTED_SUFFIX, pointer],
         failures,
     )
 

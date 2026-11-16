@@ -317,6 +317,26 @@ def _test_inputs(
     return jobs, results
 
 
+def _read_tree_doc(path_str: str | None, what: str) -> dict:
+    """Read a git-trees API response file the workflow fetched.
+
+    Missing, oversized, or unparseable files mean the skip claim cannot be
+    verified: the caller refuses with bad_skip, never publishes on a claim.
+    """
+    if path_str is None:
+        raise PublishError(f"{what} was not provided", "bad_skip")
+    try:
+        size = Path(path_str).stat().st_size
+    except OSError as exc:
+        raise PublishError(f"cannot read {what}: {exc}", "bad_skip") from exc
+    if size > evidence_checks.TREES_MAX_BYTES:
+        raise PublishError(f"{what} is {size} bytes, over the cap", "bad_skip")
+    try:
+        return json.loads(Path(path_str).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as exc:
+        raise PublishError(f"{what} is unreadable: {exc}", "bad_skip") from exc
+
+
 def render_comment(
     artifact: Path,
     repo: str,
@@ -326,12 +346,21 @@ def render_comment(
     jobs_json: str | None = None,
     run_id: int | None = None,
     run_attempt: int | None = None,
+    base_sha: str | None = None,
+    base_map: dict | None = None,
+    head_map: dict | None = None,
+    head_repo: str | None = None,
 ) -> str:
     """Validate the artifact and build the final comment text.
 
     Raises PublishError when anything is invalid (fail closed: the caller
     pushes and posts nothing), ValueError when the caller's own
     repo/pr/head-sha arguments are malformed.
+
+    A manifest that claims the base captures were skipped is re-verified
+    here with MAIN's input list (this module always runs from the main
+    checkout): without the base SHA and both tree maps, or when any listed
+    input differs, the render refuses with bad_skip.
     """
     if not pr_evidence.UI_REPO_RE.fullmatch(repo or ""):
         raise ValueError(f"bad repo: {repo!r}")
@@ -414,6 +443,47 @@ def render_comment(
                 f"artifact validation failed: {exc}", "bad_schema"
             ) from exc
         if manifest is not None:
+            if manifest.get("base_skipped") is not None:
+                # Decision 6: the base captures were skipped, so re-verify
+                # the claim with MAIN's safe list before rendering
+                # anything. Missing maps, an unverifiable listing, or any
+                # forcing change refuses with bad_skip. The manifest must
+                # record the same base and head SHAs the run compared (F2):
+                # base_sha here is resolved from the PR API at publish
+                # time (trusted), so a claim for another base — because
+                # main has moved on, or because the artifact lies — is
+                # refused even when its trees would allow the skip.
+                # Nothing trusted records which base the CI run compared:
+                # the equality below only binds the claim to the CURRENT
+                # base. A same-repository head is written by a trusted
+                # writer (D16, D32); a fork PR (the outsider threat) never
+                # gets a skip, so a forged base SHA can't come from one.
+                if not head_repo or head_repo.lower() != repo.lower():
+                    raise PublishError(
+                        "base skip refused: only same-repository PRs may skip",
+                        "bad_skip",
+                    )
+                if base_sha is None:
+                    raise PublishError(
+                        "base skip unverified: base SHA was not provided",
+                        "bad_skip",
+                    )
+                if (
+                    manifest.get("base_sha") != base_sha
+                    or manifest.get("head_sha") != head_sha
+                ):
+                    raise PublishError(
+                        "base skip is for another base or head commit",
+                        "bad_skip",
+                    )
+                try:
+                    evidence_checks.check_ui_skip(
+                        base_sha, head_sha, base_map, head_map
+                    )
+                except ValueError as exc:
+                    raise PublishError(
+                        f"base skip unverified: {exc}", "bad_skip"
+                    ) from exc
             ui_suffixes, failures = pr_evidence.ui_tiers(
                 manifest, repo, pr, head_sha
             )
@@ -562,10 +632,35 @@ def _write_refusal(out: Path, reason: str) -> None:
     )
 
 
+def _tree_map(tree_json: str | None, what: str, sha: str) -> dict | None:
+    """Parse a fetched git-trees file to a ``{path: (mode, type, sha)}`` map.
+
+    Returns None when no file was handed over (no skip to verify, or the
+    fetch failed). Anything unreadable fails closed with bad_skip: the
+    claim cannot be verified from it.
+    """
+    if tree_json is None:
+        return None
+    doc = _read_tree_doc(tree_json, what)
+    try:
+        return evidence_checks.parse_tree_entries(doc, sha)
+    except ValueError as exc:
+        raise PublishError(f"{what} is unusable: {exc}", "bad_skip") from exc
+
+
 def cmd_render(args: argparse.Namespace) -> int:
     artifact = Path(args.artifact_dir)
     out = Path(args.out_dir)
     try:
+        # The tree files come from the workflow's own API calls (never the
+        # artifact), like jobs.json. They are only needed — and only read —
+        # when the manifest claims the base captures were skipped.
+        base_map = head_map = None
+        if evidence_checks.manifest_claims_skip(artifact / "ui_out"):
+            if args.base_sha is None:
+                raise PublishError("base SHA was not provided", "bad_skip")
+            base_map = _tree_map(args.base_tree_json, "base tree", args.base_sha)
+            head_map = _tree_map(args.head_tree_json, "head tree", args.head_sha)
         body = render_comment(
             artifact,
             args.repo,
@@ -575,6 +670,10 @@ def cmd_render(args: argparse.Namespace) -> int:
             jobs_json=args.jobs_json,
             run_id=args.run_id,
             run_attempt=args.run_attempt,
+            base_sha=args.base_sha,
+            base_map=base_map,
+            head_map=head_map,
+            head_repo=args.head_repo,
         )
     except PublishError as exc:
         print(f"publish_evidence: refusing to publish: {exc}", file=sys.stderr)
@@ -1077,6 +1176,26 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         type=int,
         help="workflow_run attempt for the comment marker (optional)",
+    )
+    render.add_argument(
+        "--base-sha",
+        default=None,
+        help="PR base commit SHA, 40 hex (to verify a base skip claim)",
+    )
+    render.add_argument(
+        "--head-repo",
+        default=None,
+        help="PR head repository, owner/name (a base skip needs a same-repo head)",
+    )
+    render.add_argument(
+        "--base-tree-json",
+        default=None,
+        help="git-trees API response file for the base SHA (optional)",
+    )
+    render.add_argument(
+        "--head-tree-json",
+        default=None,
+        help="git-trees API response file for the head SHA (optional)",
     )
     render.set_defaults(func=cmd_render)
     subst = sub.add_parser("substitute", help="pin the placeholder to the push SHA")

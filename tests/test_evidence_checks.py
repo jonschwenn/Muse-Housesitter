@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import struct
+import subprocess
 import zlib
 from pathlib import Path
 
@@ -190,6 +191,7 @@ def test_refusal_reasons_are_a_fixed_enum():
         "too_large",
         "bad_png",
         "bad_schema",
+        "bad_skip",
         "stale_head",
         "render_error",
         "publish_failed",
@@ -697,6 +699,578 @@ def test_trailing_zlib_data_is_rejected():
     raw = _raw_rgba()
     payload = zlib.compress(raw) + zlib.compress(b"garbage")
     assert evidence_checks.validate_png(_png_idat(4, 4, 6, payload)) != []
+
+
+# Decision 6 (skip the base captures when nothing capture-affecting changed).
+#
+# Inverted rule: the skip is allowed ONLY when every path that differs
+# between the base and head commits is on the fixed safe list in
+# evidence_checks (trusted, ci-guard-protected code shared by the PR-side
+# check and main's publisher). Anything else — a new helper under
+# scripts/, a top-level sys.path file, a mode change, a symlink — forces a
+# full capture. Skip decisions compare the differing set, never file
+# contents or PR claims.
+
+
+def test_safe_skip_list_is_pinned():
+    # Narrowing this list forces more full captures (safe); widening it
+    # silently skips captures over changed inputs (unsafe). Either way the
+    # values are pinned here: changing them is a visible change to this
+    # protected test file.
+    assert evidence_checks.UI_SKIP_SAFE_DIRS == (
+        "docs/",
+        "install/",
+        "tests/",
+        "src/housesitter/",
+        ".github/",
+    )
+    assert evidence_checks.UI_SKIP_REASON == "ui_inputs_identical"
+    assert (
+        evidence_checks.UI_SKIP_NOTE
+        == "Before not captured: UI inputs identical."
+    )
+
+
+def _git(repo, *args):
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _git_commit(repo, message):
+    _git(
+        repo,
+        "-c", "user.email=test@example.com",
+        "-c", "user.name=evidence-test",
+        "commit", "-qm", message,
+    )
+    done = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return done.stdout.strip()
+
+
+def _git_repo_with_paths(tmp_path, name="repo"):
+    """A git repo holding one file under each safe and unsafe area."""
+    repo = tmp_path / name
+    seed = {
+        "docs/prose.md": "prose\n",
+        "README.md": "readme\n",
+        "LICENSE": "license\n",
+        "install/setup.sh": "setup\n",
+        "tests/test_pins.py": "pins\n",
+        "tests/fixtures/dashboard/typical.json": "{}\n",
+        "src/housesitter/pkg.py": "pkg\n",
+        ".github/workflows/ci.yml": "ci\n",
+        ".github/other.yml": "other\n",
+        "scripts/dev_dashboard.py": "serve\n",
+        "web/index.html": "page\n",
+        "pyproject.toml": "build\n",
+    }
+    for rel, text in seed.items():
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    return repo, _git_commit(repo, "seed")
+
+
+def _change_and_commit(repo, rel, text="changed\n"):
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    _git(repo, "add", "-A")
+    return _git_commit(repo, f"change {rel}")
+
+
+def test_no_changes_allow_the_skip(tmp_path):
+    repo, sha = _git_repo_with_paths(tmp_path)
+    assert evidence_checks.ui_forcing_changes_git(repo, sha, sha) == []
+
+
+def test_docs_only_change_skips(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "docs/prose.md")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == []
+    repo2, base2 = _git_repo_with_paths(tmp_path, name="repo2")
+    head2 = _change_and_commit(repo2, "README.md")
+    assert evidence_checks.ui_forcing_changes_git(repo2, base2, head2) == []
+
+
+def test_unlisted_scripts_helper_forces_a_full_capture(tmp_path):
+    # The reviewer's case: scripts/mimetypes.py shadows the stdlib module
+    # when dev_dashboard.py runs, changing pixels with no listed input
+    # differing. Under the inverted rule any scripts/** addition forces a
+    # full capture.
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "scripts/mimetypes.py")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "scripts/mimetypes.py"
+    ]
+
+
+def test_src_sitecustomize_forces_a_full_capture(tmp_path):
+    # An editable install puts src/ on sys.path, where Python auto-imports
+    # a top-level src/sitecustomize.py at startup. Only paths inside
+    # src/housesitter/ are safe.
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "src/sitecustomize.py")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "src/sitecustomize.py"
+    ]
+
+
+def test_dashboard_fixture_change_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "tests/fixtures/dashboard/typical.json")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "tests/fixtures/dashboard/typical.json"
+    ]
+
+
+def test_mode_only_change_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    target = repo / "docs" / "prose.md"
+    target.chmod(0o755)
+    _git(repo, "add", "-A")
+    head = _git_commit(repo, "mode only")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "docs/prose.md"
+    ]
+
+
+def test_symlink_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    (repo / "scripts" / "helper.py").symlink_to("dev_dashboard.py")
+    _git(repo, "add", "-A")
+    head = _git_commit(repo, "add symlink")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "scripts/helper.py"
+    ]
+
+
+def test_gitlink_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    blob = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD:README.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{blob},vendor/lib")
+    head = _git_commit(repo, "add gitlink")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "vendor/lib"
+    ]
+
+
+def test_new_top_level_file_forces_a_full_capture(tmp_path):
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "sitecustomize.py")
+    assert evidence_checks.ui_forcing_changes_git(repo, base, head) == [
+        "sitecustomize.py"
+    ]
+
+
+def test_inputs_identical_command_reports_the_decision(tmp_path, capsys):
+    repo, sha = _git_repo_with_paths(tmp_path)
+    assert (
+        evidence_checks.main(
+            [
+                "inputs-identical",
+                "--git-dir", str(repo),
+                "--base-sha", sha,
+                "--head-sha", sha,
+            ]
+        )
+        == 0
+    )
+    assert "no capture-affecting change" in capsys.readouterr().out
+
+
+def test_inputs_identical_command_reports_differences(tmp_path, capsys):
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "scripts/mimetypes.py")
+    assert (
+        evidence_checks.main(
+            [
+                "inputs-identical",
+                "--git-dir", str(repo),
+                "--base-sha", base,
+                "--head-sha", head,
+            ]
+        )
+        == 1
+    )
+    assert "scripts/mimetypes.py" in capsys.readouterr().out
+
+
+def test_inputs_identical_command_rejects_bad_shas(tmp_path, capsys):
+    repo, _ = _git_repo_with_paths(tmp_path)
+    assert (
+        evidence_checks.main(
+            [
+                "inputs-identical",
+                "--git-dir", str(repo),
+                "--base-sha", "nope",
+                "--head-sha", "a" * 40,
+            ]
+        )
+        == 2
+    )
+
+
+def _tree_doc(sha, entries):
+    """A git-trees API response shape: dir paths carry no trailing slash."""
+    kinds = {"web": "tree", "tests/fixtures/dashboard": "tree"}
+    return {
+        "sha": sha,
+        "url": "https://api.github.com/repos/o/n/git/trees/" + sha,
+        "tree": [
+            {
+                "path": path,
+                "mode": "040000" if kinds.get(path) == "tree" else "100644",
+                "type": kinds.get(path, "blob"),
+                "sha": "e" * 40 if kinds.get(path) == "tree" else "b" * 40,
+            }
+            for path in entries
+        ],
+        "truncated": False,
+    }
+
+
+def test_parse_tree_entries_keeps_blobs_and_skips_trees():
+    sha = "a" * 40
+    doc = _tree_doc(sha, ["web", "scripts/ui_evidence.py", "README.md"])
+    mapping = evidence_checks.parse_tree_entries(doc, sha)
+    assert "web" not in mapping  # a tree rollup, not a capture input
+    assert mapping["scripts/ui_evidence.py"] == ("100644", "blob", "b" * 40)
+    assert mapping["README.md"] == ("100644", "blob", "b" * 40)
+
+
+def test_parse_tree_entries_refuses_a_truncated_listing():
+    sha = "a" * 40
+    doc = _tree_doc(sha, ["web"])
+    doc["truncated"] = True
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_entries(doc, sha)
+
+
+def test_parse_tree_entries_refuses_a_mismatched_sha():
+    doc = _tree_doc("a" * 40, ["web"])
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_entries(doc, "b" * 40)
+
+
+def test_parse_tree_entries_refuses_bad_shapes():
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_entries({"tree": []}, "a" * 40)
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_entries(
+            {"sha": "a" * 40, "tree": [{"path": "web"}]}, "a" * 40
+        )
+    with pytest.raises(ValueError):
+        evidence_checks.parse_tree_entries(
+            {
+                "sha": "a" * 40,
+                "tree": [
+                    {
+                        "path": "web/index.html",
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": "xyz",
+                    }
+                ],
+            },
+            "a" * 40,
+        )
+
+
+def _entries(*paths, sha="b" * 40, mode="100644", typ="blob"):
+    return {path: (mode, typ, sha) for path in paths}
+
+
+def test_check_ui_skip_accepts_identical_trees():
+    base = _entries("web/index.html", "scripts/ui_evidence.py")
+    assert (
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, dict(base), dict(base))
+        is None
+    )
+
+
+def test_check_ui_skip_accepts_safe_only_differences():
+    base = _entries("docs/prose.md", "web/index.html")
+    head = _entries("docs/prose.md", "web/index.html", sha="d" * 40)
+    head["web/index.html"] = ("100644", "blob", "b" * 40)
+    assert (
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, dict(base), dict(head))
+        is None
+    )
+
+
+def test_check_ui_skip_refuses_an_unsafe_difference():
+    base = _entries("scripts/mimetypes.py")
+    head = _entries("scripts/mimetypes.py", sha="d" * 40)
+    with pytest.raises(ValueError, match="scripts/mimetypes.py"):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, base, head)
+
+
+def test_check_ui_skip_refuses_a_mode_only_change():
+    base = {"docs/prose.md": ("100644", "blob", "b" * 40)}
+    head = {"docs/prose.md": ("100755", "blob", "b" * 40)}
+    with pytest.raises(ValueError, match="docs/prose.md"):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, base, head)
+
+
+def test_check_ui_skip_refuses_a_symlink():
+    base = {}
+    head = {"scripts/helper.py": ("120000", "blob", "b" * 40)}
+    with pytest.raises(ValueError, match="scripts/helper.py"):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, base, head)
+
+
+def test_check_ui_skip_refuses_a_gitlink():
+    base = {}
+    head = {"vendor/lib": ("160000", "commit", "b" * 40)}
+    with pytest.raises(ValueError, match="vendor/lib"):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, base, head)
+
+
+def test_check_ui_skip_refuses_a_new_top_level_file():
+    with pytest.raises(ValueError, match="sitecustomize.py"):
+        evidence_checks.check_ui_skip(
+            "a" * 40,
+            "c" * 40,
+            {},
+            {"sitecustomize.py": ("100644", "blob", "b" * 40)},
+        )
+
+
+def test_check_ui_skip_refuses_unverifiable_maps():
+    with pytest.raises(ValueError):
+        evidence_checks.check_ui_skip("a" * 40, "c" * 40, None, {})
+    with pytest.raises(ValueError):
+        evidence_checks.check_ui_skip("nope", "c" * 40, {}, {})
+
+
+def test_manifest_claims_skip_only_with_the_reason(tmp_path):
+    ui_dir = tmp_path / "ui_out"
+    ui_dir.mkdir()
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    (ui_dir / "ui_manifest.json").write_text(
+        json.dumps({"version": 1, "captures": []})
+    )
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    (ui_dir / "ui_manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "base_skipped": "ui_inputs_identical",
+                "captures": [],
+            }
+        )
+    )
+    assert evidence_checks.manifest_claims_skip(ui_dir) is True
+
+
+def test_manifest_claims_skip_refuses_an_oversized_manifest_without_reading_it(
+    tmp_path, monkeypatch
+):
+    # F4: a hostile 2 MB manifest must be refused before it is read in full.
+    ui_dir = tmp_path / "ui_out"
+    ui_dir.mkdir()
+    manifest = ui_dir / "ui_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "base_skipped": "ui_inputs_identical",
+                "captures": [],
+                "padding": "x" * 2_000_000,
+            }
+        )
+    )
+    reads = []
+    real_read_text = Path.read_text
+
+    def record(self, *args, **kwargs):
+        if self == manifest:
+            reads.append(self.stat().st_size)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", record)
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    assert reads == []
+
+
+def test_manifest_claims_skip_ignores_a_symlink_and_bad_json(tmp_path):
+    ui_dir = tmp_path / "ui_out"
+    ui_dir.mkdir()
+    real = ui_dir / "real.json"
+    real.write_text(json.dumps({"version": 1, "base_skipped": "x", "captures": []}))
+    link = ui_dir / "ui_manifest.json"
+    link.symlink_to(real)
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    link.unlink()
+    link.write_text("{not json")
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+    link.write_text(json.dumps({"version": 1, "captures": []}))
+    assert evidence_checks.manifest_claims_skip(ui_dir) is False
+
+
+def _load_ui_evidence():
+    spec = importlib.util.spec_from_file_location(
+        "ui_evidence_cap_pin", ROOT / "scripts" / "ui_evidence.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_skip_preflight_cap_matches_the_manifest_cap():
+    assert (
+        evidence_checks.UI_MANIFEST_MAX_BYTES
+        == _load_ui_evidence().MANIFEST_MAX_BYTES
+    )
+
+
+def test_safe_paths_cover_the_documented_areas():
+    safe = [
+        "docs/anything.md",
+        "docs/nested/page.md",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        "LICENSE.md",
+        "install/setup.sh",
+        "install/nested/script.sh",
+        "tests/test_pins.py",
+        "tests/conformance/demo.py",
+        "src/housesitter/pkg.py",
+        "src/housesitter/nested/mod.py",
+        ".github/workflows/other.yml",
+        ".github/ISSUE_TEMPLATE/bug.md",
+    ]
+    for path in safe:
+        assert evidence_checks.skip_safe_path(path), path
+
+
+def test_unsafe_paths_force_a_full_capture():
+    unsafe = [
+        # Served or executed by the capture path.
+        "web/index.html",
+        "scripts/dev_dashboard.py",
+        "scripts/ui_evidence.py",
+        "scripts/mimetypes.py",
+        "scripts/evidence_checks.py",
+        "pyproject.toml",
+        ".github/workflows/ci.yml",
+        # The captures render these fixtures.
+        "tests/fixtures/dashboard/typical.json",
+        "tests/fixtures/dashboard",
+        # src/ sits on sys.path for the editable install; only the
+        # package directory itself is safe.
+        "src/sitecustomize.py",
+        "src/conftest.py",
+        # New top-level files and directories, and anything unsure.
+        "sitecustomize.py",
+        "newdir/file.py",
+        "src",
+        "tests",
+    ]
+    for path in unsafe:
+        assert not evidence_checks.skip_safe_path(path), path
+
+
+def _skip_gate_artifact(tmp_path, repo, base, head):
+    """An artifact whose manifest claims the base captures were skipped."""
+    artifact = _gate_artifact(tmp_path)
+    doc = json.loads((artifact / "results.json").read_text())
+    doc["metadata"]["head_sha"] = head
+    (artifact / "results.json").write_text(json.dumps(doc))
+    manifest = json.loads((artifact / "ui_out" / "ui_manifest.json").read_text())
+    manifest["captures"] = [
+        {
+            "fixture": "typical",
+            "view": "index-phone",
+            "status": "unchanged",
+            "base": None,
+            "head": None,
+            "diff": None,
+            "head_problems": [],
+        }
+    ]
+    manifest["base_skipped"] = "ui_inputs_identical"
+    manifest["base_sha"] = base
+    manifest["head_sha"] = head
+    (artifact / "ui_out" / "ui_manifest.json").write_text(json.dumps(manifest))
+    for png in (artifact / "ui_out").glob("*.png"):
+        png.unlink()
+    return artifact
+
+
+def _check_skip(artifact, repo, base, head):
+    return evidence_checks.main(
+        [
+            "check",
+            "--artifact-dir", str(artifact),
+            "--repo", "example-owner/example-repo",
+            "--pr", "7",
+            "--head-sha", head,
+            "--base-sha", base,
+            "--git-dir", str(repo),
+        ]
+    )
+
+
+def test_check_accepts_a_verified_skip(tmp_path, capsys):
+    repo, sha = _git_repo_with_paths(tmp_path)
+    artifact = _skip_gate_artifact(tmp_path, repo, sha, sha)
+    assert _check_skip(artifact, repo, sha, sha) == 0
+
+
+def test_check_refuses_a_skip_with_differing_inputs(tmp_path, capsys):
+    repo, base = _git_repo_with_paths(tmp_path)
+    head = _change_and_commit(repo, "scripts/added.py")
+    artifact = _skip_gate_artifact(tmp_path, repo, base, head)
+    assert _check_skip(artifact, repo, base, head) == 1
+    assert "bad_skip" in capsys.readouterr().out
+
+
+def test_check_refuses_a_skip_claimed_for_another_base(tmp_path, capsys):
+    # F2: the manifest must record the base it was compared against. A
+    # manifest that names a different base than the run's own is refused,
+    # even when the trees for that other base would allow the skip.
+    repo, sha = _git_repo_with_paths(tmp_path)
+    other = "d" * 40
+    artifact = _skip_gate_artifact(tmp_path, repo, other, sha)
+    assert _check_skip(artifact, repo, sha, sha) == 1
+    assert "bad_skip" in capsys.readouterr().out
+
+
+def test_check_refuses_a_skip_it_cannot_verify(tmp_path, capsys):
+    repo, sha = _git_repo_with_paths(tmp_path)
+    artifact = _skip_gate_artifact(tmp_path, repo, sha, sha)
+    assert (
+        evidence_checks.main(
+            [
+                "check",
+                "--artifact-dir", str(artifact),
+                "--repo", "example-owner/example-repo",
+                "--pr", "7",
+                "--head-sha", sha,
+            ]
+        )
+        == 1
+    )
+    assert "bad_skip" in capsys.readouterr().out
 
 
 def test_invalid_filter_byte_is_rejected():
