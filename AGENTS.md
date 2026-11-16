@@ -170,6 +170,10 @@ gh api graphql -f query='query{repository(owner:"jonschwenn",name:"Muse-Housesit
 
 ## Testing rules
 
+- **Keep test runs focused.** While iterating, run tests for the code you
+  changed, e.g. `.venv/bin/pytest tests/core/test_http.py`. Run the full suite
+  with `-n auto` once before handing back work, and again after a rebase or
+  merge from `main`. CI still runs the full suite serially on every PR.
 - **No network, hardware, or SDK in the default test run.** Upstream APIs are
   faked at the core HTTP client. Live tests against a real controller live in
   `tests/live/`, are skipped unless `HOUSESITTER_LIVE=1`, and their output is
@@ -285,8 +289,11 @@ tests/
   evidence/scenarios.json  test_hygiene.py  test_dashboard_contract.py
 ```
 
-Local setup: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`,
-then `.venv/bin/ruff check .` and `.venv/bin/pytest`.
+Local setup: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev,parallel]"`,
+then `.venv/bin/ruff check .` and `.venv/bin/pytest -n auto`.
+Plain `.venv/bin/pytest` also works (serial, as CI runs it).
+If the venv has only `.[dev]`, `pytest -n auto` fails with
+"unrecognized arguments: -n"; rerun `.venv/bin/pip install -e ".[dev,parallel]"`.
 
 ## Before you hand back work
 

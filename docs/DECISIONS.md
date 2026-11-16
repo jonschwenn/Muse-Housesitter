@@ -871,3 +871,37 @@ handoff's "license not chosen; don't publish."
   but a new mechanism for a rare case); ordering by a monotonic sequence
   (changes the id format).
 - **Status:** in effect from PR #64.
+
+### D41. Parallel local test runs (2026-11-16, Jon)
+- **Decision:** add an opt-in, dev-only `parallel` extra with
+  `pytest-xdist==3.8.0`. Use `pytest -n auto` to run the full suite across
+  all CPU cores locally. While iterating, run tests for the code changed;
+  run the full suite once before handoff and again after a rebase or merge
+  from `main`. CI is unchanged: it installs only `.[dev]`, runs serially,
+  and keeps pytest plugin autoload disabled (D16).
+- **Why:** on the 8-core dev host with Python 3.9.25, the full suite takes
+  101.5 s serially and 18–22 s with `-n auto`, with identical counts:
+  2926 passed, 32 skipped. Muse Spark found no failures or flakes in
+  10 runs with `-n auto`, five with `-n 16`, three with `-n auto` under
+  full CPU load, and one with `--dist loadfile`. Past agent sessions ran
+  the full suite 286 times, about 7.3 hours of waiting, often after every
+  small edit.
+- **Rejected:** adding xdist to `dev` (CI installs `dev`, and the D16 setup
+  and comment in `ci.yml` rely on no third-party pytest plugin being
+  installed); turning on `-n auto` in CI (touches D16's test-integrity
+  setup, GitHub runners have fewer cores, and needs a separate decision
+  from Jon); `-n auto` in pytest `addopts` (pytest errors when the extra
+  isn't installed, and starting workers slows small targeted runs).
+- **Known limit:** spreading tests across workers can hide a dependency on
+  state left by an earlier test in another file. CI's serial run is the
+  backstop: if CI fails while `-n auto` is green locally, rerun serially
+  with `.venv/bin/pytest` to reproduce.
+  `TestStartup::test_start_lines_and_clean_exit` and
+  `TestStartup::test_lan_bind_warns` in `tests/core/test_serve.py` both bind
+  real port 8080. Either can fail with "address in use" if another worker,
+  a running `housesitter serve`, `scripts/dev_dashboard.py`, or another
+  worktree's test run holds that port. The port conflict predates this
+  change; two workers did not collide in 20 forced attempts. If it happens,
+  rerun; changing those tests is a separate change.
+- **Status:** in effect from this PR. A two-way door, like other
+  test-practice entries.
