@@ -20,6 +20,9 @@ dev = ["pytest==8.4.2", "ruff==0.17.4", "setuptools==80.9.0", "wheel==0.45.1"]
 # Dev/CI-only screenshot tooling for scripts/ui_evidence.py. Never a runtime
 # dependency (AGENTS.md rule 4): nothing under src/ may import it.
 ui = ["playwright==1.60.0"]
+# Dev-only local speed-up for `pytest -n auto`. Never a runtime dependency
+# (AGENTS.md rule 4): CI installs only .[dev] and keeps plugin autoload disabled (D16).
+parallel = ["pytest-xdist==3.8.0"]
 
 [project.scripts]
 housesitter = "housesitter.core.cli:main"
