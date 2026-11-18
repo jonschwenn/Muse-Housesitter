@@ -926,6 +926,8 @@ handoff's "license not chosen; don't publish."
   under the plan limits. Ember because it was unavailable for testing.
   Model names in several places because they drift. A permanent choice
   because it can go stale without anyone noticing.
+- **Status:** in effect from this PR. A two-way door: the table is a
+  snapshot, reviewed by 2026-12-18.
 
 **Monthly review**
 
