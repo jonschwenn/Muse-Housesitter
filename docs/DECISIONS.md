@@ -674,6 +674,7 @@ handoff's "license not chosen; don't publish."
   family also gets a look from Jon or another model family. The optional
   deep reviewer comes from a family that did not write the change,
   including when Codex wrote it.
+- Model names superseded by D42.
 
 ### D31. Trusted hygiene scan and a wider protected list (2026-11-11, Jon)
 - **Decision:** the required `ci-guard` check scans the PR head tree as
@@ -905,3 +906,46 @@ handoff's "license not chosen; don't publish."
   rerun; changing those tests is a separate change.
 - **Status:** in effect from this PR. A two-way door, like other
   test-practice entries.
+
+### D42. Model guidance table (2026-11-18, Jon)
+- **Decision.** Put current model choices in the dated table in
+  [AGENTS.md, "How work happens"](../AGENTS.md#how-work-happens).
+  This supersedes D30's model names. The family split and cross-family
+  reviews still follow D30. Review the model choices, effort settings and
+  plan limits monthly.
+- **Why.** Models, plan limits and prices change month to month. New
+  Codex models are available for writing and review. The November
+  bakeoff compared Spark, Wonder and Ember on four tasks. Wonder exhausted
+  the Muse Code plan's five-hour windows in about ten minutes, and a
+  weekly cap applied. Ember refused every request and remains untested.
+  Spark stays on high effort. It crashed on huge integers (`10**400`),
+  used test MACs outside the hygiene ranges, missed vacuous tests in
+  review, and rated a secret leak too low. Muse briefs name hostile
+  inputs and point to the hygiene ranges. Run one Muse task at a time.
+- **Rejected.** Wonder as the default because of the cost of using it
+  under the plan limits. Ember because it was unavailable for testing.
+  Model names in several places because they drift. A permanent choice
+  because it can go stale without anyone noticing.
+- **Status:** in effect from this PR. A two-way door: the table is a
+  snapshot, reviewed by 2026-12-18.
+
+**Monthly review**
+
+1. Check each provider's catalog for new or retired models.
+2. Check plan limits and which limits were reached in the last month.
+3. If a candidate looks better for a role, run a small bakeoff. Test a
+   basic function, code with traps, review with planted bugs, and a design
+   critique. Have another model family grade the results blind. Skip the
+   bakeoff if no candidate looks better.
+4. Update the table and both dates. Add one line to the review log with the
+   date, what was checked, and what changed or "no change". Add a new
+   decision only if the family split changes.
+5. Get Jon's approval as for any other change.
+
+At the next review, recheck Ember and compare Spark at max and high effort.
+Recheck Wonder after the plan or quota changes.
+
+**Review log**
+
+- **2026-11-18.** Compared Spark, Wonder and Ember on four tasks. Kept Spark
+  at high effort and adopted the new Codex writing and review defaults.

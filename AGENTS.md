@@ -71,26 +71,49 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
    includes the output schema, with field names, units, and meanings. Jon
    reviews the spec before code is written.
 3. **Who does the work.** Split work by model family to spread token use
-   across providers and get review from another family (D30):
-   - Muse Spark (`muse-spark-1.3`, provider "Muse Code"): code and tests,
+   across providers and get review from another family (D30).
+
+   - Muse writes code and tests from a spec,
      including adversarial testing that tries to break code.
-   - Codex (`gpt-6.1-sol`): front end (`web/`) and documentation prose
+   - Codex writes the front end (`web/`) and documentation prose
      (`docs/`, `AGENTS.md`, `docs/DECISIONS.md` entries, module `SKILL.md`
      files, and `README.md`, leaving Jon's own introduction as he wrote
      it, D20).
-   - Claude: orchestration, backend design, briefs, final verification,
+   - Claude handles orchestration, backend design, briefs, final verification,
      and PRs.
 
    For every doc, including `docs/ARCHITECTURE.md`, Claude supplies the
-   facts and checks accuracy; Codex writes the prose.
-   Every brief that starts work names its model; gate 2 and gate 3 reviews
+   facts and checks accuracy. Codex writes the prose.
+   Every brief that starts work names its model. Gate 2 and gate 3 reviews
    use a model family other than the one that wrote the change, applying
-   D22's reasoning; the deep review in REVIEW.md stays optional.
+   D22's reasoning. The deep review in REVIEW.md stays optional.
    If the assigned agent is unavailable, or for a small fix found in
    review, another agent may write the change; the PR says so. This changes
    only who writes it: gates 2 and 3 still use a different model family
    from the one that actually wrote each part. A small fix written by the
    reviewer's family also gets a look from Jon or another model family.
+
+   Snapshot as of 2026-11-18. Review by 2026-12-18.
+   After the review-by date, keep using the stale table and tell Jon it
+   needs review before starting new work.
+
+   | Role | Family | Model | Effort | Notes |
+   | --- | --- | --- | --- | --- |
+   | Code and tests from a spec | Muse | `muse-spark-1.3` | high | Muse Code limits apply. Codex fallback. |
+   | Front end and docs prose | Codex | `gpt-6.2-sol` | | |
+   | Gate 2–3, high risk (core, ci-guard, install, secrets) | Codex | `gpt-6.2-astra` | xhigh | Use a different family if Codex wrote the change. |
+   | Gate 2–3, routine | Muse or Codex | `muse-spark-1.3` or `gpt-6.2-astra` | high for Spark | Spark reviews Codex or Claude. Codex reviews Spark. |
+   | Orchestration, backend design, briefs, verification, PRs | Claude | Opus 5.5 | | |
+   | Deep red-team review (optional) and hard design calls | Claude | Fable 5.2 | | Deep review follows REVIEW.md. |
+
+   Update the table monthly using the checklist in
+   [D42](docs/DECISIONS.md#d42-model-guidance-table-2026-11-18-jon).
+
+   - Muse briefs list hostile inputs to cover, including huge and
+     non-finite numbers, control characters, and over-long names. Point
+     to the repo hygiene ranges in Testing rules for test MACs and IPs.
+   - Run one Muse task at a time.
+
 4. **Fixture, then code, then test.** Write an invented upstream fixture
    first, then the code that reads it, then the test that pins the
    normalised output field by field.
@@ -114,9 +137,10 @@ entry in [`docs/DECISIONS.md`](docs/DECISIONS.md).
      (links to GitHub's `@claude`)
    - Codex: `Co-authored-by: Codex <noreply@openai.com>` (links to
      GitHub's `@codex`)
-   - Muse Spark: `Co-authored-by: Muse Spark 1.3 <muse-spark@agents.invalid>`
-     (no official GitHub account yet; `.invalid` can never belong to
-     anyone)
+   - Muse uses `Co-authored-by: Muse <Model> <muse@agents.invalid>`.
+     For example, `Co-authored-by: Muse Spark 1.3 <muse@agents.invalid>`.
+     Muse has no official GitHub account yet. `.invalid` can never belong
+     to anyone.
 
    Never invent an email for an agent: an address someone else owns
    credits them instead. Use only addresses confirmed to link to the
